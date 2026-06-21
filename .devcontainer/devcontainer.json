@@ -1,35 +1,35 @@
 {
-  // VS Code Dev Container for the GB World Editor project.
-  // Put this and the Dockerfile in a .devcontainer/ folder at the repo root,
-  // then "Dev Containers: Reopen in Container".
-  "name": "GB World Editor",
-  "build": {
-    "dockerfile": "Dockerfile",
-    "context": ".."
-  },
-  "workspaceFolder": "/workspace",
-
-  // Serve the editor on http://localhost:8000 and open it automatically.
-  "forwardPorts": [8000],
-  "portsAttributes": {
-    "8000": { "label": "GB World Editor", "onAutoForward": "openBrowser" }
+  "name": "Proost Slide Decks",
+  // Recent Python base image; the Node feature adds npm for Claude Code + tooling.
+  "image": "mcr.microsoft.com/devcontainers/python:3.12",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "lts"
+    }
   },
 
-  // Start a static file server in the background so the editor is reachable as
-  // soon as the container is up. Open gb-world-editor.html from the served root.
-  "postStartCommand": "nohup python -m http.server 8000 >/tmp/http-server.log 2>&1 &",
+  // Installed once when the container is created:
+  //  - Claude Code CLI (the `claude` command, used to drive deck generation)
+  //  - python-pptx so the frontend-slides PPTX import script works
+  //  - playwright (optional) for the skill's PDF export script
+  "postCreateCommand": "npm install -g @anthropic-ai/claude-code && pip install --user pip pillow",
 
   "customizations": {
     "vscode": {
       "extensions": [
+        "anthropic.claude-code",
         "ms-python.python",
-        "ms-azuretools.vscode-docker"
+        "ms-vscode.live-server"
       ],
       "settings": {
-        "python.defaultInterpreterPath": "/usr/local/bin/python"
+        "editor.formatOnSave": true
       }
     }
   },
 
-  "remoteUser": "vscode"
+  // Live-server / preview port for opening built decks in the browser.
+  "forwardPorts": [5500],
+
+  // Friendly note for whoever opens the container.
+  "postAttachCommand": "echo 'Ready'"
 }
