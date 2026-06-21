@@ -1,0 +1,35 @@
+{
+  // VS Code Dev Container for the GB World Editor project.
+  // Put this and the Dockerfile in a .devcontainer/ folder at the repo root,
+  // then "Dev Containers: Reopen in Container".
+  "name": "GB World Editor",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspace",
+
+  // Serve the editor on http://localhost:8000 and open it automatically.
+  "forwardPorts": [8000],
+  "portsAttributes": {
+    "8000": { "label": "GB World Editor", "onAutoForward": "openBrowser" }
+  },
+
+  // Start a static file server in the background so the editor is reachable as
+  // soon as the container is up. Open gb-world-editor.html from the served root.
+  "postStartCommand": "nohup python -m http.server 8000 >/tmp/http-server.log 2>&1 &",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-azuretools.vscode-docker"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python"
+      }
+    }
+  },
+
+  "remoteUser": "vscode"
+}

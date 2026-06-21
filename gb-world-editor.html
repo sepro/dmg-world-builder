@@ -1,0 +1,2332 @@
+<!--
+  GB World Editor - v1
+  A browser-based authoring tool for Pokemon-style Game Boy worlds.
+
+  Hierarchy: 8x8 tile (2bpp) -> 2x2 metatile (16x16) -> 2x2 block (32x32) -> map of blocks.
+  This first version covers: project model, JSON import/export, palette manager,
+  the 8x8 tile editor, and the metatile editor. Blocks, maps, events and GBDK C
+  export come in later passes.
+
+  The project lives in memory only. Use Export to save it to a .json file, and
+  Import to load it back. (Browser storage is intentionally not used here so the
+  same file behaves identically inside a preview and when run locally.)
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GB World Editor</title>
+<style>
+  :root {
+    /* Authentic DMG green, used as real material rather than decoration. */
+    --gb-0: #e0f8d0;  /* lightest shade  (pixel value 0) */
+    --gb-1: #88c070;
+    --gb-2: #346856;
+    --gb-3: #081820;  /* darkest shade   (pixel value 3) */
+
+    --bg:      #06120c;
+    --panel:   #0c2016;
+    --panel-2: #102a1c;
+    --border:  #2c5840;
+    --line:    #18301f;
+    --text:    #d8f0c8;
+    --muted:   #6fa860;
+    --accent:  #b8f25a;  /* selection / active state */
+    --danger:  #e08a5a;  /* over-budget, destructive actions */
+
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.4;
+  }
+
+  #app { display: flex; flex-direction: column; height: 100vh; }
+
+  /* Canvases are pixel art: never smooth them. */
+  canvas { image-rendering: pixelated; image-rendering: crisp-edges; display: block; }
+
+  /* ---- top bar ---- */
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 14px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .brand {
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    white-space: nowrap;
+  }
+  .brand .sub { color: var(--muted); font-weight: 400; letter-spacing: 0.08em; }
+  .topbar .spacer { flex: 1; }
+  .target-tag {
+    color: var(--muted);
+    border: 1px solid var(--line);
+    padding: 2px 8px;
+    white-space: nowrap;
+  }
+
+  /* ---- tabs ---- */
+  .tabs {
+    display: flex;
+    gap: 2px;
+    padding: 0 14px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .tab {
+    appearance: none;
+    background: transparent;
+    color: var(--muted);
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 9px 16px;
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  /* ---- panel layout ---- */
+  #panel { flex: 1; overflow: auto; padding: 16px; }
+  .cols { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+  .col-library { flex: 1 1 320px; min-width: 280px; }
+  .col-editor  { flex: 1 1 380px; min-width: 320px; }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    padding: 14px;
+    margin-bottom: 16px;
+  }
+  .card > h2 {
+    margin: 0 0 12px;
+    font-size: 11px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 700;
+  }
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .row + .row { margin-top: 10px; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label {
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  /* ---- controls ---- */
+  button, select, input[type="text"], input[type="number"] {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    padding: 6px 10px;
+  }
+  button { cursor: pointer; letter-spacing: 0.04em; }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { color: var(--gb-3); background: var(--accent); border-color: var(--accent); font-weight: 700; }
+  button.primary:hover { color: var(--gb-3); filter: brightness(1.1); }
+  button.danger:hover { border-color: var(--danger); color: var(--danger); }
+  button.tiny { padding: 3px 7px; font-size: 11px; }
+  button:disabled { opacity: 0.35; cursor: default; }
+  button:disabled:hover { color: var(--text); border-color: var(--border); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  input[type="color"] {
+    width: 30px; height: 26px; padding: 0;
+    border: 1px solid var(--border); background: var(--panel-2); cursor: pointer;
+  }
+
+  .hint { color: var(--muted); font-size: 11px; }
+  .budget-ok   { color: var(--muted); }
+  .budget-over { color: var(--danger); font-weight: 700; }
+
+  /* ---- libraries (grids of thumbnails) ---- */
+  .lib-grid { display: grid; grid-template-columns: repeat(auto-fill, 40px); gap: 6px; }
+  .lib-cell {
+    position: relative;
+    width: 40px; height: 40px;
+    border: 1px solid var(--border);
+    background: var(--gb-3);
+    cursor: pointer;
+    padding: 0;
+  }
+  .lib-cell:hover { border-color: var(--muted); }
+  .lib-cell.selected { border-color: var(--accent); outline: 1px solid var(--accent); }
+  .lib-cell .idx {
+    position: absolute; bottom: 0; right: 1px;
+    font-size: 9px; color: var(--accent);
+    background: rgba(8,24,32,0.7); padding: 0 2px; pointer-events: none;
+  }
+
+  .metatile-list { display: flex; flex-direction: column; gap: 4px; }
+  .mt-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px; border: 1px solid var(--border); background: var(--panel-2);
+    cursor: pointer;
+  }
+  .mt-row:hover { border-color: var(--muted); }
+  .mt-row.selected { border-color: var(--accent); }
+  .mt-row .mt-name { flex: 1; }
+  .mt-row .mt-meta { color: var(--muted); font-size: 11px; }
+
+  /* ---- tile editor ---- */
+  .editor-canvas { border: 1px solid var(--border); background: var(--gb-3); touch-action: none; cursor: crosshair; }
+  .ink-swatches { display: flex; gap: 6px; }
+  .ink-swatch {
+    width: 34px; height: 34px; border: 2px solid var(--border); cursor: pointer; position: relative;
+  }
+  .ink-swatch.active { border-color: var(--accent); }
+  .ink-swatch .val { position: absolute; bottom: 0; right: 2px; font-size: 9px; color: var(--accent); }
+  .tool-btn.active { color: var(--accent); border-color: var(--accent); }
+
+  /* ---- tile animation ---- */
+  .anim-badge {
+    position: absolute; top: 0; left: 1px;
+    font-size: 9px; color: var(--gb-3); background: var(--accent);
+    padding: 0 2px; pointer-events: none; font-weight: 700;
+  }
+  .frame-strip { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .frame-cell {
+    position: relative; width: 44px; height: 44px;
+    border: 1px solid var(--border); background: var(--gb-3); cursor: pointer; padding: 0;
+  }
+  .frame-cell:hover { border-color: var(--muted); }
+  .frame-cell.selected { border-color: var(--accent); outline: 1px solid var(--accent); }
+  .frame-cell .fnum {
+    position: absolute; bottom: 0; right: 1px; font-size: 9px; color: var(--accent);
+    background: rgba(8,24,32,0.7); padding: 0 2px; pointer-events: none;
+  }
+  .anim-preview { border: 1px solid var(--border); background: var(--gb-3); }
+
+  /* ---- metatile composer ---- */
+  .composer { display: grid; grid-template-columns: repeat(2, 96px); grid-template-rows: repeat(2, 96px); gap: 2px; background: var(--border); border: 1px solid var(--border); width: max-content; }
+  .composer-cell { width: 96px; height: 96px; background: var(--gb-3); cursor: pointer; padding: 0; border: 2px solid transparent; }
+  .composer-cell.selected { border-color: var(--accent); }
+  .cell-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; }
+
+  /* ---- modal ---- */
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(6,18,12,0.8);
+    display: flex; align-items: center; justify-content: center; z-index: 50; padding: 20px;
+  }
+  .modal {
+    background: var(--panel); border: 1px solid var(--border);
+    max-width: 640px; width: 100%; max-height: 86vh; overflow: auto; padding: 18px;
+  }
+  .modal h2 { margin: 0 0 12px; font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); }
+  .modal textarea {
+    width: 100%; height: 260px; resize: vertical;
+    font-family: var(--mono); font-size: 11px; color: var(--text);
+    background: var(--gb-3); border: 1px solid var(--border); padding: 8px;
+  }
+  .modal-close { float: right; }
+
+  /* ---- map editor ---- */
+  .map-toolbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }
+  .map-toolbar .group { display: flex; align-items: center; gap: 6px; }
+  .map-viewport {
+    position: relative; overflow: auto;
+    width: 100%; height: 60vh; min-height: 360px;
+    border: 1px solid var(--border); background: var(--gb-3);
+    touch-action: none;
+  }
+  .map-canvas { display: block; cursor: crosshair; }
+  .paint-block-preview { width: 34px; height: 34px; border: 1px solid var(--border); background: var(--gb-3); }
+
+  .map-list { display: flex; flex-direction: column; gap: 4px; }
+  .map-row {
+    display: flex; align-items: center; gap: 8px; padding: 7px 8px;
+    border: 1px solid var(--border); background: var(--panel-2); cursor: pointer;
+  }
+  .map-row:hover { border-color: var(--muted); }
+  .map-row.selected { border-color: var(--accent); }
+  .map-row .map-name { flex: 1; }
+  .map-row .map-dims { color: var(--muted); font-size: 11px; }
+
+  .conn-grid {
+    display: grid; grid-template-columns: 1fr 1fr 1fr; grid-template-rows: auto auto auto;
+    gap: 6px; align-items: center; justify-items: center;
+  }
+  .conn-slot { width: 100%; }
+  .conn-slot .cell-label { display: block; text-align: center; margin-bottom: 2px; }
+  .conn-center { color: var(--muted); font-size: 11px; text-align: center; padding: 6px; border: 1px dashed var(--line); width: 100%; }
+  .warn { color: var(--danger); font-size: 11px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header class="topbar">
+    <span class="brand">GB&nbsp;World&nbsp;Editor <span class="sub">v1</span></span>
+    <div class="field" style="flex-direction:row;align-items:center;gap:6px;">
+      <label style="margin:0;">Project</label>
+      <input type="text" id="project-name" style="width:180px;">
+    </div>
+    <span class="target-tag" id="target-tag"></span>
+    <div class="spacer"></div>
+    <button id="btn-undo" title="Undo (Ctrl/Cmd+Z)">Undo</button>
+    <button id="btn-redo" title="Redo (Ctrl/Cmd+Shift+Z)">Redo</button>
+    <button id="btn-new">New</button>
+    <button id="btn-import">Import</button>
+    <button class="primary" id="btn-export">Export</button>
+    <input type="file" id="file-input" accept="application/json,.json" style="display:none;">
+  </header>
+
+  <nav class="tabs">
+    <button class="tab" data-panel="palettes">Palettes</button>
+    <button class="tab" data-panel="tiles">Tiles</button>
+    <button class="tab" data-panel="metatiles">Metatiles</button>
+    <button class="tab" data-panel="blocks">Blocks</button>
+    <button class="tab" data-panel="maps">Maps</button>
+  </nav>
+
+  <main id="panel"></main>
+</div>
+
+<script>
+"use strict";
+
+/* ============================================================
+   Project model
+   ============================================================ */
+
+const FORMAT_VERSION = 1;
+const TILE_PX = 8;          // tile is always 8x8 pixels on Game Boy
+const PIXELS_PER_TILE = TILE_PX * TILE_PX;
+
+// Default behavior types. Direction is folded into the name (ledge_down rather
+// than a separate stored direction) so the metatile needs no behavior payload.
+const DEFAULT_BEHAVIORS = [
+  "normal", "tall_grass", "water",
+  "ledge_up", "ledge_down", "ledge_left", "ledge_right",
+  "warp", "door", "counter",
+];
+
+const COLLISION_OPTIONS = ["walk", "solid"];
+
+// Event types live on a map at metatile (16px) resolution, which is the grid the
+// player actually moves on. Each carries a letter and an editor-only marker color.
+const EVENT_TYPES = {
+  warp:    { label: "Warp",    letter: "W", color: "#5ad6ff" },
+  sign:    { label: "Sign",    letter: "S", color: "#ffd23f" },
+  item:    { label: "Item",    letter: "I", color: "#ff9f45" },
+  npc:     { label: "NPC",     letter: "N", color: "#e06ad6" },
+  trigger: { label: "Trigger", letter: "T", color: "#e0563f" },
+};
+const EVENT_ORDER = ["warp", "sign", "item", "npc", "trigger"];
+const NPC_MOVEMENTS = ["static", "wander", "walk_up_down", "walk_left_right"];
+
+// Build a fresh event with sensible per-type defaults.
+function makeEvent(type, x, y) {
+  const e = { id: 0, type, x, y };   // id is filled in by the caller via genId()
+  if (type === "warp") { e.toMap = null; e.toX = 0; e.toY = 0; }
+  else if (type === "sign") { e.text = ""; }
+  else if (type === "item") { e.item = ""; e.qty = 1; e.flag = ""; }
+  else if (type === "npc") { e.sprite = ""; e.movement = "static"; e.script = ""; }
+  else if (type === "trigger") { e.script = ""; }
+  return e;
+}
+
+function makeDefaultProject() {
+  // nextId hands out unique, stable ids so references survive reordering and
+  // deletion. Array position is only used later when emitting C indices.
+  const project = {
+    formatVersion: FORMAT_VERSION,
+    meta: { name: "Untitled World", target: "GBC, DMG-compatible", tileSize: TILE_PX },
+    nextId: 1,
+    behaviors: [...DEFAULT_BEHAVIORS],
+    palettes: [],
+    tilesets: [],
+    maps: [],
+  };
+
+  const id = () => project.nextId++;
+
+  project.palettes.push(
+    { id: id(), name: "GB Green",  colors: ["#e0f8d0", "#88c070", "#346856", "#081820"] },
+    { id: id(), name: "Grayscale", colors: ["#ffffff", "#aaaaaa", "#555555", "#000000"] },
+  );
+  const pal = project.palettes[0].id;        // demo art uses the GB Green palette
+
+  const tileset = {
+    id: id(),
+    name: "main",
+    tileBudget: 256,                 // DMG-safe count of background tiles in VRAM
+    tiles: [],
+    metatiles: [],
+    blocks: [],
+  };
+  project.tilesets.push(tileset);
+
+  seedDemoContent(project, tileset, pal, id);
+
+  // Remember which palette the tile editor renders with by default.
+  project._displayPaletteId = pal;
+  return project;
+}
+
+// Turn 8 strings of "0".."3" into a flat 64-value pixel array, so the demo art
+// below stays readable as a little picture in the source.
+function rows(...r) { return r.join("").split("").map(Number); }
+
+// Fill a fresh project with a tiny overworld set so the editor is explorable
+// immediately. Nothing here is special; it is ordinary authored content.
+function seedDemoContent(project, ts, pal, id) {
+  const addTile = (name, pixels) => {
+    const tile = { id: id(), name, pixels };
+    ts.tiles.push(tile);
+    return tile.id;
+  };
+
+  // Pixel values map through the GB Green palette: 0 lightest, 3 darkest.
+  const blank = addTile("blank", new Array(PIXELS_PER_TILE).fill(0));
+  const grass = addTile("grass", rows(
+    "11111111", "11121111", "11111111", "11111112",
+    "11111111", "12111111", "11111111", "11111121"));
+  const flower = addTile("flower", rows(
+    "11111111", "11111111", "11000111", "11030111",
+    "11000111", "11111111", "11211111", "11111111"));
+  const water = addTile("water", rows(
+    "22222222", "21122112", "22222222", "22222222",
+    "22211222", "22222222", "21122112", "22222222"));
+  // Animate the water: the wave pattern scrolls down one row per frame.
+  const waterTile = ts.tiles.find(t => t.id === water);
+  waterTile.frameRate = 14;
+  waterTile.frames = [
+    rows("22222222", "22222222", "21122112", "22222222",
+         "22222222", "22211222", "22222222", "21122112"),
+    rows("21122112", "22222222", "22222222", "21122112",
+         "22222222", "22222222", "22211222", "22222222"),
+  ];
+  const tree = addTile("tree", rows(
+    "11333111", "13333311", "33333331", "33333331",
+    "13333311", "11313111", "11313111", "11111111"));
+  const path = addTile("path", rows(
+    "00000000", "00010000", "00000000", "00000100",
+    "00000000", "01000000", "00000000", "00001000"));
+  const wall = addTile("wall", rows(
+    "33333333", "32222223", "32222223", "32222223",
+    "32222223", "32222223", "32222223", "33333333"));
+
+  // Metatiles: 4 tile ids (tl, tr, bl, br), a palette per cell, collision, behavior.
+  const mt = (name, tiles, collision, behavior) => {
+    const m = {
+      id: id(), name,
+      tiles,
+      cellPalettes: [pal, pal, pal, pal],
+      collision, behavior,
+    };
+    ts.metatiles.push(m);
+    return m.id;
+  };
+  const mGrass   = mt("grass",   [grass, grass, grass, grass],     "walk", "normal");
+  const mFlowers = mt("flowers", [grass, flower, flower, grass],   "walk", "tall_grass");
+  const mWater   = mt("water",   [water, water, water, water],     "solid", "water");
+  const mForest  = mt("forest",  [tree, tree, tree, tree],         "solid", "normal");
+  const mPath    = mt("path",    [path, path, path, path],         "walk", "normal");
+  const mWall    = mt("wall",    [wall, wall, wall, wall],         "solid", "normal");
+
+  // Blocks: 4 metatile ids (tl, tr, bl, br).
+  const bl = (name, metatiles) => {
+    const b = { id: id(), name, metatiles };
+    ts.blocks.push(b);
+    return b.id;
+  };
+  const bGrass  = bl("grass field", [mGrass, mGrass, mGrass, mGrass]);
+  const bFlower = bl("flower patch", [mGrass, mFlowers, mFlowers, mGrass]);
+  const bPond   = bl("pond",        [mWater, mWater, mWater, mWater]);
+  const bForest = bl("forest",      [mForest, mForest, mForest, mForest]);
+  const bPath   = bl("path",        [mPath, mPath, mPath, mPath]);
+  const bWall   = bl("wall",        [mWall, mWall, mWall, mWall]);
+
+  // A painted 16x16 demo map: grass field, a forest rim, a pond, a path, flowers.
+  const W = 16, H = 16;
+  const grid = new Array(W * H).fill(bGrass);
+  const set = (x, y, b) => { if (x >= 0 && x < W && y >= 0 && y < H) grid[y * W + x] = b; };
+
+  for (let x = 0; x < W; x++) { set(x, 0, bForest); set(x, H - 1, bForest); }
+  for (let y = 0; y < H; y++) { set(0, y, bForest); set(W - 1, y, bForest); }
+  for (let y = 3; y <= 6; y++) for (let x = 9; x <= 12; x++) set(x, y, bPond); // pond
+  for (let y = 1; y < H - 1; y++) set(4, y, bPath);                            // path
+  set(7, 9, bFlower); set(8, 10, bFlower); set(6, 11, bFlower);               // flowers
+  set(2, 13, bWall);  set(3, 13, bWall);                                      // a bit of wall
+
+  project.maps.push({
+    id: id(),
+    name: "demo map",
+    tilesetId: ts.id,
+    width: W, height: H,
+    blockGrid: grid,
+    connections: { north: null, south: null, east: null, west: null },
+    events: [],
+  });
+
+  void blank; // kept as tile 0 by convention even though the demo map omits it
+}
+
+/* ============================================================
+   App state (selections and tool, kept separate from the saved project)
+   ============================================================ */
+
+const state = {
+  project: makeDefaultProject(),
+  activePanel: "tiles",
+  displayPaletteId: null,
+  selectedTilesetId: null,
+  selectedTileId: null,
+  selectedMetatileId: null,
+  selectedBlockId: null,
+  selectedCell: 0,        // 0..3 within the metatile / block composer
+
+  // Map editor state.
+  selectedMapId: null,
+  paintBlockId: null,     // which block the brush paints
+  mapTool: "paint",       // paint | erase | fill
+  mapZoom: 32,            // pixels per block in the map canvas
+  autoScroll: true,       // scroll the viewport when painting near its edge
+  showMapGrid: true,
+  mapScroll: { left: 0, top: 0 }, // preserved across re-renders
+  mapMode: "blocks",      // blocks | events
+  eventTool: "warp",      // which event type a click places
+  selectedEventId: null,
+  ink: 3,                 // current pixel value to paint (0..3)
+  tool: "pencil",         // pencil | fill | eyedropper
+  selectedFrame: 0,       // which animation frame the tile editor edits (0 = base)
+  animPlay: true,         // global animation playback toggle
+};
+
+function syncSelectionsToProject() {
+  // Point selections at valid objects after a New or Import.
+  const p = state.project;
+  state.displayPaletteId = p._displayPaletteId ?? (p.palettes[0] && p.palettes[0].id);
+  state.selectedTilesetId = p.tilesets[0] ? p.tilesets[0].id : null;
+  const ts = activeTileset();
+  state.selectedTileId = ts && ts.tiles[0] ? ts.tiles[0].id : null;
+  state.selectedMetatileId = ts && ts.metatiles[0] ? ts.metatiles[0].id : null;
+  state.selectedBlockId = ts && ts.blocks[0] ? ts.blocks[0].id : null;
+  state.selectedCell = 0;
+  state.selectedMapId = p.maps[0] ? p.maps[0].id : null;
+  state.paintBlockId = ts && ts.blocks[0] ? ts.blocks[0].id : null;
+}
+
+/* ============================================================
+   Undo / redo history
+
+   Snapshots are full JSON copies of the project. A discrete edit calls
+   snapshot() before mutating; a paint or fill stroke calls it once at
+   pointerdown, so the whole stroke collapses into a single undo step.
+   ============================================================ */
+
+const history = { undo: [], redo: [], limit: 60 };
+
+function currentJson() {
+  state.project._displayPaletteId = state.displayPaletteId;
+  return JSON.stringify(state.project);
+}
+
+// Capture the pre-edit state. Call this immediately before a mutation.
+function snapshot() {
+  history.undo.push(currentJson());
+  if (history.undo.length > history.limit) history.undo.shift();
+  history.redo.length = 0;            // a fresh edit invalidates the redo path
+  updateHistoryButtons();
+}
+
+function restoreFrom(json) {
+  state.project = JSON.parse(json);
+  state.displayPaletteId = state.project._displayPaletteId
+    ?? (state.project.palettes[0] && state.project.palettes[0].id);
+  validateSelections();              // selected ids may have vanished in the restore
+}
+
+function undo() {
+  if (!history.undo.length) return;
+  history.redo.push(currentJson());
+  restoreFrom(history.undo.pop());
+  render();
+}
+function redo() {
+  if (!history.redo.length) return;
+  history.undo.push(currentJson());
+  restoreFrom(history.redo.pop());
+  render();
+}
+
+function resetHistory() {
+  history.undo.length = 0;
+  history.redo.length = 0;
+  updateHistoryButtons();
+}
+
+function updateHistoryButtons() {
+  const u = document.getElementById("btn-undo");
+  const r = document.getElementById("btn-redo");
+  if (u) u.disabled = history.undo.length === 0;
+  if (r) r.disabled = history.redo.length === 0;
+}
+
+// After an undo/redo, keep selections pointing at things that still exist,
+// without yanking the user to a different panel.
+function validateSelections() {
+  const p = state.project;
+  const has = (arr, id) => arr.some(x => x.id === id);
+  if (!has(p.palettes, state.displayPaletteId)) state.displayPaletteId = p.palettes[0] && p.palettes[0].id;
+  if (!has(p.tilesets, state.selectedTilesetId)) state.selectedTilesetId = p.tilesets[0] && p.tilesets[0].id;
+  const ts = activeTileset();
+  if (ts) {
+    if (!has(ts.tiles, state.selectedTileId)) state.selectedTileId = ts.tiles[0] ? ts.tiles[0].id : null;
+    if (!has(ts.metatiles, state.selectedMetatileId)) state.selectedMetatileId = ts.metatiles[0] ? ts.metatiles[0].id : null;
+    if (!has(ts.blocks, state.selectedBlockId)) state.selectedBlockId = ts.blocks[0] ? ts.blocks[0].id : null;
+    if (!has(ts.blocks, state.paintBlockId)) state.paintBlockId = ts.blocks[0] ? ts.blocks[0].id : null;
+  }
+  if (!has(p.maps, state.selectedMapId)) state.selectedMapId = p.maps[0] ? p.maps[0].id : null;
+  const selMap = p.maps.find(m => m.id === state.selectedMapId);
+  if (selMap && !(selMap.events || []).some(e => e.id === state.selectedEventId)) state.selectedEventId = null;
+  if (state.selectedCell < 0 || state.selectedCell > 3) state.selectedCell = 0;
+}
+
+/* ============================================================
+   Lookups
+   ============================================================ */
+
+const genId = () => state.project.nextId++;
+const activeTileset = () => state.project.tilesets.find(t => t.id === state.selectedTilesetId) || null;
+const paletteById = (id) => state.project.palettes.find(p => p.id === id) || null;
+const colorsForPalette = (id) => {
+  const pal = paletteById(id);
+  return pal ? pal.colors : ["#000000", "#000000", "#000000", "#000000"];
+};
+const tileById = (ts, id) => ts.tiles.find(t => t.id === id) || null;
+const metatileById = (ts, id) => ts.metatiles.find(m => m.id === id) || null;
+const blockById = (ts, id) => ts.blocks.find(b => b.id === id) || null;
+
+// How many metatiles reference a given tile (used to guard deletion).
+function countTileReferences(ts, tileId) {
+  return ts.metatiles.reduce((n, m) => n + m.tiles.filter(t => t === tileId).length, 0);
+}
+
+// How many blocks reference a given metatile (guards metatile deletion).
+function countMetatileReferences(ts, metatileId) {
+  return ts.blocks.reduce((n, b) => n + b.metatiles.filter(mt => mt === metatileId).length, 0);
+}
+
+// How many map cells reference a given block (guards block deletion). Maps are
+// authored in a later pass, so this is zero for now but stays correct once they exist.
+function countBlockReferences(blockId) {
+  return state.project.maps.reduce(
+    (n, map) => n + (map.blockGrid ? map.blockGrid.filter(b => b === blockId).length : 0), 0);
+}
+
+const mapById = (id) => state.project.maps.find(m => m.id === id) || null;
+const tilesetForMap = (map) => state.project.tilesets.find(t => t.id === map.tilesetId) || null;
+
+const DIRECTIONS = ["north", "south", "east", "west"];
+const OPPOSITE = { north: "south", south: "north", east: "west", west: "east" };
+
+function createMap(name, tilesetId, width, height) {
+  return {
+    id: genId(),
+    name,
+    tilesetId,
+    width,
+    height,
+    blockGrid: new Array(width * height).fill(null), // row-major, null = empty
+    connections: { north: null, south: null, east: null, west: null }, // {mapId, offset}
+    events: [],                                       // authored in a later pass
+  };
+}
+
+// Resize a map, anchoring existing content to the top-left so painted work survives.
+function resizeMap(map, newW, newH) {
+  const next = new Array(newW * newH).fill(null);
+  for (let y = 0; y < Math.min(map.height, newH); y++) {
+    for (let x = 0; x < Math.min(map.width, newW); x++) {
+      next[y * newW + x] = map.blockGrid[y * map.width + x];
+    }
+  }
+  map.blockGrid = next;
+  map.width = newW;
+  map.height = newH;
+  // Drop events that now fall outside the map (coords are in metatile cells).
+  map.events = (map.events || []).filter(e => e.x < newW * 2 && e.y < newH * 2);
+}
+
+// Which other maps connect to this one (so deletion can clean up dangling links).
+function mapsConnectingTo(mapId) {
+  return state.project.maps.filter(m =>
+    DIRECTIONS.some(d => m.connections[d] && m.connections[d].mapId === mapId));
+}
+
+/* ============================================================
+   Drawing helpers
+   ============================================================ */
+
+// Paint an 8x8 pixel array onto a context using a 4-color palette, one filled
+// rect per pixel. This stays crisp at any integer scale without smoothing.
+function drawPixels(ctx, pixels, colors, scale, ox = 0, oy = 0) {
+  for (let y = 0; y < TILE_PX; y++) {
+    for (let x = 0; x < TILE_PX; x++) {
+      ctx.fillStyle = colors[pixels[y * TILE_PX + x]];
+      ctx.fillRect(ox + x * scale, oy + y * scale, scale, scale);
+    }
+  }
+}
+
+// Draw a tile's base image (frame 0). Composite previews (metatiles, blocks,
+// maps) use this, so they always show the static base frame.
+function drawTile(ctx, tile, colors, scale, ox = 0, oy = 0) {
+  drawPixels(ctx, tile.pixels, colors, scale, ox, oy);
+}
+
+/* ---- tile animation ----
+   A tile's pixels are frame 0; tile.frames holds any extra frames. frameRate is
+   how many 60Hz ticks each frame is shown. The animator redraws registered
+   standalone tile canvases (library, pickers, editor preview) in sync. */
+
+function frameCountFor(tile) { return 1 + (tile.frames ? tile.frames.length : 0); }
+function tileFrames(tile) { return [tile.pixels].concat(tile.frames || []); }
+function isAnimated(tile) { return frameCountFor(tile) > 1; }
+
+function currentFrameIndex(tile) {
+  const n = frameCountFor(tile);
+  if (n <= 1) return 0;
+  const ticks = performance.now() / (1000 / 60);
+  const rate = Math.max(1, tile.frameRate || 15);
+  return Math.floor(ticks / rate) % n;
+}
+
+const animator = { targets: [], raf: 0 };
+
+// Draw a tile into a standalone canvas, cycling frames if it is animated and
+// playback is on. Registers the canvas so the animator keeps it moving.
+function paintTileCanvas(canvas, tile, colors, scale) {
+  const ctx = canvas.getContext("2d");
+  const playing = state.animPlay && isAnimated(tile);
+  const idx = playing ? currentFrameIndex(tile) : 0;
+  drawPixels(ctx, tileFrames(tile)[idx], colors, scale);
+  if (playing) animator.targets.push({ canvas, tile, colors, scale, last: idx });
+}
+
+function animLoop() {
+  animator.raf = 0;
+  let stillAnimating = false;
+  for (const t of animator.targets) {
+    if (!isAnimated(t.tile)) continue;
+    stillAnimating = true;
+    const idx = currentFrameIndex(t.tile);
+    if (idx !== t.last) {
+      t.last = idx;
+      drawPixels(t.canvas.getContext("2d"), tileFrames(t.tile)[idx], t.colors, t.scale);
+    }
+  }
+  if (stillAnimating && state.animPlay) animator.raf = requestAnimationFrame(animLoop);
+}
+function startAnimator() {
+  if (animator.raf || !state.animPlay) return;
+  if (animator.targets.some(t => isAnimated(t.tile))) animator.raf = requestAnimationFrame(animLoop);
+}
+function stopAnimator() {
+  if (animator.raf) { cancelAnimationFrame(animator.raf); animator.raf = 0; }
+}
+
+// A small checker pattern signals an empty (unassigned) metatile cell.
+function drawEmptyCell(ctx, size, ox = 0, oy = 0) {
+  const step = size / 4;
+  for (let y = 0; y < 4; y++) {
+    for (let x = 0; x < 4; x++) {
+      ctx.fillStyle = (x + y) % 2 === 0 ? "#15281c" : "#0c1c12";
+      ctx.fillRect(ox + x * step, oy + y * step, step, step);
+    }
+  }
+}
+
+// Render a complete metatile (its 4 tile cells, each with its own palette).
+function drawMetatile(ctx, ts, metatile, scale, ox = 0, oy = 0) {
+  const offsets = [[0, 0], [1, 0], [0, 1], [1, 1]]; // tl, tr, bl, br
+  for (let i = 0; i < 4; i++) {
+    const [cx, cy] = offsets[i];
+    const px = ox + cx * TILE_PX * scale;
+    const py = oy + cy * TILE_PX * scale;
+    const tileId = metatile.tiles[i];
+    const tile = tileId != null ? tileById(ts, tileId) : null;
+    if (tile) {
+      drawTile(ctx, tile, colorsForPalette(metatile.cellPalettes[i]), scale, px, py);
+    } else {
+      drawEmptyCell(ctx, TILE_PX * scale, px, py);
+    }
+  }
+}
+
+// Render a complete block (its 4 metatile cells). One metatile spans 2 tiles,
+// so each cell is offset by 2 * TILE_PX at the given per-tile-pixel scale.
+function drawBlock(ctx, ts, block, scale, ox = 0, oy = 0) {
+  const offsets = [[0, 0], [1, 0], [0, 1], [1, 1]]; // tl, tr, bl, br
+  const cellPx = 2 * TILE_PX * scale; // a metatile is 16 px wide
+  for (let i = 0; i < 4; i++) {
+    const [cx, cy] = offsets[i];
+    const px = ox + cx * cellPx;
+    const py = oy + cy * cellPx;
+    const metatileId = block.metatiles[i];
+    const metatile = metatileId != null ? metatileById(ts, metatileId) : null;
+    if (metatile) {
+      drawMetatile(ctx, ts, metatile, scale, px, py);
+    } else {
+      drawEmptyCell(ctx, cellPx, px, py);
+    }
+  }
+}
+
+/* ============================================================
+   Rendering: top bar and tabs
+   ============================================================ */
+
+function renderTopBar() {
+  document.getElementById("project-name").value = state.project.meta.name;
+  document.getElementById("target-tag").textContent = state.project.meta.target;
+  updateHistoryButtons();
+}
+
+function renderTabs() {
+  document.querySelectorAll(".tab").forEach(tab => {
+    tab.classList.toggle("active", tab.dataset.panel === state.activePanel);
+  });
+}
+
+function render() {
+  stopAnimator();
+  animator.targets = [];   // rebuilt as panels draw their animated tile canvases
+  renderTopBar();
+  renderTabs();
+  const panel = document.getElementById("panel");
+  panel.innerHTML = "";
+  if (state.activePanel === "palettes") renderPalettesPanel(panel);
+  else if (state.activePanel === "tiles") renderTilesPanel(panel);
+  else if (state.activePanel === "metatiles") renderMetatilesPanel(panel);
+  else if (state.activePanel === "blocks") renderBlocksPanel(panel);
+  else if (state.activePanel === "maps") renderMapsPanel(panel);
+  startAnimator();
+}
+
+/* ============================================================
+   Panel: Palettes
+   ============================================================ */
+
+function renderPalettesPanel(root) {
+  const card = el("div", "card");
+  card.appendChild(el("h2", null, "Palettes"));
+  card.appendChild(el("p", "hint",
+    "On GBC each metatile cell picks one of these. On DMG color is ignored and " +
+    "pixel values 0-3 map to the four grays, so layout looks identical on both."));
+
+  state.project.palettes.forEach(pal => {
+    const row = el("div", "row");
+    row.style.marginTop = "12px";
+
+    // Live preview of the four shades.
+    const preview = document.createElement("canvas");
+    preview.width = 4 * 18; preview.height = 18;
+    const pctx = preview.getContext("2d");
+    const paintPreview = () => {
+      pal.colors.forEach((c, i) => { pctx.fillStyle = c; pctx.fillRect(i * 18, 0, 18, 18); });
+    };
+    paintPreview();
+    preview.style.border = "1px solid var(--border)";
+
+    const nameInput = inputText(pal.name, 140);
+    nameInput.addEventListener("input", () => { pal.name = nameInput.value; });
+
+    const colorInputs = pal.colors.map((c, i) => {
+      const ci = document.createElement("input");
+      ci.type = "color"; ci.value = c;
+      ci.title = "Pixel value " + i;
+      ci.addEventListener("input", () => { pal.colors[i] = ci.value; paintPreview(); });
+      return ci;
+    });
+
+    const useBtn = el("button", "tiny", state.displayPaletteId === pal.id ? "Editing with this" : "Edit with this");
+    useBtn.addEventListener("click", () => {
+      state.displayPaletteId = pal.id;
+      state.project._displayPaletteId = pal.id;
+      render();
+    });
+
+    const delBtn = el("button", "tiny danger", "Delete");
+    delBtn.addEventListener("click", () => {
+      if (state.project.palettes.length <= 1) { alert("Keep at least one palette."); return; }
+      snapshot();
+      state.project.palettes = state.project.palettes.filter(p => p.id !== pal.id);
+      // Repoint any cell that referenced the removed palette.
+      const fallback = state.project.palettes[0].id;
+      state.project.tilesets.forEach(ts => ts.metatiles.forEach(m => {
+        m.cellPalettes = m.cellPalettes.map(pid => paletteById(pid) ? pid : fallback);
+      }));
+      if (state.displayPaletteId === pal.id) state.displayPaletteId = fallback;
+      render();
+    });
+
+    row.append(preview, nameInput, ...colorInputs, useBtn, delBtn);
+    card.appendChild(row);
+  });
+
+  const addBtn = el("button", null, "+ Add palette");
+  addBtn.style.marginTop = "16px";
+  addBtn.addEventListener("click", () => {
+    snapshot();
+    state.project.palettes.push({
+      id: genId(), name: "Palette " + (state.project.palettes.length + 1),
+      colors: ["#e0f8d0", "#88c070", "#346856", "#081820"],
+    });
+    render();
+  });
+  card.appendChild(addBtn);
+
+  root.appendChild(card);
+}
+
+/* ============================================================
+   Panel: Tiles
+   ============================================================ */
+
+const EDIT_SCALE = 40;  // pixels per tile-pixel in the big editing canvas
+
+function renderTilesPanel(root) {
+  const ts = activeTileset();
+  if (!ts) { root.appendChild(el("p", "hint", "No tileset.")); return; }
+
+  const cols = el("div", "cols");
+
+  /* ---- left: tile library ---- */
+  const lib = el("div", "card col-library");
+  lib.appendChild(el("h2", null, "Tiles in " + ts.name));
+
+  const used = ts.tiles.length;
+  const budget = el("p", used > ts.tileBudget ? "budget-over" : "budget-ok",
+    used + " / " + ts.tileBudget + " tiles" + (used > ts.tileBudget ? "  (over VRAM budget)" : ""));
+  lib.appendChild(budget);
+
+  const grid = el("div", "lib-grid");
+  ts.tiles.forEach((tile, index) => {
+    const cell = document.createElement("button");
+    cell.className = "lib-cell" + (tile.id === state.selectedTileId ? " selected" : "");
+    const c = document.createElement("canvas");
+    c.width = 38; c.height = 38;
+    paintTileCanvas(c, tile, colorsForPalette(state.displayPaletteId), 38 / TILE_PX);
+    cell.appendChild(c);
+    if (isAnimated(tile)) cell.appendChild(el("span", "anim-badge", "\u25B6" + frameCountFor(tile)));
+    cell.appendChild(el("span", "idx", String(index)));
+    cell.addEventListener("click", () => { state.selectedTileId = tile.id; state.selectedFrame = 0; render(); });
+    grid.appendChild(cell);
+  });
+  lib.appendChild(grid);
+
+  const libBtns = el("div", "row");
+  libBtns.style.marginTop = "12px";
+  const addBtn = el("button", null, "+ New tile");
+  addBtn.addEventListener("click", () => {
+    snapshot();
+    const t = { id: genId(), pixels: new Array(PIXELS_PER_TILE).fill(0) };
+    ts.tiles.push(t); state.selectedTileId = t.id; state.selectedFrame = 0; render();
+  });
+  const dupBtn = el("button", null, "Duplicate");
+  dupBtn.addEventListener("click", () => {
+    const src = tileById(ts, state.selectedTileId);
+    if (!src) return;
+    snapshot();
+    const t = { id: genId(), pixels: [...src.pixels] };
+    if (src.frames) { t.frames = src.frames.map(f => [...f]); t.frameRate = src.frameRate; }
+    ts.tiles.push(t); state.selectedTileId = t.id; state.selectedFrame = 0; render();
+  });
+  const delBtn = el("button", "danger", "Delete");
+  delBtn.addEventListener("click", () => {
+    const tile = tileById(ts, state.selectedTileId);
+    if (!tile) return;
+    if (ts.tiles.length <= 1) { alert("Keep at least one tile."); return; }
+    const refs = countTileReferences(ts, tile.id);
+    if (refs > 0) { alert("This tile is used by " + refs + " metatile cell(s). Clear it there first."); return; }
+    snapshot();
+    ts.tiles = ts.tiles.filter(t => t.id !== tile.id);
+    state.selectedTileId = ts.tiles[0].id; render();
+  });
+  libBtns.append(addBtn, dupBtn, delBtn);
+  lib.appendChild(libBtns);
+
+  cols.appendChild(lib);
+
+  /* ---- right: pixel editor ---- */
+  const ed = el("div", "card col-editor");
+  ed.appendChild(el("h2", null, "Tile editor"));
+
+  const tile = tileById(ts, state.selectedTileId);
+  if (!tile) { ed.appendChild(el("p", "hint", "Select a tile.")); cols.appendChild(ed); root.appendChild(cols); return; }
+
+  const colors = colorsForPalette(state.displayPaletteId);
+
+  // The editor edits one frame at a time. Frame 0 is the tile's base pixels.
+  const frameCount = frameCountFor(tile);
+  if (state.selectedFrame >= frameCount) state.selectedFrame = 0;
+  const editPixels = () => state.selectedFrame === 0 ? tile.pixels : tile.frames[state.selectedFrame - 1];
+
+  // Ink picker: four swatches drawn in the current display palette.
+  const inkRow = el("div", "row");
+  const inks = el("div", "ink-swatches");
+  for (let v = 0; v < 4; v++) {
+    const sw = el("button", "ink-swatch" + (state.ink === v ? " active" : ""));
+    sw.style.background = colors[v];
+    sw.appendChild(el("span", "val", String(v)));
+    sw.title = "Pixel value " + v;
+    sw.addEventListener("click", () => { state.ink = v; render(); });
+    inks.appendChild(sw);
+  }
+  inkRow.appendChild(el("span", "cell-label", "Ink"));
+  inkRow.appendChild(inks);
+  ed.appendChild(inkRow);
+
+  // Tools.
+  const toolRow = el("div", "row");
+  toolRow.style.marginTop = "10px";
+  ["pencil", "fill", "eyedropper"].forEach(name => {
+    const b = el("button", "tool-btn" + (state.tool === name ? " active" : ""), name);
+    b.addEventListener("click", () => { state.tool = name; render(); });
+    toolRow.appendChild(b);
+  });
+  const clearBtn = el("button", "danger", "Clear");
+  clearBtn.addEventListener("click", () => { snapshot(); editPixels().fill(0); render(); });
+  toolRow.appendChild(clearBtn);
+  ed.appendChild(toolRow);
+
+  ed.appendChild(spacer(8));
+  ed.appendChild(el("span", "cell-label",
+    "Editing " + (state.selectedFrame === 0 ? "base frame" : "frame " + state.selectedFrame)));
+
+  // The drawing surface. Internal size matches CSS size so offsetX maps directly.
+  const canvas = document.createElement("canvas");
+  canvas.className = "editor-canvas";
+  canvas.width = TILE_PX * EDIT_SCALE;
+  canvas.height = TILE_PX * EDIT_SCALE;
+  canvas.style.marginTop = "8px";
+  const ctx = canvas.getContext("2d");
+
+  const repaintEditor = () => {
+    drawPixels(ctx, editPixels(), colors, EDIT_SCALE);
+    // Pixel grid for orientation.
+    ctx.strokeStyle = "rgba(224,248,208,0.12)";
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= TILE_PX; i++) {
+      const p = i * EDIT_SCALE + 0.5;
+      ctx.beginPath(); ctx.moveTo(p, 0); ctx.lineTo(p, canvas.height); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, p); ctx.lineTo(canvas.width, p); ctx.stroke();
+    }
+  };
+  repaintEditor();
+
+  const pixelAt = (ev) => {
+    const x = Math.floor(ev.offsetX / EDIT_SCALE);
+    const y = Math.floor(ev.offsetY / EDIT_SCALE);
+    if (x < 0 || x > 7 || y < 0 || y > 7) return null;
+    return { x, y };
+  };
+
+  const applyAt = (ev) => {
+    const pos = pixelAt(ev);
+    if (!pos) return;
+    const px = editPixels();
+    if (state.tool === "eyedropper") {
+      state.ink = px[pos.y * TILE_PX + pos.x];
+      render();                       // refresh the active ink swatch
+      return;
+    }
+    if (state.tool === "fill") {
+      floodFill(px, pos.x, pos.y, state.ink);
+    } else {
+      px[pos.y * TILE_PX + pos.x] = state.ink;
+    }
+    repaintEditor();
+  };
+
+  let painting = false;
+  canvas.addEventListener("pointerdown", (ev) => {
+    if (state.tool !== "eyedropper") snapshot();  // whole stroke = one undo step
+    painting = state.tool === "pencil";  // only the pencil drags
+    applyAt(ev);
+  });
+  canvas.addEventListener("pointermove", (ev) => { if (painting) applyAt(ev); });
+  // Stop painting anywhere, then refresh the library thumbnail of this tile.
+  const stop = () => { if (painting) { painting = false; refreshTileThumb(ts, tile); } };
+  canvas.addEventListener("pointerup", stop);
+  canvas.addEventListener("pointerleave", stop);
+  ed.appendChild(canvas);
+
+  // ---- Animation frames ----
+  ed.appendChild(spacer(14));
+  ed.appendChild(el("span", "cell-label", "Animation frames (click to edit, + to add)"));
+  ed.appendChild(spacer(6));
+
+  const strip = el("div", "frame-strip");
+  tileFrames(tile).forEach((framePixels, i) => {
+    const fc = el("button", "frame-cell" + (state.selectedFrame === i ? " selected" : ""));
+    const fcanvas = document.createElement("canvas");
+    fcanvas.width = 42; fcanvas.height = 42;
+    drawPixels(fcanvas.getContext("2d"), framePixels, colors, 42 / TILE_PX);
+    fc.appendChild(fcanvas);
+    fc.appendChild(el("span", "fnum", i === 0 ? "base" : String(i)));
+    fc.addEventListener("click", () => { state.selectedFrame = i; render(); });
+    strip.appendChild(fc);
+  });
+  const addFrame = el("button", "frame-cell", "+");
+  addFrame.style.fontSize = "20px";
+  addFrame.title = "Add a frame (copies the current frame)";
+  addFrame.addEventListener("click", () => {
+    snapshot();
+    if (!tile.frames) tile.frames = [];
+    if (!tile.frameRate) tile.frameRate = 15;
+    tile.frames.push([...editPixels()]);     // seed the new frame from the current one
+    state.selectedFrame = frameCountFor(tile) - 1;
+    render();
+  });
+  strip.appendChild(addFrame);
+  ed.appendChild(strip);
+
+  ed.appendChild(spacer(10));
+  const fctl = el("div", "row");
+  const delFrame = el("button", "tiny danger", "Delete frame");
+  delFrame.disabled = state.selectedFrame === 0;    // the base frame stays
+  delFrame.addEventListener("click", () => {
+    if (state.selectedFrame === 0) return;
+    snapshot();
+    tile.frames.splice(state.selectedFrame - 1, 1);
+    if (tile.frames.length === 0) delete tile.frames;
+    state.selectedFrame = 0;
+    render();
+  });
+  fctl.appendChild(delFrame);
+
+  if (isAnimated(tile)) {
+    const rateField = el("div", "field");
+    rateField.appendChild(label("Ticks / frame (60 = 1s)"));
+    const rate = numberInput(tile.frameRate || 15, 1, 240);
+    rate.addEventListener("change", () => { snapshot(); tile.frameRate = clampInt(rate.value, 1, 240); render(); });
+    rateField.appendChild(rate);
+    fctl.appendChild(rateField);
+
+    const prevWrap = el("div", "group");
+    prevWrap.appendChild(el("span", "cell-label", "Preview"));
+    const prev = document.createElement("canvas");
+    prev.className = "anim-preview";
+    prev.width = 48; prev.height = 48;
+    paintTileCanvas(prev, tile, colors, 48 / TILE_PX);
+    prevWrap.appendChild(prev);
+    fctl.appendChild(prevWrap);
+
+    const playBtn = el("button", "tiny" + (state.animPlay ? " tool-btn active" : ""), state.animPlay ? "Pause" : "Play");
+    playBtn.addEventListener("click", () => { state.animPlay = !state.animPlay; render(); });
+    fctl.appendChild(playBtn);
+  }
+  ed.appendChild(fctl);
+
+  cols.appendChild(ed);
+  root.appendChild(cols);
+}
+
+// Redraw a single library thumbnail without rebuilding the whole panel, so
+// dragging in the editor stays smooth.
+function refreshTileThumb(ts, tile) {
+  const index = ts.tiles.indexOf(tile);
+  const cells = document.querySelectorAll(".lib-grid .lib-cell");
+  const cell = cells[index];
+  if (!cell) return;
+  const c = cell.querySelector("canvas");
+  drawTile(c.getContext("2d"), tile, colorsForPalette(state.displayPaletteId), 38 / TILE_PX);
+}
+
+function floodFill(pixels, x, y, newInk) {
+  const target = pixels[y * TILE_PX + x];
+  if (target === newInk) return;
+  const stack = [[x, y]];
+  while (stack.length) {
+    const [cx, cy] = stack.pop();
+    if (cx < 0 || cx > 7 || cy < 0 || cy > 7) continue;
+    if (pixels[cy * TILE_PX + cx] !== target) continue;
+    pixels[cy * TILE_PX + cx] = newInk;
+    stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
+  }
+}
+
+/* ============================================================
+   Panel: Metatiles
+   ============================================================ */
+
+function renderMetatilesPanel(root) {
+  const ts = activeTileset();
+  if (!ts) { root.appendChild(el("p", "hint", "No tileset.")); return; }
+
+  const cols = el("div", "cols");
+
+  /* ---- left: metatile list ---- */
+  const lib = el("div", "card col-library");
+  lib.appendChild(el("h2", null, "Metatiles in " + ts.name));
+
+  if (ts.metatiles.length === 0) {
+    lib.appendChild(el("p", "hint", "No metatiles yet. Create one to start composing 16x16 cells."));
+  }
+
+  const list = el("div", "metatile-list");
+  ts.metatiles.forEach((m, index) => {
+    const row = el("div", "mt-row" + (m.id === state.selectedMetatileId ? " selected" : ""));
+    const c = document.createElement("canvas");
+    c.width = 32; c.height = 32;
+    drawMetatile(c.getContext("2d"), ts, m, 32 / (TILE_PX * 2));
+    c.style.border = "1px solid var(--border)";
+    const name = el("span", "mt-name", "#" + index + "  " + m.name);
+    const meta = el("span", "mt-meta", m.collision + " / " + m.behavior);
+    row.append(c, name, meta);
+    row.addEventListener("click", () => { state.selectedMetatileId = m.id; state.selectedCell = 0; render(); });
+    list.appendChild(row);
+  });
+  lib.appendChild(list);
+
+  const libBtns = el("div", "row");
+  libBtns.style.marginTop = "12px";
+  const addBtn = el("button", null, "+ New metatile");
+  addBtn.addEventListener("click", () => {
+    snapshot();
+    const firstPalette = state.project.palettes[0].id;
+    const m = {
+      id: genId(),
+      name: "metatile",
+      tiles: [null, null, null, null],          // tl, tr, bl, br tile ids
+      cellPalettes: [firstPalette, firstPalette, firstPalette, firstPalette],
+      collision: "walk",
+      behavior: "normal",
+    };
+    ts.metatiles.push(m);
+    state.selectedMetatileId = m.id; state.selectedCell = 0; render();
+  });
+  const dupBtn = el("button", null, "Duplicate");
+  dupBtn.addEventListener("click", () => {
+    const src = metatileById(ts, state.selectedMetatileId);
+    if (!src) return;
+    snapshot();
+    const m = {
+      id: genId(), name: src.name + " copy",
+      tiles: [...src.tiles], cellPalettes: [...src.cellPalettes],
+      collision: src.collision, behavior: src.behavior,
+    };
+    ts.metatiles.push(m);
+    state.selectedMetatileId = m.id; state.selectedCell = 0; render();
+  });
+  const delBtn = el("button", "danger", "Delete");
+  delBtn.addEventListener("click", () => {
+    const m = metatileById(ts, state.selectedMetatileId);
+    if (!m) return;
+    const refs = countMetatileReferences(ts, m.id);
+    if (refs > 0) { alert("This metatile is used by " + refs + " block cell(s). Clear it there first."); return; }
+    snapshot();
+    ts.metatiles = ts.metatiles.filter(x => x.id !== m.id);
+    state.selectedMetatileId = ts.metatiles[0] ? ts.metatiles[0].id : null;
+    render();
+  });
+  libBtns.append(addBtn, dupBtn, delBtn);
+  lib.appendChild(libBtns);
+  cols.appendChild(lib);
+
+  /* ---- right: composer ---- */
+  const ed = el("div", "card col-editor");
+  ed.appendChild(el("h2", null, "Metatile editor"));
+
+  const m = metatileById(ts, state.selectedMetatileId);
+  if (!m) { ed.appendChild(el("p", "hint", "Select or create a metatile.")); cols.appendChild(ed); root.appendChild(cols); return; }
+
+  // Name.
+  const nameField = el("div", "field");
+  nameField.appendChild(label("Name"));
+  const nameInput = inputText(m.name, 200);
+  nameInput.addEventListener("input", () => { m.name = nameInput.value; });
+  nameField.appendChild(nameInput);
+  ed.appendChild(nameField);
+
+  // Composer: a 2x2 grid of cells. Click selects a cell; clicking a tile in the
+  // picker below assigns it to the selected cell.
+  ed.appendChild(spacer(12));
+  ed.appendChild(el("span", "cell-label", "Layout (click a cell, then pick a tile)"));
+  ed.appendChild(spacer(6));
+  const composer = el("div", "composer");
+  const COMP_SCALE = 96 / TILE_PX;
+  for (let i = 0; i < 4; i++) {
+    const cell = el("button", "composer-cell" + (state.selectedCell === i ? " selected" : ""));
+    const c = document.createElement("canvas");
+    c.width = 96; c.height = 96;
+    const cctx = c.getContext("2d");
+    const tileId = m.tiles[i];
+    const tile = tileId != null ? tileById(ts, tileId) : null;
+    if (tile) drawTile(cctx, tile, colorsForPalette(m.cellPalettes[i]), COMP_SCALE);
+    else drawEmptyCell(cctx, 96);
+    cell.appendChild(c);
+    cell.addEventListener("click", () => { state.selectedCell = i; render(); });
+    composer.appendChild(cell);
+  }
+  ed.appendChild(composer);
+
+  // Per-cell palette assignment (GBC). DMG ignores this.
+  ed.appendChild(spacer(12));
+  const palField = el("div", "field");
+  palField.appendChild(label("Cell " + state.selectedCell + " palette (GBC)"));
+  const palSelect = document.createElement("select");
+  state.project.palettes.forEach(p => {
+    const opt = document.createElement("option");
+    opt.value = p.id; opt.textContent = p.name;
+    if (p.id === m.cellPalettes[state.selectedCell]) opt.selected = true;
+    palSelect.appendChild(opt);
+  });
+  palSelect.addEventListener("change", () => {
+    snapshot();
+    m.cellPalettes[state.selectedCell] = Number(palSelect.value); render();
+  });
+  palField.appendChild(palSelect);
+  ed.appendChild(palField);
+
+  // Clear the selected cell.
+  ed.appendChild(spacer(8));
+  const clearCell = el("button", "tiny danger", "Clear cell " + state.selectedCell);
+  clearCell.addEventListener("click", () => { snapshot(); m.tiles[state.selectedCell] = null; render(); });
+  ed.appendChild(clearCell);
+
+  // Collision and behavior apply to the whole metatile (the 16x16 movement cell).
+  ed.appendChild(spacer(12));
+  const movRow = el("div", "row");
+  const colField = el("div", "field");
+  colField.appendChild(label("Collision"));
+  colField.appendChild(selectFrom(COLLISION_OPTIONS, m.collision, v => { snapshot(); m.collision = v; render(); }));
+  const behField = el("div", "field");
+  behField.appendChild(label("Behavior"));
+  behField.appendChild(selectFrom(state.project.behaviors, m.behavior, v => { snapshot(); m.behavior = v; render(); }));
+  movRow.append(colField, behField);
+  ed.appendChild(movRow);
+
+  // Tile picker for assigning into the selected cell.
+  ed.appendChild(spacer(16));
+  ed.appendChild(el("span", "cell-label", "Tiles (click to place in cell " + state.selectedCell + ")"));
+  ed.appendChild(spacer(6));
+  const picker = el("div", "lib-grid");
+  ts.tiles.forEach((tile, index) => {
+    const cell = el("button", "lib-cell");
+    const c = document.createElement("canvas");
+    c.width = 38; c.height = 38;
+    paintTileCanvas(c, tile, colorsForPalette(m.cellPalettes[state.selectedCell]), 38 / TILE_PX);
+    cell.appendChild(c);
+    if (isAnimated(tile)) cell.appendChild(el("span", "anim-badge", "\u25B6"));
+    cell.appendChild(el("span", "idx", String(index)));
+    cell.addEventListener("click", () => { snapshot(); m.tiles[state.selectedCell] = tile.id; render(); });
+    picker.appendChild(cell);
+  });
+  ed.appendChild(picker);
+
+  cols.appendChild(ed);
+  root.appendChild(cols);
+}
+
+/* ============================================================
+   Panel: Blocks
+   ============================================================ */
+
+function renderBlocksPanel(root) {
+  const ts = activeTileset();
+  if (!ts) { root.appendChild(el("p", "hint", "No tileset.")); return; }
+
+  const cols = el("div", "cols");
+
+  /* ---- left: block library ---- */
+  const lib = el("div", "card col-library");
+  lib.appendChild(el("h2", null, "Blocks in " + ts.name));
+
+  if (ts.metatiles.length === 0) {
+    lib.appendChild(el("p", "hint", "Create some metatiles first, then compose them into 32x32 blocks here."));
+  } else if (ts.blocks.length === 0) {
+    lib.appendChild(el("p", "hint", "No blocks yet. A block is a 2x2 grid of metatiles, the unit your maps are painted with."));
+  }
+
+  const list = el("div", "metatile-list");
+  ts.blocks.forEach((b, index) => {
+    const row = el("div", "mt-row" + (b.id === state.selectedBlockId ? " selected" : ""));
+    const c = document.createElement("canvas");
+    c.width = 48; c.height = 48;
+    drawBlock(c.getContext("2d"), ts, b, 48 / (TILE_PX * 4)); // a block is 32 px (4 tiles) wide
+    c.style.border = "1px solid var(--border)";
+    const name = el("span", "mt-name", "#" + index + "  " + b.name);
+    row.append(c, name);
+    row.addEventListener("click", () => { state.selectedBlockId = b.id; state.selectedCell = 0; render(); });
+    list.appendChild(row);
+  });
+  lib.appendChild(list);
+
+  const libBtns = el("div", "row");
+  libBtns.style.marginTop = "12px";
+  const addBtn = el("button", null, "+ New block");
+  addBtn.addEventListener("click", () => {
+    snapshot();
+    const b = { id: genId(), name: "block", metatiles: [null, null, null, null] }; // tl, tr, bl, br
+    ts.blocks.push(b);
+    state.selectedBlockId = b.id; state.selectedCell = 0; render();
+  });
+  const dupBtn = el("button", null, "Duplicate");
+  dupBtn.addEventListener("click", () => {
+    const src = blockById(ts, state.selectedBlockId);
+    if (!src) return;
+    snapshot();
+    const b = { id: genId(), name: src.name + " copy", metatiles: [...src.metatiles] };
+    ts.blocks.push(b);
+    state.selectedBlockId = b.id; state.selectedCell = 0; render();
+  });
+  const delBtn = el("button", "danger", "Delete");
+  delBtn.addEventListener("click", () => {
+    const b = blockById(ts, state.selectedBlockId);
+    if (!b) return;
+    const refs = countBlockReferences(b.id);
+    if (refs > 0) { alert("This block is used in " + refs + " map cell(s). Clear it there first."); return; }
+    snapshot();
+    ts.blocks = ts.blocks.filter(x => x.id !== b.id);
+    state.selectedBlockId = ts.blocks[0] ? ts.blocks[0].id : null;
+    render();
+  });
+  libBtns.append(addBtn, dupBtn, delBtn);
+  lib.appendChild(libBtns);
+  cols.appendChild(lib);
+
+  /* ---- right: composer ---- */
+  const ed = el("div", "card col-editor");
+  ed.appendChild(el("h2", null, "Block editor"));
+
+  const b = blockById(ts, state.selectedBlockId);
+  if (!b) { ed.appendChild(el("p", "hint", "Select or create a block.")); cols.appendChild(ed); root.appendChild(cols); return; }
+
+  // Name.
+  const nameField = el("div", "field");
+  nameField.appendChild(label("Name"));
+  const nameInput = inputText(b.name, 200);
+  nameInput.addEventListener("input", () => { b.name = nameInput.value; });
+  nameField.appendChild(nameInput);
+  ed.appendChild(nameField);
+
+  // Composer: a 2x2 grid of metatile cells. Click a cell, then pick a metatile.
+  ed.appendChild(spacer(12));
+  ed.appendChild(el("span", "cell-label", "Layout (click a cell, then pick a metatile)"));
+  ed.appendChild(spacer(6));
+  const composer = el("div", "composer");
+  const COMP_SCALE = 96 / (2 * TILE_PX); // 96 px cell showing one 16 px metatile
+  for (let i = 0; i < 4; i++) {
+    const cell = el("button", "composer-cell" + (state.selectedCell === i ? " selected" : ""));
+    const c = document.createElement("canvas");
+    c.width = 96; c.height = 96;
+    const cctx = c.getContext("2d");
+    const metatileId = b.metatiles[i];
+    const metatile = metatileId != null ? metatileById(ts, metatileId) : null;
+    if (metatile) drawMetatile(cctx, ts, metatile, COMP_SCALE);
+    else drawEmptyCell(cctx, 96);
+    cell.appendChild(c);
+    cell.addEventListener("click", () => { state.selectedCell = i; render(); });
+    composer.appendChild(cell);
+  }
+  ed.appendChild(composer);
+
+  // Clear the selected cell.
+  ed.appendChild(spacer(8));
+  const clearCell = el("button", "tiny danger", "Clear cell " + state.selectedCell);
+  clearCell.addEventListener("click", () => { snapshot(); b.metatiles[state.selectedCell] = null; render(); });
+  ed.appendChild(clearCell);
+
+  // Metatile picker for assigning into the selected cell.
+  ed.appendChild(spacer(16));
+  ed.appendChild(el("span", "cell-label", "Metatiles (click to place in cell " + state.selectedCell + ")"));
+  ed.appendChild(spacer(6));
+  if (ts.metatiles.length === 0) {
+    ed.appendChild(el("p", "hint", "No metatiles to place. Build some on the Metatiles tab."));
+  }
+  const picker = el("div", "lib-grid");
+  ts.metatiles.forEach((m, index) => {
+    const cell = el("button", "lib-cell");
+    const c = document.createElement("canvas");
+    c.width = 38; c.height = 38;
+    drawMetatile(c.getContext("2d"), ts, m, 38 / (2 * TILE_PX));
+    cell.appendChild(c);
+    cell.appendChild(el("span", "idx", String(index)));
+    cell.title = m.name;
+    cell.addEventListener("click", () => { snapshot(); b.metatiles[state.selectedCell] = m.id; render(); });
+    picker.appendChild(cell);
+  });
+  ed.appendChild(picker);
+
+  cols.appendChild(ed);
+  root.appendChild(cols);
+}
+
+/* ============================================================
+   Panel: Maps
+   ============================================================ */
+
+function renderMapsPanel(root) {
+  const cols = el("div", "cols");
+
+  /* ---- left: maps, properties, connections ---- */
+  const side = el("div", "col-library");
+
+  // Map list.
+  const listCard = el("div", "card");
+  listCard.appendChild(el("h2", null, "Maps"));
+  if (state.project.maps.length === 0) {
+    listCard.appendChild(el("p", "hint", "No maps yet. Create one to start painting blocks."));
+  }
+  const list = el("div", "map-list");
+  state.project.maps.forEach(map => {
+    const row = el("div", "map-row" + (map.id === state.selectedMapId ? " selected" : ""));
+    row.append(
+      el("span", "map-name", map.name),
+      el("span", "map-dims", map.width + "x" + map.height));
+    row.addEventListener("click", () => { state.selectedMapId = map.id; state.selectedEventId = null; state.mapScroll = { left: 0, top: 0 }; render(); });
+    list.appendChild(row);
+  });
+  listCard.appendChild(list);
+
+  const newBtn = el("button", null, "+ New map");
+  newBtn.style.marginTop = "12px";
+  newBtn.addEventListener("click", () => {
+    const ts = state.project.tilesets[0];
+    if (!ts) { alert("Create a tileset first."); return; }
+    snapshot();
+    const map = createMap("map " + (state.project.maps.length + 1), ts.id, 16, 16);
+    state.project.maps.push(map);
+    state.selectedMapId = map.id;
+    state.selectedEventId = null;
+    state.mapScroll = { left: 0, top: 0 };
+    render();
+  });
+  listCard.appendChild(newBtn);
+  side.appendChild(listCard);
+
+  const map = mapById(state.selectedMapId);
+
+  if (map) {
+    side.appendChild(renderMapProperties(map));
+    side.appendChild(renderConnections(map));
+  }
+  cols.appendChild(side);
+
+  /* ---- right: paint surface ---- */
+  const main = el("div", "card col-editor");
+  main.style.flex = "2 1 520px";
+  main.appendChild(el("h2", null, "Map editor"));
+
+  if (!map) {
+    main.appendChild(el("p", "hint", "Select or create a map."));
+    cols.appendChild(main);
+    root.appendChild(cols);
+    return;
+  }
+
+  const ts = tilesetForMap(map);
+  if (!ts) {
+    main.appendChild(el("p", "warn", "This map points at a tileset that no longer exists."));
+    cols.appendChild(main);
+    root.appendChild(cols);
+    return;
+  }
+
+  main.appendChild(renderMapToolbar(map, ts));
+
+  // Viewport wraps a single canvas sized to the whole map; it scrolls inside.
+  const viewport = el("div", "map-viewport");
+  // Remember scroll so a re-render (tool change, brush pick) does not jump to 0,0.
+  viewport.addEventListener("scroll", () => {
+    state.mapScroll = { left: viewport.scrollLeft, top: viewport.scrollTop };
+  });
+  requestAnimationFrame(() => {
+    viewport.scrollLeft = state.mapScroll.left;
+    viewport.scrollTop = state.mapScroll.top;
+  });
+  const canvas = document.createElement("canvas");
+  canvas.className = "map-canvas";
+  const z = state.mapZoom;
+  canvas.width = map.width * z;
+  canvas.height = map.height * z;
+  const ctx = canvas.getContext("2d");
+
+  // Paint a single cell (block art, empty marker, then its grid lines).
+  const paintCell = (cx, cy) => {
+    const px = cx * z, py = cy * z;
+    const blockId = map.blockGrid[cy * map.width + cx];
+    const block = blockId != null ? blockById(ts, blockId) : null;
+    if (block) drawBlock(ctx, ts, block, z / (TILE_PX * 4), px, py);
+    else drawEmptyCell(ctx, z, px, py);
+    if (state.showMapGrid) {
+      ctx.strokeStyle = "rgba(224,248,208,0.10)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(px + 0.5, py + 0.5, z, z);
+    }
+  };
+
+  const repaintAll = () => {
+    for (let y = 0; y < map.height; y++)
+      for (let x = 0; x < map.width; x++) paintCell(x, y);
+  };
+  repaintAll();
+  if (!map.events) map.events = [];
+  if (state.mapMode === "events") drawEventMarkers(ctx, map, z);
+
+  // Translate a pointer event into a block cell, or null if outside the grid.
+  const cellAt = (ev) => {
+    const x = Math.floor(ev.offsetX / z);
+    const y = Math.floor(ev.offsetY / z);
+    if (x < 0 || x >= map.width || y < 0 || y >= map.height) return null;
+    return { x, y };
+  };
+
+  const applyAt = (cx, cy) => {
+    const i = cy * map.width + cx;
+    if (state.mapTool === "erase") {
+      map.blockGrid[i] = null;
+    } else if (state.mapTool === "fill") {
+      floodFillMap(map, cx, cy, state.paintBlockId);
+      repaintAll();
+      return;
+    } else {
+      if (state.paintBlockId == null) return;
+      map.blockGrid[i] = state.paintBlockId;
+    }
+    paintCell(cx, cy);
+  };
+
+  // Scroll the viewport when the cursor nears an edge while painting.
+  const edgeAutoScroll = (ev) => {
+    if (!state.autoScroll) return;
+    const rect = viewport.getBoundingClientRect();
+    const margin = 48, step = 24;
+    const x = ev.clientX - rect.left, y = ev.clientY - rect.top;
+    if (x < margin) viewport.scrollLeft -= step;
+    else if (x > rect.width - margin) viewport.scrollLeft += step;
+    if (y < margin) viewport.scrollTop -= step;
+    else if (y > rect.height - margin) viewport.scrollTop += step;
+  };
+
+  // Events live on the finer metatile grid (half a block per axis).
+  const eventCellAt = (ev) => {
+    const cell = z / 2;
+    const x = Math.floor(ev.offsetX / cell);
+    const y = Math.floor(ev.offsetY / cell);
+    if (x < 0 || x >= map.width * 2 || y < 0 || y >= map.height * 2) return null;
+    return { x, y };
+  };
+
+  if (state.mapMode === "blocks") {
+    let painting = false;
+    canvas.addEventListener("pointerdown", (ev) => {
+      const pos = cellAt(ev);
+      if (!pos) return;
+      snapshot();          // the whole stroke (or a fill) collapses into one undo step
+      painting = true;
+      applyAt(pos.x, pos.y);
+    });
+    canvas.addEventListener("pointermove", (ev) => {
+      if (!painting) return;
+      edgeAutoScroll(ev);
+      const pos = cellAt(ev);
+      if (pos) applyAt(pos.x, pos.y);
+    });
+    const stop = () => { painting = false; };
+    canvas.addEventListener("pointerup", stop);
+    canvas.addEventListener("pointerleave", stop);
+  } else {
+    // Events mode: click a marker to select it, or an empty cell to place one.
+    canvas.addEventListener("pointerdown", (ev) => {
+      const pos = eventCellAt(ev);
+      if (!pos) return;
+      const existing = map.events.find(e => e.x === pos.x && e.y === pos.y);
+      if (existing) { state.selectedEventId = existing.id; render(); return; }
+      snapshot();
+      const e = makeEvent(state.eventTool, pos.x, pos.y);
+      e.id = genId();
+      map.events.push(e);
+      state.selectedEventId = e.id;
+      render();
+    });
+  }
+
+  viewport.appendChild(canvas);
+  main.appendChild(viewport);
+
+  if (state.mapMode === "blocks") {
+    // Block palette: pick the brush block.
+    main.appendChild(spacer(12));
+    main.appendChild(el("span", "cell-label", "Blocks (click to set the brush)"));
+    main.appendChild(spacer(6));
+    if (ts.blocks.length === 0) {
+      main.appendChild(el("p", "hint", "No blocks in this tileset. Build some on the Blocks tab."));
+    }
+    const palette = el("div", "lib-grid");
+    ts.blocks.forEach((block, index) => {
+      const cell = el("button", "lib-cell" + (block.id === state.paintBlockId ? " selected" : ""));
+      const c = document.createElement("canvas");
+      c.width = 38; c.height = 38;
+      drawBlock(c.getContext("2d"), ts, block, 38 / (TILE_PX * 4));
+      cell.appendChild(c);
+      cell.appendChild(el("span", "idx", String(index)));
+      cell.title = block.name;
+      cell.addEventListener("click", () => {
+        state.paintBlockId = block.id;
+        if (state.mapTool === "erase") state.mapTool = "paint";
+        render();
+      });
+      palette.appendChild(cell);
+    });
+    main.appendChild(palette);
+  } else {
+    main.appendChild(spacer(12));
+    main.appendChild(el("p", "hint",
+      "Click an empty cell to drop a " + EVENT_TYPES[state.eventTool].label.toLowerCase() +
+      ", or click a marker to select it."));
+    main.appendChild(spacer(8));
+    main.appendChild(renderEventInspector(map));
+    main.appendChild(renderEventList(map));
+  }
+
+  cols.appendChild(main);
+  root.appendChild(cols);
+}
+
+// Draw event markers over the map: a colored square with the type's letter,
+// sized to one metatile cell, highlighted when selected.
+function drawEventMarkers(ctx, map, z) {
+  const cell = z / 2;                       // a metatile is half a block per axis
+  const inset = Math.max(1, cell * 0.12);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  (map.events || []).forEach(e => {
+    const meta = EVENT_TYPES[e.type] || { color: "#ffffff", letter: "?" };
+    const px = e.x * cell, py = e.y * cell;
+    const selected = e.id === state.selectedEventId;
+
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = meta.color;
+    ctx.fillRect(px + inset, py + inset, cell - 2 * inset, cell - 2 * inset);
+    ctx.globalAlpha = 1;
+
+    ctx.strokeStyle = selected ? "#ffffff" : "rgba(6,18,12,0.85)";
+    ctx.lineWidth = selected ? 2 : 1;
+    ctx.strokeRect(px + inset + 0.5, py + inset + 0.5, cell - 2 * inset - 1, cell - 2 * inset - 1);
+
+    if (cell >= 12) {
+      ctx.fillStyle = "#06120c";
+      ctx.font = "bold " + Math.floor(cell * 0.55) + "px " +
+        "ui-monospace, Menlo, Consolas, monospace";
+      ctx.fillText(meta.letter, px + cell / 2, py + cell / 2 + 0.5);
+    }
+  });
+}
+
+// Inspector for the selected event: its coordinates plus type-specific fields.
+function renderEventInspector(map) {
+  const card = el("div", "card");
+  const ev = (map.events || []).find(e => e.id === state.selectedEventId);
+  if (!ev) {
+    card.appendChild(el("h2", null, "Event"));
+    card.appendChild(el("p", "hint", "No event selected."));
+    return card;
+  }
+  const meta = EVENT_TYPES[ev.type] || { label: ev.type };
+  card.appendChild(el("h2", null, meta.label + " event"));
+
+  // Coordinates (in metatile cells). Editing them moves the event.
+  const posRow = el("div", "row");
+  const xField = el("div", "field");
+  xField.appendChild(label("X (cells)"));
+  const xInput = numberInput(ev.x, 0, map.width * 2 - 1);
+  xInput.addEventListener("change", () => { snapshot(); ev.x = clampInt(xInput.value, 0, map.width * 2 - 1); render(); });
+  xField.appendChild(xInput);
+  const yField = el("div", "field");
+  yField.appendChild(label("Y (cells)"));
+  const yInput = numberInput(ev.y, 0, map.height * 2 - 1);
+  yInput.addEventListener("change", () => { snapshot(); ev.y = clampInt(yInput.value, 0, map.height * 2 - 1); render(); });
+  yField.appendChild(yInput);
+  posRow.append(xField, yField);
+  card.appendChild(posRow);
+  card.appendChild(spacer(10));
+
+  // Type-specific fields. Text fields update live; selects/numbers are snapshotted.
+  const addText = (lbl, key) => {
+    const f = el("div", "field");
+    f.appendChild(label(lbl));
+    const i = inputText(ev[key] || "", 220);
+    i.addEventListener("input", () => { ev[key] = i.value; });
+    f.appendChild(i);
+    card.appendChild(f);
+    card.appendChild(spacer(8));
+  };
+  const addNumber = (lbl, key, min, max) => {
+    const f = el("div", "field");
+    f.appendChild(label(lbl));
+    const i = numberInput(ev[key], min, max);
+    i.addEventListener("change", () => { snapshot(); ev[key] = clampInt(i.value, min, max); });
+    f.appendChild(i);
+    card.appendChild(f);
+    card.appendChild(spacer(8));
+  };
+
+  if (ev.type === "warp") {
+    const f = el("div", "field");
+    f.appendChild(label("Destination map"));
+    const sel = document.createElement("select");
+    const none = document.createElement("option");
+    none.value = ""; none.textContent = "(none)";
+    sel.appendChild(none);
+    state.project.maps.forEach(m => {
+      const opt = document.createElement("option");
+      opt.value = m.id; opt.textContent = m.name;
+      if (ev.toMap === m.id) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    sel.addEventListener("change", () => { snapshot(); ev.toMap = sel.value ? Number(sel.value) : null; render(); });
+    f.appendChild(sel);
+    card.appendChild(f);
+    card.appendChild(spacer(8));
+    const dest = mapById(ev.toMap);
+    const maxX = dest ? dest.width * 2 - 1 : 255;
+    const maxY = dest ? dest.height * 2 - 1 : 255;
+    addNumber("Target X (cells)", "toX", 0, maxX);
+    addNumber("Target Y (cells)", "toY", 0, maxY);
+  } else if (ev.type === "sign") {
+    addText("Sign text", "text");
+  } else if (ev.type === "item") {
+    addText("Item id", "item");
+    addNumber("Quantity", "qty", 1, 99);
+    addText("Flag id (so it can't be taken twice)", "flag");
+  } else if (ev.type === "npc") {
+    addText("Sprite id", "sprite");
+    const f = el("div", "field");
+    f.appendChild(label("Movement"));
+    f.appendChild(selectFrom(NPC_MOVEMENTS, ev.movement, v => { snapshot(); ev.movement = v; }));
+    card.appendChild(f);
+    card.appendChild(spacer(8));
+    addText("Script id", "script");
+  } else if (ev.type === "trigger") {
+    addText("Script id", "script");
+  }
+
+  const delBtn = el("button", "danger", "Delete event");
+  delBtn.addEventListener("click", () => {
+    snapshot();
+    map.events = map.events.filter(e => e.id !== ev.id);
+    state.selectedEventId = null;
+    render();
+  });
+  card.appendChild(delBtn);
+  return card;
+}
+
+// A compact list of every event on the map, for overview and quick selection.
+function renderEventList(map) {
+  const card = el("div", "card");
+  card.appendChild(el("h2", null, "Events on this map (" + (map.events || []).length + ")"));
+  if (!map.events || map.events.length === 0) {
+    card.appendChild(el("p", "hint", "None yet."));
+    return card;
+  }
+  const summarize = (e) => {
+    if (e.type === "warp") { const d = mapById(e.toMap); return "to " + (d ? d.name : "(unset)") + " (" + e.toX + "," + e.toY + ")"; }
+    if (e.type === "sign") return e.text ? '"' + e.text.slice(0, 24) + '"' : "(no text)";
+    if (e.type === "item") return (e.item || "(unset)") + (e.qty > 1 ? " x" + e.qty : "");
+    if (e.type === "npc") return e.sprite || "(no sprite)";
+    if (e.type === "trigger") return e.script || "(no script)";
+    return "";
+  };
+  const list = el("div", "metatile-list");
+  map.events.forEach(e => {
+    const meta = EVENT_TYPES[e.type] || { letter: "?", color: "#fff" };
+    const row = el("div", "mt-row" + (e.id === state.selectedEventId ? " selected" : ""));
+    const badge = el("span", null, meta.letter);
+    badge.style.cssText = "display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;" +
+      "background:" + meta.color + ";color:#06120c;font-weight:700;border:1px solid var(--border);";
+    const name = el("span", "mt-name", "(" + e.x + "," + e.y + ")  " + summarize(e));
+    row.append(badge, name);
+    row.addEventListener("click", () => { state.selectedEventId = e.id; render(); });
+    list.appendChild(row);
+  });
+  card.appendChild(list);
+  return card;
+}
+
+function renderMapToolbar(map, ts) {
+  const bar = el("div", "map-toolbar");
+
+  // Mode switch: paint blocks, or place events.
+  const modeGroup = el("div", "group");
+  [["blocks", "Blocks"], ["events", "Events"]].forEach(([mode, label]) => {
+    const b = el("button", "tool-btn" + (state.mapMode === mode ? " active" : ""), label);
+    b.addEventListener("click", () => { state.mapMode = mode; render(); });
+    modeGroup.appendChild(b);
+  });
+  bar.appendChild(modeGroup);
+
+  if (state.mapMode === "blocks") {
+    // Block tools.
+    const tools = el("div", "group");
+    ["paint", "erase", "fill"].forEach(name => {
+      const b = el("button", "tool-btn" + (state.mapTool === name ? " active" : ""), name);
+      b.addEventListener("click", () => { state.mapTool = name; render(); });
+      tools.appendChild(b);
+    });
+    bar.appendChild(tools);
+
+    // Current brush preview.
+    const brushGroup = el("div", "group");
+    brushGroup.appendChild(el("span", "cell-label", "Brush"));
+    const preview = document.createElement("canvas");
+    preview.className = "paint-block-preview";
+    preview.width = 34; preview.height = 34;
+    const brush = state.paintBlockId != null ? blockById(ts, state.paintBlockId) : null;
+    if (brush) drawBlock(preview.getContext("2d"), ts, brush, 34 / (TILE_PX * 4));
+    brushGroup.appendChild(preview);
+    bar.appendChild(brushGroup);
+  } else {
+    // Event type picker: which kind of event a click drops.
+    const evGroup = el("div", "group");
+    EVENT_ORDER.forEach(type => {
+      const meta = EVENT_TYPES[type];
+      const b = el("button", "tool-btn" + (state.eventTool === type ? " active" : ""), meta.label);
+      b.style.borderLeft = "4px solid " + meta.color;   // color-codes the marker
+      b.addEventListener("click", () => { state.eventTool = type; render(); });
+      evGroup.appendChild(b);
+    });
+    bar.appendChild(evGroup);
+  }
+
+  // Zoom (both modes).
+  const zoomGroup = el("div", "group");
+  zoomGroup.appendChild(el("span", "cell-label", "Zoom"));
+  zoomGroup.appendChild(selectFrom(
+    ["16", "24", "32", "48"], String(state.mapZoom),
+    v => { state.mapZoom = Number(v); render(); }));
+  bar.appendChild(zoomGroup);
+
+  // Auto-scroll only matters while drag-painting blocks.
+  if (state.mapMode === "blocks") {
+    bar.appendChild(toggle("Auto-scroll at edges", state.autoScroll, v => { state.autoScroll = v; }));
+  }
+  bar.appendChild(toggle("Grid", state.showMapGrid, v => { state.showMapGrid = v; render(); }));
+
+  return bar;
+}
+
+function renderMapProperties(map) {
+  const card = el("div", "card");
+  card.appendChild(el("h2", null, "Map properties"));
+
+  const nameField = el("div", "field");
+  nameField.appendChild(label("Name"));
+  const nameInput = inputText(map.name, 200);
+  nameInput.addEventListener("input", () => {
+    map.name = nameInput.value;
+    // Keep the list label live without a full re-render that would drop focus.
+    const row = document.querySelector(".map-row.selected .map-name");
+    if (row) row.textContent = map.name;
+  });
+  nameField.appendChild(nameInput);
+  card.appendChild(nameField);
+
+  // Tileset selector. Changing it can strand painted blocks, so warn.
+  card.appendChild(spacer(10));
+  const tsField = el("div", "field");
+  tsField.appendChild(label("Tileset"));
+  const tsSelect = document.createElement("select");
+  state.project.tilesets.forEach(t => {
+    const opt = document.createElement("option");
+    opt.value = t.id; opt.textContent = t.name;
+    if (t.id === map.tilesetId) opt.selected = true;
+    tsSelect.appendChild(opt);
+  });
+  tsSelect.addEventListener("change", () => {
+    if (map.blockGrid.some(b => b != null) &&
+        !confirm("Switching tileset leaves painted blocks pointing at the old set. Continue?")) {
+      tsSelect.value = map.tilesetId; return;
+    }
+    snapshot();
+    map.tilesetId = Number(tsSelect.value);
+    state.paintBlockId = null;
+    render();
+  });
+  tsField.appendChild(tsSelect);
+  card.appendChild(tsField);
+
+  // Size in blocks.
+  card.appendChild(spacer(10));
+  const sizeRow = el("div", "row");
+  const wField = el("div", "field");
+  wField.appendChild(label("Width (blocks)"));
+  const wInput = numberInput(map.width, 1, 256);
+  const hField = el("div", "field");
+  hField.appendChild(label("Height (blocks)"));
+  const hInput = numberInput(map.height, 1, 256);
+  const applyBtn = el("button", null, "Resize");
+  applyBtn.addEventListener("click", () => {
+    const w = clampInt(wInput.value, 1, 256), h = clampInt(hInput.value, 1, 256);
+    if (w < map.width || h < map.height) {
+      if (!confirm("Shrinking can drop painted blocks outside the new bounds. Continue?")) return;
+    }
+    snapshot();
+    resizeMap(map, w, h);
+    render();
+  });
+  sizeRow.append(wField, hField, applyBtn);
+  card.appendChild(sizeRow);
+  card.appendChild(el("p", "hint", "Pixels: " + (map.width * 32) + " x " + (map.height * 32) +
+    " (" + (map.width * 4) + " x " + (map.height * 4) + " tiles)"));
+
+  // Delete.
+  card.appendChild(spacer(10));
+  const delBtn = el("button", "danger", "Delete map");
+  delBtn.addEventListener("click", () => {
+    const linkers = mapsConnectingTo(map.id);
+    const msg = linkers.length
+      ? linkers.length + " other map(s) connect to this one. Delete and clear those links?"
+      : "Delete this map?";
+    if (!confirm(msg)) return;
+    snapshot();
+    // Clear inbound connections so nothing points at a deleted map.
+    linkers.forEach(m => DIRECTIONS.forEach(d => {
+      if (m.connections[d] && m.connections[d].mapId === map.id) m.connections[d] = null;
+    }));
+    state.project.maps = state.project.maps.filter(x => x.id !== map.id);
+    state.selectedMapId = state.project.maps[0] ? state.project.maps[0].id : null;
+    render();
+  });
+  card.appendChild(delBtn);
+
+  return card;
+}
+
+function renderConnections(map) {
+  const card = el("div", "card");
+  card.appendChild(el("h2", null, "Connections"));
+  card.appendChild(el("p", "hint",
+    "Edge links to neighboring maps. Seamless only when both maps share a tileset; " +
+    "offset shifts the neighbor along the shared edge, in blocks."));
+  card.appendChild(spacer(8));
+
+  // North on top, west/center/east in the middle, south on the bottom.
+  const grid = el("div", "conn-grid");
+  const placeholders = {
+    "1": "north", "3": "west", "4": "center", "5": "east", "7": "south",
+  };
+  for (let slot = 0; slot < 9; slot++) {
+    const which = placeholders[String(slot)];
+    if (which === "center") {
+      const c = el("div", "conn-center", map.name);
+      grid.appendChild(c);
+    } else if (which) {
+      grid.appendChild(connectionSlot(map, which));
+    } else {
+      grid.appendChild(document.createElement("div"));
+    }
+  }
+  card.appendChild(grid);
+  return card;
+}
+
+function connectionSlot(map, dir) {
+  const wrap = el("div", "conn-slot");
+  wrap.appendChild(el("span", "cell-label", dir));
+
+  const conn = map.connections[dir];
+  const others = state.project.maps.filter(m => m.id !== map.id);
+
+  const select = document.createElement("select");
+  const none = document.createElement("option");
+  none.value = ""; none.textContent = "(none)";
+  select.appendChild(none);
+  others.forEach(m => {
+    const opt = document.createElement("option");
+    opt.value = m.id; opt.textContent = m.name;
+    if (conn && conn.mapId === m.id) opt.selected = true;
+    select.appendChild(opt);
+  });
+  select.style.width = "100%";
+  select.addEventListener("change", () => {
+    snapshot();
+    map.connections[dir] = select.value ? { mapId: Number(select.value), offset: 0 } : null;
+    render();
+  });
+  wrap.appendChild(select);
+
+  if (conn) {
+    const offset = numberInput(conn.offset, -255, 255);
+    offset.title = "offset (blocks)";
+    offset.style.width = "100%";
+    offset.style.marginTop = "4px";
+    offset.addEventListener("input", () => { conn.offset = clampInt(offset.value, -255, 255); });
+    wrap.appendChild(offset);
+
+    // Warn when the neighbor uses a different tileset (forces a VRAM reload).
+    const neighbor = mapById(conn.mapId);
+    if (neighbor && neighbor.tilesetId !== map.tilesetId) {
+      wrap.appendChild(el("div", "warn", "different tileset"));
+    }
+  }
+  return wrap;
+}
+
+// Flood fill a contiguous region of equal block ids with a new block.
+function floodFillMap(map, x, y, newBlockId) {
+  const target = map.blockGrid[y * map.width + x];
+  if (target === newBlockId) return;
+  const stack = [[x, y]];
+  while (stack.length) {
+    const [cx, cy] = stack.pop();
+    if (cx < 0 || cx >= map.width || cy < 0 || cy >= map.height) continue;
+    if (map.blockGrid[cy * map.width + cx] !== target) continue;
+    map.blockGrid[cy * map.width + cx] = newBlockId;
+    stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
+  }
+}
+
+/* ============================================================
+   Small DOM helpers (keep the render functions readable)
+   ============================================================ */
+
+function el(tag, className, text) {
+  const e = document.createElement(tag);
+  if (className) e.className = className;
+  if (text != null) e.textContent = text;
+  return e;
+}
+function label(text) { return el("label", null, text); }
+function spacer(px) { const d = document.createElement("div"); d.style.height = px + "px"; return d; }
+function inputText(value, widthPx) {
+  const i = document.createElement("input");
+  i.type = "text"; i.value = value;
+  if (widthPx) i.style.width = widthPx + "px";
+  return i;
+}
+function selectFrom(options, current, onChange) {
+  const s = document.createElement("select");
+  options.forEach(o => {
+    const opt = document.createElement("option");
+    opt.value = o; opt.textContent = o;
+    if (o === current) opt.selected = true;
+    s.appendChild(opt);
+  });
+  s.addEventListener("change", () => onChange(s.value));
+  return s;
+}
+function numberInput(value, min, max) {
+  const i = document.createElement("input");
+  i.type = "number"; i.value = value;
+  if (min != null) i.min = min;
+  if (max != null) i.max = max;
+  i.style.width = "80px";
+  return i;
+}
+function clampInt(value, min, max) {
+  const n = Math.round(Number(value) || 0);
+  return Math.max(min, Math.min(max, n));
+}
+// A labeled checkbox that reports its boolean on change.
+function toggle(text, checked, onChange) {
+  const wrap = el("label", "group");
+  wrap.style.cursor = "pointer";
+  const box = document.createElement("input");
+  box.type = "checkbox"; box.checked = checked;
+  box.addEventListener("change", () => onChange(box.checked));
+  wrap.append(box, el("span", "cell-label", text));
+  return wrap;
+}
+
+/* ============================================================
+   Modal
+   ============================================================ */
+
+function openModal(title, buildContent) {
+  closeModal();
+  const backdrop = el("div", "modal-backdrop");
+  backdrop.id = "modal-backdrop";
+  const modal = el("div", "modal");
+  const close = el("button", "tiny modal-close", "Close");
+  close.addEventListener("click", closeModal);
+  modal.appendChild(close);
+  modal.appendChild(el("h2", null, title));
+  buildContent(modal);
+  backdrop.appendChild(modal);
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) closeModal(); });
+  document.body.appendChild(backdrop);
+}
+function closeModal() {
+  const existing = document.getElementById("modal-backdrop");
+  if (existing) existing.remove();
+}
+
+/* ============================================================
+   Import / export
+   ============================================================ */
+
+function projectJson() {
+  state.project._displayPaletteId = state.displayPaletteId;
+  return JSON.stringify(state.project, null, 2);
+}
+function safeFileName() {
+  return (state.project.meta.name || "world").replace(/[^a-z0-9_-]+/gi, "_") + ".gbworld.json";
+}
+
+// Try a real file download. This works when the page is opened directly, but a
+// sandboxed preview may block it, which is why the export modal also offers copy.
+function downloadJson() {
+  try {
+    const blob = new Blob([projectJson()], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = safeFileName();
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    alert("Download was blocked here. Use Copy or the text box instead.");
+  }
+}
+
+function exportProject() {
+  const json = projectJson();
+  openModal("Export project", (modal) => {
+    modal.appendChild(el("p", "hint",
+      "Download the .json, or if the download is blocked here, copy the text below into a file."));
+    const btnRow = el("div", "row");
+    btnRow.style.margin = "10px 0";
+    const dl = el("button", "primary", "Download .json");
+    dl.addEventListener("click", downloadJson);
+    const copy = el("button", null, "Copy to clipboard");
+    btnRow.append(dl, copy);
+    modal.appendChild(btnRow);
+
+    const ta = document.createElement("textarea");
+    ta.value = json; ta.readOnly = true;
+    ta.addEventListener("focus", () => ta.select());
+    modal.appendChild(ta);
+
+    copy.addEventListener("click", async () => {
+      const done = () => { copy.textContent = "Copied"; setTimeout(() => copy.textContent = "Copy to clipboard", 1200); };
+      try {
+        await navigator.clipboard.writeText(json);
+        done();
+      } catch {
+        ta.focus(); ta.select();
+        try { document.execCommand("copy"); done(); }
+        catch { copy.textContent = "Press Ctrl/Cmd+C"; }
+      }
+    });
+  });
+}
+
+function loadProjectFrom(text) {
+  const parsed = JSON.parse(text);
+  if (!parsed.tilesets || !parsed.palettes) throw new Error("Missing tilesets or palettes.");
+  if (parsed.formatVersion !== FORMAT_VERSION) {
+    if (!confirm("This file is format v" + parsed.formatVersion + ", editor is v" + FORMAT_VERSION + ". Try to open anyway?")) return;
+  }
+  // Backfill fields that older exports may lack, so they open cleanly.
+  parsed.maps = parsed.maps || [];
+  parsed.tilesets.forEach(ts => { ts.blocks = ts.blocks || []; ts.metatiles = ts.metatiles || []; });
+  state.project = parsed;
+  syncSelectionsToProject();
+  resetHistory();
+  state.activePanel = "tiles";
+  closeModal();
+  render();
+}
+
+function importProject() {
+  openModal("Import project", (modal) => {
+    modal.appendChild(el("p", "hint", "Open a .gbworld.json file, or paste its contents below."));
+    const fileBtn = el("button", "primary", "Choose file");
+    fileBtn.style.margin = "10px 0";
+    fileBtn.addEventListener("click", () => document.getElementById("file-input").click());
+    modal.appendChild(fileBtn);
+
+    const ta = document.createElement("textarea");
+    ta.placeholder = "Paste project JSON here...";
+    modal.appendChild(ta);
+
+    const loadBtn = el("button", null, "Load pasted JSON");
+    loadBtn.style.marginTop = "10px";
+    loadBtn.addEventListener("click", () => {
+      try { loadProjectFrom(ta.value); }
+      catch (err) { alert("Could not open project: " + err.message); }
+    });
+    modal.appendChild(loadBtn);
+  });
+}
+
+/* ============================================================
+   Wiring (done once; only the panel re-renders afterward)
+   ============================================================ */
+
+document.getElementById("project-name").addEventListener("input", (e) => {
+  state.project.meta.name = e.target.value;
+});
+document.getElementById("btn-new").addEventListener("click", () => {
+  if (!confirm("Start a new project? Unsaved changes are lost. Export first to keep them.")) return;
+  state.project = makeDefaultProject();
+  syncSelectionsToProject();
+  resetHistory();
+  state.activePanel = "tiles";
+  render();
+});
+document.getElementById("btn-export").addEventListener("click", exportProject);
+document.getElementById("btn-import").addEventListener("click", importProject);
+document.getElementById("btn-undo").addEventListener("click", undo);
+document.getElementById("btn-redo").addEventListener("click", redo);
+document.getElementById("file-input").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (file) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try { loadProjectFrom(reader.result); }
+      catch (err) { alert("Could not open project: " + err.message); }
+    };
+    reader.readAsText(file);
+  }
+  e.target.value = "";   // allow re-importing the same file
+});
+document.querySelectorAll(".tab").forEach(tab => {
+  tab.addEventListener("click", () => { state.activePanel = tab.dataset.panel; state.selectedCell = 0; render(); });
+});
+
+// Keyboard undo/redo, but let native text editing keep its own undo in fields.
+document.addEventListener("keydown", (e) => {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  const tag = (document.activeElement && document.activeElement.tagName) || "";
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  const key = e.key.toLowerCase();
+  if (key === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
+  else if ((key === "z" && e.shiftKey) || key === "y") { e.preventDefault(); redo(); }
+});
+
+syncSelectionsToProject();
+render();
+</script>
+</body>
+</html>
