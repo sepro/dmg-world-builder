@@ -1,51 +1,64 @@
-# GB World Editor
+# GB Tools
 
-A browser-based authoring tool for Pokémon-style Game Boy worlds, plus the tooling to
-turn an exported project into GBDK-2020 C and to visualize the whole world.
+Two browser-based Game Boy authoring tools, plus the tooling around them. Both are
+single self-contained HTML pages with no build step — vanilla JS, served as static
+files.
 
-The editor builds worlds from a fixed hierarchy: 8×8 tiles → 16×16 metatiles → 32×32
-blocks → maps of blocks, with edge connections between maps, an events layer (warps,
-signs, items, NPCs, triggers), per-tile animation, and undo/redo. Everything lives in
-one project file you export and import as JSON.
+- **World Editor** — author Pokémon-style Game Boy worlds (tiles → metatiles →
+  blocks → maps, with connections and an events layer) and export them to GBDK-2020
+  C. See the [World Editor guide](docs/WORLD_EDITOR.md).
+- **Music Generator** — a deterministic chiptune improviser for the four GB channels
+  that exports settings and Standard MIDI. See the
+  [Music Generator guide](docs/MUSIC_GENERATOR.md).
 
 ## Structure
 
 ```
 gb-world-editor/
-├── gb-world-editor.html          # the editor (single self-contained file)
+├── dist/                          # the apps (served over HTTP)
+│   ├── gb-world-editor.html       # the world editor
+│   ├── gb-music-generator.html    # the music generator
+│   ├── gb-theme.css               # shared DMG design tokens + components
+│   └── gb-common.js               # shared DOM/form helpers
 ├── tools/
-│   ├── gbworld_to_c.py           # project JSON  ->  GBDK world.h / world.c
-│   └── gbworld_visualize.py      # project JSON  ->  stitched world.png
+│   ├── gbworld_to_c.py            # project JSON  ->  GBDK world.h / world.c
+│   └── gbworld_visualize.py       # project JSON  ->  stitched world.png
 ├── docs/
+│   ├── WORLD_EDITOR.md            # world editor guide
+│   ├── MUSIC_GENERATOR.md         # music generator option reference
 │   └── DEVELOPER_HANDOFF.md       # JSON schema, C structures, integration guide
+├── worlds/                        # example projects
 ├── .devcontainer/
-│   ├── Dockerfile
-│   └── devcontainer.json
 └── README.md
 ```
 
 ## Quick start
 
+The pages are static, but they link the shared `gb-theme.css` / `gb-common.js`, so
+they **must be served over HTTP** — opening a `.html` via `file://` won't load the
+shared assets.
+
 ### With VS Code Dev Containers (recommended)
 
-1. Open this folder in VS Code and choose **Dev Containers: Reopen in Container**.
-2. The container serves the editor automatically. Open
-   <http://localhost:8000/gb-world-editor.html>.
+Open this folder in VS Code and choose **Dev Containers: Reopen in Container**. A
+static server (Live Server) starts automatically on port 5500.
 
 ### Without Docker
 
-Serve the folder with anything static, e.g.:
+Serve the repo root with anything static:
 
 ```bash
 python3 -m http.server 8000
-# then open http://localhost:8000/gb-world-editor.html
+# world editor:    http://localhost:8000/dist/gb-world-editor.html
+# music generator: http://localhost:8000/dist/gb-music-generator.html
 ```
 
-The editor runs entirely in the browser; the server only delivers the HTML file. Use
-**Export** in the editor to save your project as a `.gbworld.json`, and **Import** to
-load it back.
+Both apps run entirely in the browser; the server only delivers the files.
 
-## Tooling
+## World tooling
+
+The World Editor's **Export** saves your project as a `.gbworld.json` (the single
+source of truth). Turn it into ROM data or a preview image from the repo root:
 
 ```bash
 # Generate GBDK C from an exported project
@@ -56,12 +69,6 @@ python3 tools/gbworld_visualize.py project.gbworld.json -o world.png --scale 3
 ```
 
 `gbworld_to_c.py` needs only the Python standard library. `gbworld_visualize.py`
-needs Pillow (`pip install pillow`; preinstalled in the devcontainer).
-
-## Integrating into a ROM
-
-The converter keeps the full tile→metatile→block→map hierarchy so a large world stays
-small in ROM and is reconstructed at runtime. See **docs/DEVELOPER_HANDOFF.md** for the
-JSON schema, the generated C structures, and a GBDK-2020 integration walkthrough
-(loading a map, reconstructing blocks into the tilemap, tile animation, and the
-Pokémon-style warp/behavior split).
+needs Pillow (`pip install pillow`; preinstalled in the devcontainer). See
+[docs/DEVELOPER_HANDOFF.md](docs/DEVELOPER_HANDOFF.md) for the JSON schema, the
+generated C structures, and a GBDK-2020 integration walkthrough.

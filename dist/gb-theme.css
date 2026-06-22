@@ -1,0 +1,179 @@
+/*
+  gb-theme.css - shared DMG visual language for the GB tool suite.
+
+  Holds the design tokens and the generic components (top bar, tabs, cards,
+  form controls, modal) used by every page. Page-specific styling stays inline
+  in each page so this file changes only when the shared look changes.
+*/
+
+:root {
+  /* Authentic DMG green, used as real material rather than decoration. */
+  --gb-0: #e0f8d0;  /* lightest shade  (pixel value 0) */
+  --gb-1: #88c070;
+  --gb-2: #346856;
+  --gb-3: #081820;  /* darkest shade   (pixel value 3) */
+
+  --bg:      #06120c;
+  --panel:   #0c2016;
+  --panel-2: #102a1c;
+  --border:  #2c5840;
+  --line:    #18301f;
+  --text:    #d8f0c8;
+  --muted:   #6fa860;
+  --accent:  #b8f25a;  /* selection / active state */
+  --danger:  #e08a5a;  /* over-budget, destructive actions */
+
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+#app { display: flex; flex-direction: column; height: 100vh; }
+
+/* Canvases are pixel art / crisp graphics: never smooth them. */
+canvas { image-rendering: pixelated; image-rendering: crisp-edges; display: block; }
+
+/* ---- top bar ---- */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  white-space: nowrap;
+}
+.brand .sub { color: var(--muted); font-weight: 400; letter-spacing: 0.08em; }
+.topbar .spacer { flex: 1; }
+.target-tag {
+  color: var(--muted);
+  border: 1px solid var(--line);
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+/* cross-links between the suite's pages */
+.nav-link {
+  color: var(--muted);
+  text-decoration: none;
+  border: 1px solid var(--line);
+  padding: 4px 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+.nav-link:hover { color: var(--accent); border-color: var(--accent); }
+
+/* ---- tabs ---- */
+.tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.tab {
+  appearance: none;
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 9px 16px;
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* ---- panel layout ---- */
+#panel { flex: 1; overflow: auto; padding: 16px; }
+.cols { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+.col-library { flex: 1 1 320px; min-width: 280px; }
+.col-editor  { flex: 1 1 380px; min-width: 320px; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  padding: 14px;
+  margin-bottom: 16px;
+}
+.card > h2 {
+  margin: 0 0 12px;
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 700;
+}
+.row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.row + .row { margin-top: 10px; }
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field label {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.cell-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; }
+
+/* ---- controls ---- */
+button, select, input[type="text"], input[type="number"] {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+}
+button { cursor: pointer; letter-spacing: 0.04em; }
+button:hover { border-color: var(--accent); color: var(--accent); }
+button.primary { color: var(--gb-3); background: var(--accent); border-color: var(--accent); font-weight: 700; }
+button.primary:hover { color: var(--gb-3); filter: brightness(1.1); }
+button.danger:hover { border-color: var(--danger); color: var(--danger); }
+button.tiny { padding: 3px 7px; font-size: 11px; }
+button:disabled { opacity: 0.35; cursor: default; }
+button:disabled:hover { color: var(--text); border-color: var(--border); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+input[type="color"] {
+  width: 30px; height: 26px; padding: 0;
+  border: 1px solid var(--border); background: var(--panel-2); cursor: pointer;
+}
+input[type="range"] { accent-color: var(--accent); }
+
+.hint { color: var(--muted); font-size: 11px; }
+
+/* ---- modal ---- */
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(6,18,12,0.8);
+  display: flex; align-items: center; justify-content: center; z-index: 50; padding: 20px;
+}
+.modal {
+  background: var(--panel); border: 1px solid var(--border);
+  max-width: 640px; width: 100%; max-height: 86vh; overflow: auto; padding: 18px;
+}
+.modal h2 { margin: 0 0 12px; font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); }
+.modal textarea {
+  width: 100%; height: 260px; resize: vertical;
+  font-family: var(--mono); font-size: 11px; color: var(--text);
+  background: var(--gb-3); border: 1px solid var(--border); padding: 8px;
+}
+.modal-close { float: right; }

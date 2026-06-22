@@ -2,16 +2,19 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Running the editor
+## Running the pages
 
-The editor is a single static HTML file with no build step. Serve the repo root over HTTP and open it in a browser:
+The tools are static HTML with no build step. Serve the repo root over HTTP and open a page in a browser:
 
 ```bash
 python3 -m http.server 8000
-# then open http://localhost:8000/gb-world-editor.html
+# world editor:    http://localhost:8000/dist/gb-world-editor.html
+# music generator: http://localhost:8000/dist/gb-music-generator.html
 ```
 
 Inside the devcontainer a static server starts automatically on port 5500 via VS Code Live Server.
+
+The two pages live in `dist/` and share `dist/gb-theme.css` (the DMG design tokens + generic components: top bar, tabs, cards, controls, modal) and `dist/gb-common.js` (DOM/form helpers, the modal, and `downloadBlob`/`downloadText`/`copyText`). Each page keeps its own page-specific CSS inline and links these two shared files. Because they are linked (not inlined), the pages must be served over HTTP — opening the `.html` via `file://` will not load the shared assets.
 
 ## Tooling commands
 
@@ -27,7 +30,7 @@ python3 tools/gbworld_visualize.py project.gbworld.json -o world.png --scale 3
 
 ## Architecture
 
-### The single-file editor (`gb-world-editor.html`)
+### The single-file editor (`dist/gb-world-editor.html`)
 
 The entire authoring tool lives in one ~2300-line HTML file: CSS at the top, static HTML in `<body>`, and all JavaScript in a `<script>` block starting around line 310. There is no build system, bundler, or framework — vanilla JS only.
 
@@ -50,6 +53,18 @@ The entire authoring tool lives in one ~2300-line HTML file: CSS at the top, sta
 | map | W×H blocks | row-major |
 
 Event/warp coordinates are in **metatile cells** (2× the block resolution per axis). Map size and `blockGrid` are in **blocks**.
+
+### The music generator (`dist/gb-music-generator.html`)
+
+A deterministic chiptune improviser for the four GB channels (Pulse 1 = lead, Pulse 2 = harmony, Wave = bass, Noise = drums). Like the editor it is vanilla JS in one `<script>` block, links the two shared files, and holds all settings in a plain object (`state.settings`, `makeDefaultSettings`).
+
+**Reproducibility is the core contract**: a tune is *fully determined by `settings` + `seed`*. `generate(settings)` seeds `makeRng(seed)` (mulberry32) and produces the `song` object (per-channel note tracks + chord list). Same settings ⇒ identical output, so export/import only stores the settings (the `.gbmusic.json` file); the song is regenerated on import. Don't introduce nondeterminism (`Math.random`, `Date`, unordered iteration) into the generation path — only `audio` playback (Web Audio) and `Math.random` for the "Random seed" button may use it.
+
+**Theory tables** (top of script): `SCALES`, `PROGRESSIONS` (diatonic degree lists), `PATTERNS` (rhythmic archetypes), `MOODS` (parameter profiles), `DUTIES`/`WAVES`/`DRUMS`. Time is quantized to 16th-note steps (`STEPS_PER_QUARTER = 4`); `stepsPerBar = beats * (16/unit)`. Swing + humanize are baked into each note's float onset `t` and velocity at generation time so playback, the score, and MIDI all agree.
+
+**Output**: piano-roll and simplified-staff views are drawn to `<canvas>` (`buildPianoRoll`, `buildStaff`), with a separate overlay canvas for the playhead. Export is `.gbmusic.json` (settings) and Standard MIDI File (`midiBytes`, format 1, drums on MIDI channel 10).
+
+See `docs/MUSIC_GENERATOR.md` for an end-user guide to every control.
 
 ### Converter (`tools/gbworld_to_c.py`)
 

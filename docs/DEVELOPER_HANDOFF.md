@@ -7,7 +7,7 @@ the runtime engine or extending the toolchain.
 ## 1. The pipeline at a glance
 
 ```
-gb-world-editor.html   ──►  project.gbworld.json   ──►  gbworld_to_c.py   ──►  world.h / world.c
+dist/gb-world-editor.html ──►  project.gbworld.json   ──►  gbworld_to_c.py   ──►  world.h / world.c
    (authoring UI)            (the single source           (build-time             (ROM data,
                               of truth, exported)          generator)              reconstructed at runtime)
 
@@ -23,14 +23,14 @@ downstream consumes that JSON.
 
 | File | Role |
 |------|------|
-| `gb-world-editor.html` | The authoring tool. Serve over HTTP and open in a browser. |
+| `dist/gb-world-editor.html` | The authoring tool. Serve over HTTP and open in a browser. |
 | `tools/gbworld_to_c.py` | Converts a `.gbworld.json` into a GBDK header/source pair. Standard library only. |
 | `tools/gbworld_visualize.py` | Renders the whole world (all connected maps) to one PNG. Needs Pillow. |
 
 ### Running the tooling (inside the devcontainer)
 
 The container starts a static server automatically. Open
-`http://localhost:8000/gb-world-editor.html`. Then:
+`http://localhost:8000/dist/gb-world-editor.html`. Then:
 
 ```bash
 # Generate C from an exported project
