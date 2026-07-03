@@ -92,6 +92,14 @@
          pattern and seed; export settings as .gbmusic.json or a MIDI file.</p>
       <span class="go">Open generator &raquo;</span>
     </a>
+    <a class="tool-card" href="gb-pixelizer.html">
+      <canvas id="preview-pixelizer" width="160" height="48"></canvas>
+      <h2>Pixelizer</h2>
+      <p>Turn any image into 2-bit pixel art: tone controls, pixel-art-aware
+         downscaling (k-centroid and friends), optional dithering, and a live
+         tile-count readout.</p>
+      <span class="go">Open pixelizer &raquo;</span>
+    </a>
     <a class="tool-card" href="gb-tile-reducer.html">
       <canvas id="preview-reducer" width="160" height="48"></canvas>
       <h2>Tile Reducer</h2>
@@ -142,6 +150,29 @@ const SHADES = ["#e0f8d0", "#88c070", "#346856", "#081820"];
   blob(4, 4, false); blob(17, 2, false); blob(30, 5, true);
   // A ground line beneath the hops.
   for (let x = 2; x < 38; x++) px(x, 10, 2);
+})();
+
+/* Pixelizer preview: a smooth gradient "photo" turning into chunky 2-bit art. */
+(() => {
+  const ctx = document.getElementById("preview-pixelizer").getContext("2d");
+  // Left half: a smooth grayscale gradient with a "sun".
+  for (let x = 0; x < 72; x++) {
+    const g = ctx.createLinearGradient(0, 0, 0, 48);
+    g.addColorStop(0, "#e8e8e8"); g.addColorStop(1, "#202020");
+    ctx.fillStyle = g;
+    ctx.fillRect(x, 0, 1, 48);
+  }
+  ctx.fillStyle = "#fafafa";
+  ctx.beginPath(); ctx.arc(22, 14, 8, 0, Math.PI * 2); ctx.fill();
+  // Arrow.
+  ctx.fillStyle = SHADES[0];
+  ctx.fillRect(76, 21, 10, 4);
+  ctx.beginPath(); ctx.moveTo(86, 15); ctx.lineTo(94, 23); ctx.lineTo(86, 31); ctx.fill();
+  // Right half: the same scene as chunky 4-shade pixels.
+  const px = (x, y, v) => { ctx.fillStyle = SHADES[v]; ctx.fillRect(100 + x * 6, y * 6, 6, 6); };
+  for (let y = 0; y < 8; y++)
+    for (let x = 0; x < 10; x++) px(x, y, y < 3 ? 1 : y < 5 ? 2 : 3);
+  px(2, 1, 0); px(3, 1, 0); px(2, 2, 0); px(3, 2, 0);   // the sun, now 4 fat pixels
 })();
 
 /* Reducer preview: a dense tile grid collapsing into fewer tiles. */

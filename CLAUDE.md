@@ -12,6 +12,7 @@ python3 -m http.server 8000
 # sprite editor:   http://localhost:8000/dist/gb-sprite-editor.html
 # music generator: http://localhost:8000/dist/gb-music-generator.html
 # tile reducer:    http://localhost:8000/dist/gb-tile-reducer.html
+# pixelizer:       http://localhost:8000/dist/gb-pixelizer.html
 ```
 
 Inside the devcontainer a static server starts automatically on port 5500 via VS Code Live Server.
@@ -85,6 +86,10 @@ See `docs/MUSIC_GENERATOR.md` for an end-user guide to every control.
 A stateless single-file utility (no project file, no undo): load a PNG, quantize it to the four DMG shades (same luminance buckets as the editors' importers, alpha = lightest), slice into 8×8 tiles, and merge similar tiles so the image fits a tile budget. Mirrored tiles are deliberately NOT merged — DMG BG tiles can't be flipped, so counts stay honest for the target.
 
 Two clusterers (`greedyCluster`, `agglomerativeCluster`) share the cluster bookkeeping (per-pixel shade histogram, hybrid rep = frequency-weighted per-pixel mode, always 0..3, no gray averaging). Greedy: single pass over unique tiles ordered by frequency; a tile joins the closest cluster within the weighted-SSD threshold or seeds a new one; "target count" mode binary-searches the smallest threshold that fits. Agglomerative: merge the globally cheapest pair repeatedly via nearest-neighbor arrays; O(n²), falls back to greedy above `AGGLO_MAX` (4096) unique tiles. User options in `state`: `repMode` (hybrid synthesized / most-used member / best-fit member), `freqWeight` (Ward factor n1·n2/(n1+n2) so frequent tiles resist merging), `edgeWeight` (border pixels ×2, normalized so thresholds stay comparable), and `refinePasses` (k-means-style reassignment, never grows the cluster count). The reduced PNG downloads at 1× in either bundled palette; both quantize back to the same values, so the file re-imports losslessly into the world/sprite editors.
+
+### The pixelizer (`dist/gb-pixelizer.html`)
+
+A stateless single-file utility that turns arbitrary images into small 2-bit pixel art. Pipeline: tone map (optional 1–99 percentile auto-levels, then brightness/contrast/gamma) → downscale → quantize to the four shades, with the order of the last two steps selectable (`state.order`; quantize-first is the default and scales in shade space, keeping hard 2-bit edges). Downscalers (`scaleArray` reducers, all operating per output-pixel source block so they work on luminance or shades alike): k-centroid (1D k-means per block, keep the dominant cluster's centroid — the pixel-art community standard), dominant value (block mode), box average, nearest sample. Quantization uses three adjustable shade boundaries (plus a "Balance shades" button: Otsu-style weighted 1D k-means over the histogram, thresholds at midpoints between the four cluster centers — robust to a dominant background brightness) and optional dithering: ordered Bayer 2×2/4×4/8×8 or Floyd–Steinberg, with a strength slider (dithering inflates unique-tile counts; the UI warns). The result shows a live unique-8×8-tile count against the 256 budget; the PNG downloads at 1× in either bundled palette and re-imports losslessly into the editors.
 
 ### Converter (`tools/gbworld_to_c.py`)
 

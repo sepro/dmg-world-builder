@@ -1,0 +1,727 @@
+<!--
+  GB Pixelizer - v1
+  Turn a full-resolution image into small 2-bit pixel art: tone-map, downscale
+  with a pixel-art-aware algorithm, and quantize to the four DMG shades.
+
+  Why not just bicubic + threshold? Standard scaling filters average across
+  edges, so after quantization everything turns to mush. The algorithms here
+  are the ones the pixel-art community actually uses for downscaling:
+
+  - K-centroid: for every output pixel, k-means cluster the source block's
+    values and keep the centroid of the biggest cluster (the approach behind
+    Astropulse's Aseprite extension). Preserves dominant detail, kills noise.
+  - Dominant: the most frequent value in the block (mode). Crispest for art
+    that is already flat-shaded.
+  - Box: plain area average. Smooth baseline, blurriest of the four.
+  - Nearest: single center sample. Aliased but razor sharp.
+
+  Pipeline order is selectable because it changes the look: quantizing to the
+  four shades FIRST and then scaling in shade space keeps hard 2-bit edges
+  (often better, and the default), while scaling first keeps more gradients
+  for the quantizer (and lets dithering work at output resolution).
+
+  Stateless like the tile reducer: no project file, no undo. The output PNG
+  downloads at 1x in either bundled palette and re-imports losslessly into
+  the world/sprite editors; the unique-tile stat previews the VRAM cost.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GB Pixelizer</title>
+<link rel="stylesheet" href="gb-theme.css">
+<style>
+  /* Page-specific styling. Shared tokens, controls, and cards live in gb-theme.css. */
+  .budget-ok   { color: var(--muted); }
+  .budget-over { color: var(--danger); font-weight: 700; }
+
+  .drop-zone {
+    border: 1px dashed var(--border);
+    padding: 28px 16px;
+    text-align: center;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .drop-zone:hover, .drop-zone.over { border-color: var(--accent); color: var(--accent); }
+
+  .stats-table { border-collapse: collapse; width: 100%; }
+  .stats-table td { padding: 4px 8px 4px 0; font-size: 12px; }
+  .stats-table td:last-child { text-align: right; color: var(--text); }
+  .stats-table td:first-child { color: var(--muted); }
+
+  .preview-wrap { overflow: auto; max-height: 55vh; border: 1px solid var(--border); background: var(--gb-3); width: max-content; max-width: 100%; }
+  .preview-wrap canvas { display: block; }
+
+  .slider-row { display: flex; align-items: center; gap: 8px; }
+  .slider-row input[type="range"] { flex: 1; min-width: 90px; }
+  .slider-row .slider-val { width: 38px; text-align: right; color: var(--muted); font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header class="topbar">
+    <span class="brand">GB&nbsp;Pixelizer <span class="sub">v1</span></span>
+    <span class="target-tag">image &rarr; 2bpp pixel art</span>
+    <div class="spacer"></div>
+    <a class="nav-link" href="gb-world-editor.html">World</a>
+    <a class="nav-link" href="gb-sprite-editor.html">Sprites</a>
+    <a class="nav-link" href="gb-tile-reducer.html">Reducer</a>
+    <a class="nav-link" href="gb-music-generator.html">Music ♪</a>
+    <button id="btn-load">Load image</button>
+    <button class="primary" id="btn-download" disabled>Download PNG</button>
+    <input type="file" id="file-input" accept="image/*" style="display:none;">
+  </header>
+
+  <main id="panel"></main>
+</div>
+
+<script src="gb-common.js"></script>
+<script>
+"use strict";
+
+/* ============================================================
+   Constants and state
+   ============================================================ */
+
+const TILE_PX = 8;
+const TILE_BUDGET = 256;
+
+// Reconstruction values per shade (0 = lightest), used for dithering error
+// and for balancing thresholds. Midpoint-ish spread over 0..255.
+const SHADE_LEVELS = [255, 170, 85, 0];
+
+const PALETTES = [
+  { name: "GB Green",  colors: ["#e0f8d0", "#88c070", "#346856", "#081820"] },
+  { name: "Grayscale", colors: ["#ffffff", "#aaaaaa", "#555555", "#000000"] },
+];
+
+// Ordered-dither matrices (values 0..n^2-1), the classic GB dither look.
+const BAYER = {
+  bayer2: { n: 2, m: [0, 2, 3, 1] },
+  bayer4: { n: 4, m: [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5] },
+  bayer8: { n: 8, m: [
+     0, 32,  8, 40,  2, 34, 10, 42,
+    48, 16, 56, 24, 50, 18, 58, 26,
+    12, 44,  4, 36, 14, 46,  6, 38,
+    60, 28, 52, 20, 62, 30, 54, 22,
+     3, 35, 11, 43,  1, 33,  9, 41,
+    51, 19, 59, 27, 49, 17, 57, 25,
+    15, 47,  7, 39, 13, 45,  5, 37,
+    63, 31, 55, 23, 61, 29, 53, 21] },
+};
+
+const state = {
+  fileName: null,
+  srcW: 0, srcH: 0,
+  srcLum: null,             // Float32Array: source luminance 0..255 (alpha = lightest)
+  srcCanvas: null,          // original image for the side-by-side preview
+
+  // Pipeline.
+  order: "quantize-first",  // quantize-first | scale-first
+  scaleAlgo: "k-centroid",  // k-centroid | dominant | box | nearest
+  targetW: 160,
+  kClusters: 3,             // k for k-centroid
+
+  // Tone controls (applied before anything else).
+  autoLevels: true,         // percentile stretch 1..99 before the manual knobs
+  brightness: 0,            // -100..100
+  contrast: 0,              // -100..100
+  gamma: 1.0,               // 0.2..3
+
+  // Quantization.
+  t1: 64, t2: 128, t3: 192, // shade boundaries: lum > t3 -> 0 ... <= t1 -> 3
+  dither: "none",           // none | bayer2 | bayer4 | bayer8 | fs
+  ditherStrength: 75,       // percent of one shade step
+
+  // View.
+  paletteIndex: 0,
+  zoom: 0,                  // 0 = auto
+  result: null,             // { shades: Uint8Array, w, h, uniqueTiles }
+};
+
+/* ============================================================
+   Tone mapping
+   ============================================================ */
+
+// Apply auto-levels (percentile stretch), then brightness/contrast/gamma.
+// Input and output are luminance arrays in 0..255 (not yet clamped to int).
+function toneMap(lum) {
+  const out = new Float32Array(lum.length);
+
+  let lo = 0, hi = 255;
+  if (state.autoLevels) {
+    // Stretch the 1st..99th percentile to full range; robust to outliers.
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < lum.length; i++) hist[Math.max(0, Math.min(255, Math.round(lum[i])))]++;
+    const total = lum.length;
+    let acc = 0;
+    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= total * 0.01) { lo = v; break; } }
+    acc = 0;
+    for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= total * 0.01) { hi = v; break; } }
+    if (hi <= lo) { lo = 0; hi = 255; }
+  }
+
+  const contrastFactor = Math.tan((state.contrast / 100 + 1) * Math.PI / 4); // -100..100 -> ~0..inf
+  const invGamma = 1 / Math.max(0.2, state.gamma);
+  for (let i = 0; i < lum.length; i++) {
+    let v = (lum[i] - lo) * 255 / (hi - lo);                    // auto-levels
+    v = (v - 128) * contrastFactor + 128 + state.brightness;    // contrast + brightness
+    v = Math.max(0, Math.min(255, v));
+    v = 255 * Math.pow(v / 255, invGamma);                      // gamma
+    out[i] = v;
+  }
+  return out;
+}
+
+/* ============================================================
+   Quantization to shades (0 = lightest .. 3 = darkest)
+   ============================================================ */
+
+function shadeFor(v) {
+  if (v > state.t3) return 0;
+  if (v > state.t2) return 1;
+  if (v > state.t1) return 2;
+  return 3;
+}
+
+// Quantize a luminance array to shades, with optional dithering.
+function quantizeArr(gray, w, h) {
+  const shades = new Uint8Array(gray.length);
+
+  if (state.dither === "fs") {
+    // Floyd-Steinberg error diffusion against the shade reconstruction levels.
+    const buf = Float32Array.from(gray);
+    const strength = state.ditherStrength / 100;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        const s = shadeFor(buf[i]);
+        shades[i] = s;
+        const err = (buf[i] - SHADE_LEVELS[s]) * strength;
+        if (x + 1 < w) buf[i + 1] += err * 7 / 16;
+        if (y + 1 < h) {
+          if (x > 0) buf[i + w - 1] += err * 3 / 16;
+          buf[i + w] += err * 5 / 16;
+          if (x + 1 < w) buf[i + w + 1] += err * 1 / 16;
+        }
+      }
+    }
+    return shades;
+  }
+
+  const bayer = BAYER[state.dither];
+  if (bayer) {
+    // Ordered dither: bias each pixel by its matrix cell, scaled to a
+    // fraction of one shade step (~85), then threshold as usual.
+    const spread = 85 * (state.ditherStrength / 100);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const b = (bayer.m[(y % bayer.n) * bayer.n + (x % bayer.n)] + 0.5) / (bayer.n * bayer.n) - 0.5;
+        shades[y * w + x] = shadeFor(gray[y * w + x] + b * spread);
+      }
+    }
+    return shades;
+  }
+
+  for (let i = 0; i < gray.length; i++) shades[i] = shadeFor(gray[i]);
+  return shades;
+}
+
+/* ============================================================
+   Downscaling
+   ============================================================
+
+   Every algorithm maps one output pixel to a floating source block
+   [x0..x1) x [y0..y1) and reduces that block to one value. The reducers work
+   on any numeric array, so the same code scales raw luminance (scale-first)
+   or already-quantized shades (quantize-first, the default). */
+
+function blockValues(src, sw, dx, dy, xRatio, yRatio) {
+  const x0 = Math.floor(dx * xRatio), x1 = Math.max(x0 + 1, Math.ceil((dx + 1) * xRatio));
+  const y0 = Math.floor(dy * yRatio), y1 = Math.max(y0 + 1, Math.ceil((dy + 1) * yRatio));
+  const values = [];
+  for (let y = y0; y < y1; y++)
+    for (let x = x0; x < x1; x++)
+      values.push(src[y * sw + x]);
+  return values;
+}
+
+function reduceBox(values) {
+  let sum = 0;
+  for (const v of values) sum += v;
+  return sum / values.length;
+}
+
+function reduceDominant(values) {
+  // Most frequent value. Shade space has 4 values; luminance is bucketed to
+  // integers so "same color" still means something.
+  const counts = new Map();
+  let best = values[0], bestN = 0;
+  for (const v of values) {
+    const key = Math.round(v);
+    const n = (counts.get(key) || 0) + 1;
+    counts.set(key, n);
+    if (n > bestN) { bestN = n; best = key; }
+  }
+  return best;
+}
+
+// 1D k-means over the block's values; return the centroid of the biggest
+// cluster. This is the k-centroid approach: the output pixel takes the
+// block's dominant feature instead of an average across an edge.
+function reduceKCentroid(values, k) {
+  let min = Infinity, max = -Infinity;
+  for (const v of values) { if (v < min) min = v; if (v > max) max = v; }
+  if (max - min < 1e-6 || values.length <= k) return reduceDominant(values);
+
+  // Spread the initial centroids across the block's range.
+  const kk = Math.min(k, 4);
+  const centroids = [];
+  for (let c = 0; c < kk; c++) centroids.push(min + (max - min) * (c + 0.5) / kk);
+
+  const assign = new Array(values.length).fill(0);
+  for (let iter = 0; iter < 8; iter++) {
+    let moved = false;
+    for (let i = 0; i < values.length; i++) {
+      let best = 0, bestD = Infinity;
+      for (let c = 0; c < kk; c++) {
+        const d = Math.abs(values[i] - centroids[c]);
+        if (d < bestD) { bestD = d; best = c; }
+      }
+      if (assign[i] !== best) { assign[i] = best; moved = true; }
+    }
+    const sums = new Array(kk).fill(0), ns = new Array(kk).fill(0);
+    for (let i = 0; i < values.length; i++) { sums[assign[i]] += values[i]; ns[assign[i]]++; }
+    for (let c = 0; c < kk; c++) if (ns[c]) centroids[c] = sums[c] / ns[c];
+    if (!moved) break;
+  }
+
+  let bigC = 0, bigN = -1;
+  const ns = new Array(kk).fill(0);
+  for (const a of assign) ns[a]++;
+  for (let c = 0; c < kk; c++) if (ns[c] > bigN) { bigN = ns[c]; bigC = c; }
+  return centroids[bigC];
+}
+
+function reduceNearest(values) {
+  return values[Math.floor(values.length / 2)];   // center-ish sample
+}
+
+function scaleArray(src, sw, sh, dw, dh) {
+  const out = new Float32Array(dw * dh);
+  const xRatio = sw / dw, yRatio = sh / dh;
+  for (let dy = 0; dy < dh; dy++) {
+    for (let dx = 0; dx < dw; dx++) {
+      const values = blockValues(src, sw, dx, dy, xRatio, yRatio);
+      let v;
+      if (state.scaleAlgo === "k-centroid") v = reduceKCentroid(values, state.kClusters);
+      else if (state.scaleAlgo === "dominant") v = reduceDominant(values);
+      else if (state.scaleAlgo === "nearest") v = reduceNearest(values);
+      else v = reduceBox(values);
+      out[dy * dw + dx] = v;
+    }
+  }
+  return out;
+}
+
+/* ============================================================
+   The pipeline
+   ============================================================ */
+
+function outputSize() {
+  const dw = Math.max(TILE_PX, Math.min(state.srcW, state.targetW));
+  const dh = Math.max(1, Math.round(state.srcH * dw / state.srcW));
+  return { dw, dh };
+}
+
+function recompute() {
+  if (!state.srcLum) return;
+  const { dw, dh } = outputSize();
+  const tone = toneMap(state.srcLum);
+
+  let shades;
+  if (state.order === "quantize-first") {
+    // Quantize at source resolution, then scale in shade space. The reducers
+    // see values 0..3, and the result is rounded back to a valid shade.
+    const srcShades = quantizeArr(tone, state.srcW, state.srcH);
+    const scaled = scaleArray(srcShades, state.srcW, state.srcH, dw, dh);
+    shades = new Uint8Array(dw * dh);
+    for (let i = 0; i < shades.length; i++) {
+      shades[i] = Math.max(0, Math.min(3, Math.round(scaled[i])));
+    }
+  } else {
+    // Scale the tone-mapped luminance, then quantize (dithering happens at
+    // output resolution, which is what dithering usually wants).
+    const scaled = scaleArray(tone, state.srcW, state.srcH, dw, dh);
+    shades = quantizeArr(scaled, dw, dh);
+  }
+
+  state.result = { shades, w: dw, h: dh, uniqueTiles: countUniqueTiles(shades, dw, dh) };
+}
+
+// Unique 8x8 tiles the result would need (padded with the lightest shade),
+// as a preview of the VRAM cost before the image goes anywhere near a map.
+function countUniqueTiles(shades, w, h) {
+  const tw = Math.ceil(w / TILE_PX), th = Math.ceil(h / TILE_PX);
+  const seen = new Set();
+  for (let ty = 0; ty < th; ty++) {
+    for (let tx = 0; tx < tw; tx++) {
+      let key = "";
+      for (let y = 0; y < TILE_PX; y++) {
+        for (let x = 0; x < TILE_PX; x++) {
+          const sx = tx * TILE_PX + x, sy = ty * TILE_PX + y;
+          key += (sx < w && sy < h) ? shades[sy * w + sx] : 0;
+        }
+      }
+      seen.add(key);
+    }
+  }
+  return seen.size;
+}
+
+/* ============================================================
+   Image loading
+   ============================================================ */
+
+function loadImageFile(file) {
+  const img = new Image();
+  img.onload = () => {
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = img.width; canvas.height = img.height;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0);
+      const data = ctx.getImageData(0, 0, img.width, img.height).data;
+
+      const lum = new Float32Array(img.width * img.height);
+      for (let i = 0; i < lum.length; i++) {
+        const j = i * 4;
+        // Transparent pixels read as the lightest shade, like the importers.
+        lum[i] = data[j + 3] < 128
+          ? 255
+          : 0.299 * data[j] + 0.587 * data[j + 1] + 0.114 * data[j + 2];
+      }
+      state.fileName = file.name;
+      state.srcW = img.width; state.srcH = img.height;
+      state.srcLum = lum;
+      state.srcCanvas = canvas;
+      state.targetW = Math.min(img.width, 160);   // GB screen width as the default
+      recompute();
+      render();
+    } catch (err) {
+      alert("Could not load image: " + err.message);
+    }
+    URL.revokeObjectURL(img.src);
+  };
+  img.onerror = () => alert("Could not read that file as an image.");
+  img.src = URL.createObjectURL(file);
+}
+
+/* ============================================================
+   Rendering
+   ============================================================ */
+
+function autoZoom() {
+  return Math.max(1, Math.min(8, Math.floor(480 / (state.result ? state.result.w : 160))));
+}
+
+// Paint a shade array via 1x ImageData + scaled blit (crisp and fast).
+function paintShades(canvas, shades, w, h, zoom, colors) {
+  const rgb = colors.map(c => [
+    parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16),
+  ]);
+  const src = document.createElement("canvas");
+  src.width = w; src.height = h;
+  const sctx = src.getContext("2d");
+  const img = sctx.createImageData(w, h);
+  for (let i = 0; i < shades.length; i++) {
+    const [r, g, b] = rgb[shades[i]];
+    img.data[i * 4] = r; img.data[i * 4 + 1] = g; img.data[i * 4 + 2] = b;
+    img.data[i * 4 + 3] = 255;
+  }
+  sctx.putImageData(img, 0, 0);
+
+  canvas.width = w * zoom; canvas.height = h * zoom;
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(src, 0, 0, canvas.width, canvas.height);
+}
+
+// A labeled slider row with a live value readout.
+function sliderRow(text, min, max, step, value, format, onChange) {
+  const field = el("div", "field");
+  field.appendChild(label(text));
+  const row = el("div", "slider-row");
+  const slider = document.createElement("input");
+  slider.type = "range"; slider.min = min; slider.max = max; slider.step = step; slider.value = value;
+  const val = el("span", "slider-val", format(value));
+  slider.addEventListener("input", () => { val.textContent = format(Number(slider.value)); });
+  slider.addEventListener("change", () => onChange(Number(slider.value)));
+  row.append(slider, val);
+  field.appendChild(row);
+  return field;
+}
+
+function render() {
+  document.getElementById("btn-download").disabled = !state.result;
+  const panel = document.getElementById("panel");
+  panel.innerHTML = "";
+
+  if (!state.srcLum) {
+    const card = el("div", "card");
+    card.appendChild(el("h2", null, "Load an image"));
+    const drop = el("div", "drop-zone",
+      "Click to choose an image, or drop one here. Any size or color: it will be " +
+      "tone-mapped, downscaled with a pixel-art-aware algorithm, and quantized " +
+      "to the four DMG shades.");
+    drop.addEventListener("click", () => document.getElementById("file-input").click());
+    drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+    drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+    drop.addEventListener("drop", (e) => {
+      e.preventDefault();
+      drop.classList.remove("over");
+      const file = e.dataTransfer.files[0];
+      if (file) loadImageFile(file);
+    });
+    card.appendChild(drop);
+    panel.appendChild(card);
+    return;
+  }
+
+  const res = state.result;
+  const cols = el("div", "cols");
+
+  /* ---- left: pipeline controls ---- */
+  const ctl = el("div", "card col-library");
+  ctl.appendChild(el("h2", null, "Pipeline"));
+
+  const { dw, dh } = outputSize();
+  const wField = el("div", "field");
+  wField.appendChild(label("Output width (px) — height follows: " + dh));
+  const wIn = numberInput(state.targetW, TILE_PX, state.srcW);
+  wIn.addEventListener("change", () => {
+    state.targetW = clampInt(wIn.value, TILE_PX, state.srcW);
+    recompute(); render();
+  });
+  wField.appendChild(wIn);
+  ctl.appendChild(wField);
+
+  const orderField = el("div", "field");
+  orderField.appendChild(label("Order"));
+  orderField.appendChild(selectFrom(
+    [{ value: "quantize-first", label: "4 shades first, then scale" },
+     { value: "scale-first", label: "Scale first, then 4 shades" }],
+    state.order, v => { state.order = v; recompute(); render(); }));
+  ctl.appendChild(orderField);
+  ctl.appendChild(el("p", "hint", state.order === "quantize-first"
+    ? "Keeps hard 2-bit edges through the scaler. Dithering is applied before scaling, so fine dither patterns mostly wash out."
+    : "Keeps gradients for the quantizer; dithering happens at output resolution."));
+
+  const algoField = el("div", "field");
+  algoField.appendChild(label("Scale algorithm"));
+  algoField.appendChild(selectFrom(
+    [{ value: "k-centroid", label: "K-centroid (recommended)" },
+     { value: "dominant", label: "Dominant value" },
+     { value: "box", label: "Box average" },
+     { value: "nearest", label: "Nearest sample" }],
+    state.scaleAlgo, v => { state.scaleAlgo = v; recompute(); render(); }));
+  ctl.appendChild(algoField);
+  if (state.scaleAlgo === "k-centroid") {
+    const kField = el("div", "field");
+    kField.appendChild(label("K (clusters per block, 2-4)"));
+    const kIn = numberInput(state.kClusters, 2, 4);
+    kIn.addEventListener("change", () => {
+      state.kClusters = clampInt(kIn.value, 2, 4);
+      recompute(); render();
+    });
+    kField.appendChild(kIn);
+    ctl.appendChild(kField);
+  }
+
+  /* ---- tone ---- */
+  ctl.appendChild(spacer(12));
+  ctl.appendChild(el("h2", null, "Tone"));
+  ctl.appendChild(toggle("Auto levels (stretch 1-99 percentile)", state.autoLevels,
+    v => { state.autoLevels = v; recompute(); render(); }));
+  ctl.appendChild(spacer(6));
+  ctl.appendChild(sliderRow("Brightness", -100, 100, 1, state.brightness, v => String(v),
+    v => { state.brightness = v; recompute(); render(); }));
+  ctl.appendChild(sliderRow("Contrast", -100, 100, 1, state.contrast, v => String(v),
+    v => { state.contrast = v; recompute(); render(); }));
+  ctl.appendChild(sliderRow("Gamma", 0.2, 3, 0.05, state.gamma, v => v.toFixed(2),
+    v => { state.gamma = v; recompute(); render(); }));
+
+  /* ---- quantization ---- */
+  ctl.appendChild(spacer(12));
+  ctl.appendChild(el("h2", null, "Shades"));
+  ctl.appendChild(sliderRow("Dark / mid-dark boundary", 1, 253, 1, state.t1, v => String(v),
+    v => { state.t1 = Math.min(v, state.t2 - 1); recompute(); render(); }));
+  ctl.appendChild(sliderRow("Mid-dark / mid-light boundary", 2, 254, 1, state.t2, v => String(v),
+    v => { state.t2 = Math.max(state.t1 + 1, Math.min(v, state.t3 - 1)); recompute(); render(); }));
+  ctl.appendChild(sliderRow("Mid-light / light boundary", 3, 255, 1, state.t3, v => String(v),
+    v => { state.t3 = Math.max(state.t2 + 1, v); recompute(); render(); }));
+
+  const balanceBtn = el("button", "tiny", "Balance shades");
+  balanceBtn.title = "Fit the boundaries to the image: 4-cluster split of the tone-mapped histogram (Otsu-style)";
+  balanceBtn.addEventListener("click", () => {
+    // Percentile splits fail on images dominated by one brightness (a mostly
+    // white background pushes all three boundaries to 255). Instead, run a
+    // weighted 1D k-means over the histogram: a dominant background becomes
+    // ONE cluster, and the thresholds land between the four cluster centers.
+    const tone = toneMap(state.srcLum);
+    const hist = new Float64Array(256);
+    for (let i = 0; i < tone.length; i++) hist[Math.max(0, Math.min(255, Math.round(tone[i])))]++;
+
+    const centers = [32, 96, 160, 224];   // ascending init keeps clusters ordered
+    for (let iter = 0; iter < 24; iter++) {
+      const sums = [0, 0, 0, 0], ns = [0, 0, 0, 0];
+      for (let v = 0; v < 256; v++) {
+        if (!hist[v]) continue;
+        let best = 0, bestD = Infinity;
+        for (let c = 0; c < 4; c++) {
+          const d = Math.abs(v - centers[c]);
+          if (d < bestD) { bestD = d; best = c; }
+        }
+        sums[best] += v * hist[v];
+        ns[best] += hist[v];
+      }
+      let moved = false;
+      for (let c = 0; c < 4; c++) {
+        if (!ns[c]) continue;                 // empty cluster keeps its center
+        const next = sums[c] / ns[c];
+        if (Math.abs(next - centers[c]) > 0.25) moved = true;
+        centers[c] = next;
+      }
+      if (!moved) break;
+    }
+    centers.sort((a, b) => a - b);
+    // Boundaries halfway between adjacent centers, kept strictly ordered.
+    state.t1 = Math.max(1, Math.min(253, Math.round((centers[0] + centers[1]) / 2)));
+    state.t2 = Math.max(state.t1 + 1, Math.min(254, Math.round((centers[1] + centers[2]) / 2)));
+    state.t3 = Math.max(state.t2 + 1, Math.min(255, Math.round((centers[2] + centers[3]) / 2)));
+    recompute(); render();
+  });
+  ctl.appendChild(balanceBtn);
+
+  ctl.appendChild(spacer(10));
+  const dField = el("div", "field");
+  dField.appendChild(label("Dithering"));
+  dField.appendChild(selectFrom(
+    [{ value: "none", label: "None (best for tiles)" },
+     { value: "bayer2", label: "Bayer 2×2" },
+     { value: "bayer4", label: "Bayer 4×4" },
+     { value: "bayer8", label: "Bayer 8×8" },
+     { value: "fs", label: "Floyd–Steinberg" }],
+    state.dither, v => { state.dither = v; recompute(); render(); }));
+  ctl.appendChild(dField);
+  if (state.dither !== "none") {
+    ctl.appendChild(sliderRow("Dither strength (%)", 0, 150, 5, state.ditherStrength, v => String(v),
+      v => { state.ditherStrength = v; recompute(); render(); }));
+    ctl.appendChild(el("p", "hint",
+      "Dithering multiplies unique tile counts — watch the stat below if this art is headed for a tileset."));
+  }
+
+  /* ---- stats + view ---- */
+  ctl.appendChild(spacer(12));
+  const table = document.createElement("table");
+  table.className = "stats-table";
+  const trow = (k, v) => {
+    const tr = document.createElement("tr");
+    tr.appendChild(el("td", null, k));
+    tr.appendChild(el("td", null, v));
+    table.appendChild(tr);
+  };
+  trow("Source", state.fileName + " (" + state.srcW + "×" + state.srcH + ")");
+  trow("Output", res.w + "×" + res.h);
+  trow("Unique 8×8 tiles", String(res.uniqueTiles));
+  ctl.appendChild(table);
+  const fits = res.uniqueTiles <= TILE_BUDGET;
+  ctl.appendChild(el("p", fits ? "budget-ok" : "budget-over",
+    res.uniqueTiles + " / " + TILE_BUDGET + " VRAM budget" +
+    (fits ? "" : "  (run the result through the Tile Reducer)")));
+
+  ctl.appendChild(spacer(10));
+  const viewRow = el("div", "row");
+  const palField = el("div", "field");
+  palField.appendChild(label("Palette"));
+  palField.appendChild(selectFrom(
+    PALETTES.map((p, i) => ({ value: i, label: p.name })),
+    state.paletteIndex, v => { state.paletteIndex = Number(v); render(); }));
+  const zoomField = el("div", "field");
+  zoomField.appendChild(label("Zoom"));
+  zoomField.appendChild(selectFrom(
+    [{ value: 0, label: "auto" }, 1, 2, 3, 4, 6, 8],
+    state.zoom, v => { state.zoom = Number(v); render(); }));
+  viewRow.append(palField, zoomField);
+  ctl.appendChild(viewRow);
+
+  ctl.appendChild(spacer(12));
+  const loadOther = el("button", null, "Load another image");
+  loadOther.addEventListener("click", () => document.getElementById("file-input").click());
+  ctl.appendChild(loadOther);
+
+  cols.appendChild(ctl);
+
+  /* ---- right: source and result previews ---- */
+  const srcCard = el("div", "card col-editor");
+  srcCard.appendChild(el("h2", null, "Source"));
+  const srcWrap = el("div", "preview-wrap");
+  const srcView = document.createElement("canvas");
+  // Fit the source preview to roughly the same on-screen width as the result.
+  const fit = Math.min(1, 480 / state.srcW);
+  srcView.width = Math.max(1, Math.round(state.srcW * fit));
+  srcView.height = Math.max(1, Math.round(state.srcH * fit));
+  const sctx = srcView.getContext("2d");
+  sctx.drawImage(state.srcCanvas, 0, 0, srcView.width, srcView.height);
+  srcWrap.appendChild(srcView);
+  srcCard.appendChild(srcWrap);
+  cols.appendChild(srcCard);
+
+  const outCard = el("div", "card col-editor");
+  outCard.appendChild(el("h2", null, "Result — " + res.w + "×" + res.h +
+    " · " + res.uniqueTiles + " unique tiles"));
+  const outWrap = el("div", "preview-wrap");
+  const outView = document.createElement("canvas");
+  paintShades(outView, res.shades, res.w, res.h, state.zoom || autoZoom(), PALETTES[state.paletteIndex].colors);
+  outWrap.appendChild(outView);
+  outCard.appendChild(outWrap);
+  cols.appendChild(outCard);
+
+  panel.appendChild(cols);
+}
+
+/* ============================================================
+   Download
+   ============================================================ */
+
+function downloadResult() {
+  if (!state.result) return;
+  const { shades, w, h } = state.result;
+  const canvas = document.createElement("canvas");
+  // 1x scale so the file re-imports directly as tiles.
+  paintShades(canvas, shades, w, h, 1, PALETTES[state.paletteIndex].colors);
+  const base = (state.fileName || "image").replace(/\.[^.]*$/, "").replace(/[^a-z0-9_-]+/gi, "_");
+  canvas.toBlob(blob => {
+    if (blob) downloadBlob(base + "-2bpp.png", blob);
+    else alert("Could not encode the PNG.");
+  }, "image/png");
+}
+
+/* ============================================================
+   Wiring
+   ============================================================ */
+
+document.getElementById("btn-load").addEventListener("click", () =>
+  document.getElementById("file-input").click());
+document.getElementById("btn-download").addEventListener("click", downloadResult);
+document.getElementById("file-input").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (file) loadImageFile(file);
+  e.target.value = "";   // allow reloading the same file
+});
+
+render();
+</script>
+</body>
+</html>
