@@ -1,0 +1,1747 @@
+<!--
+  GB Sprite Editor - v1
+  A browser-based authoring tool for Game Boy sprites (OBJs).
+
+  Hierarchy: 8x8 tile (2bpp) -> metasprite (parts = hardware sprites with pixel
+  offsets, flips, palette) -> animation (sequence of metasprites + durations).
+
+  Hardware notes this editor models:
+  - OBJ size is one global LCDC flag: every sprite in a game is either 8x8 or
+    8x16, never mixed. The mode is therefore a project-level setting.
+  - Pixel value 0 is always transparent in OBJ rendering (shown as a checker).
+  - Each hardware sprite supports independent H/V flip (unlike BG tiles).
+  - Lower OAM index draws on top; part order in a metasprite mirrors that.
+
+  The project lives in memory only. Use Export to save it to a .gbsprite.json
+  file and Import to load it back, matching the world editor's conventions.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GB Sprite Editor</title>
+<link rel="stylesheet" href="gb-theme.css">
+<style>
+  /* Editor-specific styling. Shared tokens, controls, and the modal live in gb-theme.css. */
+  .budget-ok   { color: var(--muted); }
+  .budget-over { color: var(--danger); font-weight: 700; }
+
+  /* ---- libraries (grids of thumbnails) ---- */
+  .lib-grid { display: grid; grid-template-columns: repeat(auto-fill, 40px); gap: 6px; }
+  .lib-cell {
+    position: relative;
+    width: 40px; height: 40px;
+    border: 1px solid var(--border);
+    background: var(--gb-3);
+    cursor: pointer;
+    padding: 0;
+  }
+  .lib-cell:hover { border-color: var(--muted); }
+  .lib-cell.selected { border-color: var(--accent); outline: 1px solid var(--accent); }
+  .lib-cell .idx {
+    position: absolute; bottom: 0; right: 1px;
+    font-size: 9px; color: var(--accent);
+    background: rgba(8,24,32,0.7); padding: 0 2px; pointer-events: none;
+  }
+
+  .ms-list, .anim-list { display: flex; flex-direction: column; gap: 4px; }
+  .ms-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px; border: 1px solid var(--border); background: var(--panel-2);
+    cursor: pointer;
+  }
+  .ms-row:hover { border-color: var(--muted); }
+  .ms-row.selected { border-color: var(--accent); }
+  .ms-row .ms-name { flex: 1; }
+  .ms-row .ms-meta { color: var(--muted); font-size: 11px; }
+
+  /* ---- tile pixel editor ---- */
+  .editor-canvas { border: 1px solid var(--border); background: var(--gb-3); touch-action: none; cursor: crosshair; }
+  .ink-swatches { display: flex; gap: 6px; }
+  .ink-swatch {
+    width: 34px; height: 34px; border: 2px solid var(--border); cursor: pointer; position: relative;
+    background-size: 12px 12px;
+  }
+  .ink-swatch.active { border-color: var(--accent); }
+  .ink-swatch .val { position: absolute; bottom: 0; right: 2px; font-size: 9px; color: var(--accent); }
+  .tool-btn.active { color: var(--accent); border-color: var(--accent); }
+
+  /* ---- metasprite composer ---- */
+  .composer-canvas { border: 1px solid var(--border); background: var(--gb-3); touch-action: none; cursor: grab; }
+  .part-list { display: flex; flex-direction: column; gap: 3px; margin-top: 8px; }
+  .part-row {
+    display: flex; align-items: center; gap: 8px; padding: 4px 8px;
+    border: 1px solid var(--border); background: var(--panel-2); cursor: pointer;
+    font-size: 11px;
+  }
+  .part-row:hover { border-color: var(--muted); }
+  .part-row.selected { border-color: var(--accent); }
+  .part-row .part-meta { color: var(--muted); }
+  .cell-toggle.active { color: var(--accent); border-color: var(--accent); }
+
+  /* ---- animation editor ---- */
+  .frame-strip { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .frame-cell {
+    position: relative; width: 44px; height: 44px;
+    border: 1px solid var(--border); background: var(--gb-3); cursor: pointer; padding: 0;
+  }
+  .frame-cell:hover { border-color: var(--muted); }
+  .frame-cell.selected { border-color: var(--accent); outline: 1px solid var(--accent); }
+  .frame-cell .fnum {
+    position: absolute; bottom: 0; right: 1px; font-size: 9px; color: var(--accent);
+    background: rgba(8,24,32,0.7); padding: 0 2px; pointer-events: none;
+  }
+  .anim-preview { border: 1px solid var(--border); background: var(--gb-3); }
+</style>
+</head>
+<body>
+<div id="app">
+  <header class="topbar">
+    <span class="brand">GB&nbsp;Sprite&nbsp;Editor <span class="sub">v1</span></span>
+    <div class="field" style="flex-direction:row;align-items:center;gap:6px;">
+      <label style="margin:0;">Project</label>
+      <input type="text" id="project-name" style="width:150px;">
+    </div>
+    <div class="field" style="flex-direction:row;align-items:center;gap:6px;">
+      <label style="margin:0;">OBJ size</label>
+      <select id="sprite-mode">
+        <option value="8x8">8&times;8</option>
+        <option value="8x16">8&times;16</option>
+      </select>
+    </div>
+    <div class="spacer"></div>
+    <a class="nav-link" href="gb-world-editor.html">World</a>
+    <a class="nav-link" href="gb-music-generator.html">Music ♪</a>
+    <button id="btn-undo" title="Undo (Ctrl/Cmd+Z)">Undo</button>
+    <button id="btn-redo" title="Redo (Ctrl/Cmd+Shift+Z)">Redo</button>
+    <button id="btn-new">New</button>
+    <button id="btn-import">Import</button>
+    <button class="primary" id="btn-export">Export</button>
+    <input type="file" id="file-input" accept="application/json,.json" style="display:none;">
+  </header>
+
+  <nav class="tabs">
+    <button class="tab" data-panel="palettes">Palettes</button>
+    <button class="tab" data-panel="tiles">Tiles</button>
+    <button class="tab" data-panel="metasprites">Metasprites</button>
+    <button class="tab" data-panel="animations">Animations</button>
+  </nav>
+
+  <main id="panel"></main>
+</div>
+
+<script src="gb-common.js"></script>
+<script>
+"use strict";
+
+/* ============================================================
+   Project model
+   ============================================================ */
+
+const FORMAT_VERSION = 1;
+const TILE_PX = 8;                    // a hardware tile is always 8x8 pixels
+const PIXELS_PER_TILE = TILE_PX * TILE_PX;
+const TILE_BUDGET = 256;              // OBJ tile slots in VRAM (shared with BG in practice)
+const WORKSPACE = 64;                 // metasprite canvas is 64x64 px, plenty for GB objects
+
+// The current OBJ height in pixels: 8 or 16 depending on the project mode.
+function objHeight() { return state.project.meta.spriteMode === "8x16" ? 16 : 8; }
+// Tiles per metasprite part: an 8x16 hardware sprite is two stacked 8x8 tiles.
+function tilesPerPart() { return state.project.meta.spriteMode === "8x16" ? 2 : 1; }
+
+function makeDefaultProject() {
+  const project = {
+    formatVersion: FORMAT_VERSION,
+    meta: { name: "Untitled Sprites", target: "GBC, DMG-compatible", spriteMode: "8x8" },
+    nextId: 1,
+    palettes: [],
+    tiles: [],
+    metasprites: [],
+    animations: [],
+  };
+  const id = () => project.nextId++;
+
+  // Sprite palettes: value 0 is transparent on hardware, so only 1..3 show.
+  project.palettes.push(
+    { id: id(), name: "OBJ Green",  colors: ["#e0f8d0", "#88c070", "#346856", "#081820"] },
+    { id: id(), name: "Grayscale",  colors: ["#ffffff", "#aaaaaa", "#555555", "#000000"] },
+  );
+  const pal = project.palettes[0].id;
+
+  seedDemoContent(project, pal, id);
+
+  project._displayPaletteId = pal;
+  return project;
+}
+
+// Turn strings of "0".."3" into a flat pixel array so demo art reads as a picture.
+function rows(...r) { return r.join("").split("").map(Number); }
+
+// Slice a 16x16 picture (16 strings of 16 chars) into 4 tiles: TL, TR, BL, BR.
+function slice16(rows16) {
+  const grid = rows16.map(line => line.split("").map(Number));
+  const tileAt = (tx, ty) => {
+    const pixels = [];
+    for (let y = 0; y < TILE_PX; y++)
+      for (let x = 0; x < TILE_PX; x++)
+        pixels.push(grid[ty * TILE_PX + y][tx * TILE_PX + x]);
+    return pixels;
+  };
+  return [tileAt(0, 0), tileAt(1, 0), tileAt(0, 1), tileAt(1, 1)];
+}
+
+// Fill a fresh project with a small slime + bounce animation so every panel is
+// explorable immediately. Ordinary authored content, nothing special.
+function seedDemoContent(project, pal, id) {
+  const slimePixels = slice16([
+    "0000000000000000",
+    "0000033333300000",
+    "0003311111133000",
+    "0031111111111300",
+    "0311111111111130",
+    "0311311111311130",
+    "3111311111311113",
+    "3111111111111113",
+    "3111111111111113",
+    "3111112222111113",
+    "3111121111211113",
+    "3111111111111213",
+    "0311111111112130",
+    "0031122222211300",
+    "0003322222233000",
+    "0000033333300000",
+  ]);
+  const tileIds = slimePixels.map(pixels => {
+    const tile = { id: id(), pixels };
+    project.tiles.push(tile);
+    return tile.id;
+  });
+
+  // Parts are TL, TR, BL, BR of the 16x16 slime, centered in the workspace.
+  const part = (tileId, x, y) =>
+    ({ tiles: [tileId], x, y, hFlip: false, vFlip: false, paletteId: pal });
+  const cx = (WORKSPACE - 16) / 2;
+  const msIdle = {
+    id: id(), name: "slime",
+    parts: [
+      part(tileIds[0], cx, cx), part(tileIds[1], cx + 8, cx),
+      part(tileIds[2], cx, cx + 8), part(tileIds[3], cx + 8, cx + 8),
+    ],
+  };
+  // Squash frame: same tiles, top half pushed down 2px so the body compresses.
+  const msSquash = {
+    id: id(), name: "slime squash",
+    parts: [
+      part(tileIds[0], cx, cx + 2), part(tileIds[1], cx + 8, cx + 2),
+      part(tileIds[2], cx, cx + 8), part(tileIds[3], cx + 8, cx + 8),
+    ],
+  };
+  project.metasprites.push(msIdle, msSquash);
+
+  project.animations.push({
+    id: id(), name: "bounce", loop: true,
+    frames: [
+      { metaspriteId: msIdle.id, duration: 20 },
+      { metaspriteId: msSquash.id, duration: 12 },
+    ],
+  });
+}
+
+/* ============================================================
+   App state (selections and tool, kept separate from the saved project)
+   ============================================================ */
+
+const state = {
+  project: makeDefaultProject(),
+  activePanel: "tiles",
+  displayPaletteId: null,
+
+  selectedTileId: null,
+  ink: 3,                  // current pixel value to paint (0..3; 0 = transparent)
+  tool: "pencil",          // pencil | fill | eyedropper
+
+  selectedMetaspriteId: null,
+  selectedPartIndex: -1,
+  selectedPartCell: 0,     // 0 = top tile, 1 = bottom tile (8x16 mode only)
+  snapToGrid: false,       // snap part dragging to the 8px grid
+
+  selectedAnimationId: null,
+  selectedFrameIndex: -1,
+  animPlay: true,
+};
+
+function syncSelectionsToProject() {
+  // Point selections at valid objects after a New or Import.
+  const p = state.project;
+  state.displayPaletteId = p._displayPaletteId ?? (p.palettes[0] && p.palettes[0].id);
+  state.selectedTileId = p.tiles[0] ? p.tiles[0].id : null;
+  state.selectedMetaspriteId = p.metasprites[0] ? p.metasprites[0].id : null;
+  state.selectedPartIndex = -1;
+  state.selectedPartCell = 0;
+  state.selectedAnimationId = p.animations[0] ? p.animations[0].id : null;
+  state.selectedFrameIndex = -1;
+}
+
+/* ============================================================
+   Undo / redo history (full JSON snapshots, same scheme as the world editor)
+   ============================================================ */
+
+const history = { undo: [], redo: [], limit: 60 };
+
+function currentJson() {
+  state.project._displayPaletteId = state.displayPaletteId;
+  return JSON.stringify(state.project);
+}
+
+// Capture the pre-edit state. Call this immediately before a mutation.
+function snapshot() {
+  history.undo.push(currentJson());
+  if (history.undo.length > history.limit) history.undo.shift();
+  history.redo.length = 0;
+  updateHistoryButtons();
+}
+
+function restoreFrom(json) {
+  state.project = JSON.parse(json);
+  state.displayPaletteId = state.project._displayPaletteId
+    ?? (state.project.palettes[0] && state.project.palettes[0].id);
+  validateSelections();
+}
+
+function undo() {
+  if (!history.undo.length) return;
+  history.redo.push(currentJson());
+  restoreFrom(history.undo.pop());
+  render();
+}
+function redo() {
+  if (!history.redo.length) return;
+  history.undo.push(currentJson());
+  restoreFrom(history.redo.pop());
+  render();
+}
+
+function resetHistory() {
+  history.undo.length = 0;
+  history.redo.length = 0;
+  updateHistoryButtons();
+}
+
+function updateHistoryButtons() {
+  const u = document.getElementById("btn-undo");
+  const r = document.getElementById("btn-redo");
+  if (u) u.disabled = history.undo.length === 0;
+  if (r) r.disabled = history.redo.length === 0;
+}
+
+// After an undo/redo, keep selections pointing at things that still exist.
+function validateSelections() {
+  const p = state.project;
+  const has = (arr, id) => arr.some(x => x.id === id);
+  if (!has(p.palettes, state.displayPaletteId)) state.displayPaletteId = p.palettes[0] && p.palettes[0].id;
+  if (!has(p.tiles, state.selectedTileId)) state.selectedTileId = p.tiles[0] ? p.tiles[0].id : null;
+  if (!has(p.metasprites, state.selectedMetaspriteId)) state.selectedMetaspriteId = p.metasprites[0] ? p.metasprites[0].id : null;
+  const ms = selectedMetasprite();
+  if (!ms || state.selectedPartIndex >= ms.parts.length) state.selectedPartIndex = -1;
+  if (!has(p.animations, state.selectedAnimationId)) state.selectedAnimationId = p.animations[0] ? p.animations[0].id : null;
+  const anim = selectedAnimation();
+  if (!anim || state.selectedFrameIndex >= anim.frames.length) state.selectedFrameIndex = -1;
+}
+
+/* ============================================================
+   Lookups
+   ============================================================ */
+
+const genId = () => state.project.nextId++;
+const paletteById = (id) => state.project.palettes.find(p => p.id === id) || null;
+const colorsForPalette = (id) => {
+  const pal = paletteById(id);
+  return pal ? pal.colors : ["#000000", "#000000", "#000000", "#000000"];
+};
+const tileById = (id) => state.project.tiles.find(t => t.id === id) || null;
+const metaspriteById = (id) => state.project.metasprites.find(m => m.id === id) || null;
+const animationById = (id) => state.project.animations.find(a => a.id === id) || null;
+const selectedMetasprite = () => metaspriteById(state.selectedMetaspriteId);
+const selectedAnimation = () => animationById(state.selectedAnimationId);
+
+// How many metasprite part cells reference a given tile (guards tile deletion).
+function countTileReferences(tileId) {
+  return state.project.metasprites.reduce((n, ms) =>
+    n + ms.parts.reduce((k, part) => k + part.tiles.filter(t => t === tileId).length, 0), 0);
+}
+
+// How many animation frames reference a given metasprite (guards deletion).
+function countMetaspriteReferences(msId) {
+  return state.project.animations.reduce((n, anim) =>
+    n + anim.frames.filter(f => f.metaspriteId === msId).length, 0);
+}
+
+/* ============================================================
+   Drawing helpers
+   ============================================================ */
+
+// Checkerboard = transparency (OBJ color 0). Same shades the world editor uses
+// for empty cells, so "nothing here" reads consistently across the suite.
+function drawChecker(ctx, w, h, ox = 0, oy = 0, step = 8) {
+  for (let y = 0; y < Math.ceil(h / step); y++) {
+    for (let x = 0; x < Math.ceil(w / step); x++) {
+      ctx.fillStyle = (x + y) % 2 === 0 ? "#15281c" : "#0c1c12";
+      ctx.fillRect(ox + x * step, oy + y * step,
+        Math.min(step, w - x * step), Math.min(step, h - y * step));
+    }
+  }
+}
+
+// Paint an 8x8 pixel array, skipping value 0 (transparent) and applying the
+// hardware H/V flips. One filled rect per pixel keeps it crisp at any scale.
+function drawSpritePixels(ctx, pixels, colors, scale, ox = 0, oy = 0, hFlip = false, vFlip = false) {
+  for (let y = 0; y < TILE_PX; y++) {
+    for (let x = 0; x < TILE_PX; x++) {
+      const v = pixels[y * TILE_PX + x];
+      if (v === 0) continue;
+      const dx = hFlip ? TILE_PX - 1 - x : x;
+      const dy = vFlip ? TILE_PX - 1 - y : y;
+      ctx.fillStyle = colors[v];
+      ctx.fillRect(ox + dx * scale, oy + dy * scale, scale, scale);
+    }
+  }
+}
+
+// Draw one metasprite part (one hardware sprite). In 8x16 mode a vertical flip
+// also swaps the two 8x8 halves, exactly as the hardware does.
+function drawPart(ctx, part, scale, ox = 0, oy = 0) {
+  const colors = colorsForPalette(part.paletteId);
+  const n = part.tiles.length;
+  for (let i = 0; i < n; i++) {
+    const tile = part.tiles[i] != null ? tileById(part.tiles[i]) : null;
+    if (!tile) continue;
+    const slot = part.vFlip ? n - 1 - i : i;
+    drawSpritePixels(ctx, tile.pixels, colors, scale,
+      ox + part.x * scale, oy + (part.y + slot * TILE_PX) * scale,
+      part.hFlip, part.vFlip);
+  }
+}
+
+// Draw a whole metasprite. Parts are drawn last-to-first so parts[0] ends up
+// on top, matching OAM priority (lower index wins).
+function drawMetasprite(ctx, ms, scale, ox = 0, oy = 0) {
+  for (let i = ms.parts.length - 1; i >= 0; i--) {
+    drawPart(ctx, ms.parts[i], scale, ox, oy);
+  }
+}
+
+// Thumbnail of a metasprite over a transparency checker (44px lib cells etc).
+function paintMetaspriteThumb(canvas, ms) {
+  const ctx = canvas.getContext("2d");
+  const scale = canvas.width / WORKSPACE;
+  drawChecker(ctx, canvas.width, canvas.height, 0, 0, canvas.width / 8);
+  if (ms) drawMetasprite(ctx, ms, scale);
+}
+
+// Thumbnail of a single tile over the checker.
+function paintTileThumb(canvas, tile, colors) {
+  const ctx = canvas.getContext("2d");
+  drawChecker(ctx, canvas.width, canvas.height, 0, 0, canvas.width / 4);
+  drawSpritePixels(ctx, tile.pixels, colors, canvas.width / TILE_PX);
+}
+
+/* ============================================================
+   Rendering: top bar and tabs
+   ============================================================ */
+
+function renderTopBar() {
+  document.getElementById("project-name").value = state.project.meta.name;
+  document.getElementById("sprite-mode").value = state.project.meta.spriteMode;
+  updateHistoryButtons();
+}
+
+function renderTabs() {
+  document.querySelectorAll(".tab").forEach(tab => {
+    tab.classList.toggle("active", tab.dataset.panel === state.activePanel);
+  });
+}
+
+function render() {
+  stopAnimPreview();
+  renderTopBar();
+  renderTabs();
+  const panel = document.getElementById("panel");
+  panel.innerHTML = "";
+  if (state.activePanel === "palettes") renderPalettesPanel(panel);
+  else if (state.activePanel === "tiles") renderTilesPanel(panel);
+  else if (state.activePanel === "metasprites") renderMetaspritesPanel(panel);
+  else if (state.activePanel === "animations") renderAnimationsPanel(panel);
+}
+
+/* ============================================================
+   Panel: Palettes
+   ============================================================ */
+
+function renderPalettesPanel(root) {
+  const card = el("div", "card");
+  card.appendChild(el("h2", null, "Sprite palettes"));
+  card.appendChild(el("p", "hint",
+    "Value 0 is always transparent for sprites, so only values 1-3 are visible. " +
+    "On DMG a sprite picks OBP0 or OBP1; on GBC each hardware sprite picks one " +
+    "of eight OBJ palettes. Here every metasprite part picks one of these."));
+
+  state.project.palettes.forEach(pal => {
+    const row = el("div", "row");
+    row.style.marginTop = "12px";
+
+    const preview = document.createElement("canvas");
+    preview.width = 4 * 18; preview.height = 18;
+    const pctx = preview.getContext("2d");
+    const paintPreview = () => {
+      // Slot 0 is drawn as the transparency checker instead of its color.
+      drawChecker(pctx, 18, 18, 0, 0, 6);
+      pal.colors.forEach((c, i) => {
+        if (i === 0) return;
+        pctx.fillStyle = c; pctx.fillRect(i * 18, 0, 18, 18);
+      });
+    };
+    paintPreview();
+    preview.style.border = "1px solid var(--border)";
+
+    const nameInput = inputText(pal.name, 140);
+    nameInput.addEventListener("input", () => { pal.name = nameInput.value; });
+
+    const colorInputs = pal.colors.map((c, i) => {
+      const ci = document.createElement("input");
+      ci.type = "color"; ci.value = c;
+      ci.title = i === 0 ? "Pixel value 0 (transparent on hardware)" : "Pixel value " + i;
+      ci.addEventListener("input", () => { pal.colors[i] = ci.value; paintPreview(); });
+      return ci;
+    });
+
+    const useBtn = el("button", "tiny", state.displayPaletteId === pal.id ? "Editing with this" : "Edit with this");
+    useBtn.addEventListener("click", () => {
+      state.displayPaletteId = pal.id;
+      state.project._displayPaletteId = pal.id;
+      render();
+    });
+
+    const delBtn = el("button", "tiny danger", "Delete");
+    delBtn.addEventListener("click", () => {
+      if (state.project.palettes.length <= 1) { alert("Keep at least one palette."); return; }
+      snapshot();
+      state.project.palettes = state.project.palettes.filter(p => p.id !== pal.id);
+      // Repoint any part that referenced the removed palette.
+      const fallback = state.project.palettes[0].id;
+      state.project.metasprites.forEach(ms => ms.parts.forEach(part => {
+        if (!paletteById(part.paletteId)) part.paletteId = fallback;
+      }));
+      if (state.displayPaletteId === pal.id) state.displayPaletteId = fallback;
+      render();
+    });
+
+    row.append(preview, nameInput, ...colorInputs, useBtn, delBtn);
+    card.appendChild(row);
+  });
+
+  const addBtn = el("button", null, "+ Add palette");
+  addBtn.style.marginTop = "16px";
+  addBtn.addEventListener("click", () => {
+    snapshot();
+    state.project.palettes.push({
+      id: genId(), name: "Palette " + (state.project.palettes.length + 1),
+      colors: ["#e0f8d0", "#88c070", "#346856", "#081820"],
+    });
+    render();
+  });
+  card.appendChild(addBtn);
+
+  root.appendChild(card);
+}
+
+/* ============================================================
+   Panel: Tiles
+   ============================================================ */
+
+const EDIT_SCALE = 40;  // pixels per tile-pixel in the big editing canvas
+
+function renderTilesPanel(root) {
+  const p = state.project;
+  const cols = el("div", "cols");
+
+  /* ---- left: tile library ---- */
+  const lib = el("div", "card col-library");
+  lib.appendChild(el("h2", null, "Sprite tiles"));
+
+  const used = p.tiles.length;
+  const budget = el("p", used > TILE_BUDGET ? "budget-over" : "budget-ok",
+    used + " / " + TILE_BUDGET + " tiles" + (used > TILE_BUDGET ? "  (over VRAM budget)" : ""));
+  lib.appendChild(budget);
+
+  const colors = colorsForPalette(state.displayPaletteId);
+  const grid = el("div", "lib-grid");
+  p.tiles.forEach((tile, index) => {
+    const cell = document.createElement("button");
+    cell.className = "lib-cell" + (tile.id === state.selectedTileId ? " selected" : "");
+    const c = document.createElement("canvas");
+    c.width = 38; c.height = 38;
+    paintTileThumb(c, tile, colors);
+    cell.appendChild(c);
+    cell.appendChild(el("span", "idx", String(index)));
+    cell.addEventListener("click", () => { state.selectedTileId = tile.id; render(); });
+    grid.appendChild(cell);
+  });
+  lib.appendChild(grid);
+
+  const libBtns = el("div", "row");
+  libBtns.style.marginTop = "12px";
+  const addBtn = el("button", null, "+ New tile");
+  addBtn.addEventListener("click", () => {
+    snapshot();
+    const t = { id: genId(), pixels: new Array(PIXELS_PER_TILE).fill(0) };
+    p.tiles.push(t); state.selectedTileId = t.id; render();
+  });
+  const dupBtn = el("button", null, "Duplicate");
+  dupBtn.addEventListener("click", () => {
+    const src = tileById(state.selectedTileId);
+    if (!src) return;
+    snapshot();
+    const t = { id: genId(), pixels: [...src.pixels] };
+    p.tiles.push(t); state.selectedTileId = t.id; render();
+  });
+  const delBtn = el("button", "danger", "Delete");
+  delBtn.addEventListener("click", () => {
+    const tile = tileById(state.selectedTileId);
+    if (!tile) return;
+    if (p.tiles.length <= 1) { alert("Keep at least one tile."); return; }
+    const refs = countTileReferences(tile.id);
+    if (refs > 0) { alert("This tile is used by " + refs + " metasprite part(s). Remove it there first."); return; }
+    snapshot();
+    p.tiles = p.tiles.filter(t => t.id !== tile.id);
+    state.selectedTileId = p.tiles[0].id; render();
+  });
+  libBtns.append(addBtn, dupBtn, delBtn);
+  lib.appendChild(libBtns);
+
+  // PNG round-trip: import a sprite sheet as tiles (and optionally metasprites),
+  // export all tiles as a transparent sheet that re-imports losslessly.
+  const pngBtns = el("div", "row");
+  pngBtns.style.marginTop = "8px";
+  const importPngBtn = el("button", null, "Import PNG sheet");
+  importPngBtn.addEventListener("click", importSheetPng);
+  const exportPngBtn = el("button", null, "Export PNG");
+  exportPngBtn.addEventListener("click", exportTilesToPng);
+  pngBtns.append(importPngBtn, exportPngBtn);
+  lib.appendChild(pngBtns);
+
+  cols.appendChild(lib);
+
+  /* ---- right: pixel editor ---- */
+  const ed = el("div", "card col-editor");
+  ed.appendChild(el("h2", null, "Tile editor"));
+
+  const tile = tileById(state.selectedTileId);
+  if (!tile) { ed.appendChild(el("p", "hint", "Select a tile.")); cols.appendChild(ed); root.appendChild(cols); return; }
+
+  // Ink picker: swatch 0 shows the transparency checker instead of a color.
+  const inkRow = el("div", "row");
+  const inks = el("div", "ink-swatches");
+  for (let v = 0; v < 4; v++) {
+    const sw = el("button", "ink-swatch" + (state.ink === v ? " active" : ""));
+    if (v === 0) {
+      sw.style.backgroundImage =
+        "repeating-conic-gradient(#15281c 0% 25%, #0c1c12 0% 50%)";
+      sw.title = "Pixel value 0 (transparent)";
+    } else {
+      sw.style.background = colors[v];
+      sw.title = "Pixel value " + v;
+    }
+    sw.appendChild(el("span", "val", v === 0 ? "T" : String(v)));
+    sw.addEventListener("click", () => { state.ink = v; render(); });
+    inks.appendChild(sw);
+  }
+  inkRow.appendChild(el("span", "cell-label", "Ink"));
+  inkRow.appendChild(inks);
+  ed.appendChild(inkRow);
+
+  // Tools.
+  const toolRow = el("div", "row");
+  toolRow.style.marginTop = "10px";
+  ["pencil", "fill", "eyedropper"].forEach(name => {
+    const b = el("button", "tool-btn" + (state.tool === name ? " active" : ""), name);
+    b.addEventListener("click", () => { state.tool = name; render(); });
+    toolRow.appendChild(b);
+  });
+  const clearBtn = el("button", "danger", "Clear");
+  clearBtn.addEventListener("click", () => { snapshot(); tile.pixels.fill(0); render(); });
+  toolRow.appendChild(clearBtn);
+  ed.appendChild(toolRow);
+
+  ed.appendChild(spacer(8));
+  ed.appendChild(el("span", "hint", "Value 0 (checker) is transparent on hardware."));
+
+  // The drawing surface. Internal size matches CSS size so offsetX maps directly.
+  const canvas = document.createElement("canvas");
+  canvas.className = "editor-canvas";
+  canvas.width = TILE_PX * EDIT_SCALE;
+  canvas.height = TILE_PX * EDIT_SCALE;
+  canvas.style.marginTop = "8px";
+  const ctx = canvas.getContext("2d");
+
+  const repaintEditor = () => {
+    drawChecker(ctx, canvas.width, canvas.height, 0, 0, EDIT_SCALE);
+    drawSpritePixels(ctx, tile.pixels, colors, EDIT_SCALE);
+    // Pixel grid for orientation.
+    ctx.strokeStyle = "rgba(224,248,208,0.12)";
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= TILE_PX; i++) {
+      const q = i * EDIT_SCALE + 0.5;
+      ctx.beginPath(); ctx.moveTo(q, 0); ctx.lineTo(q, canvas.height); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, q); ctx.lineTo(canvas.width, q); ctx.stroke();
+    }
+  };
+  repaintEditor();
+
+  const pixelAt = (ev) => {
+    const x = Math.floor(ev.offsetX / EDIT_SCALE);
+    const y = Math.floor(ev.offsetY / EDIT_SCALE);
+    if (x < 0 || x > 7 || y < 0 || y > 7) return null;
+    return { x, y };
+  };
+
+  const applyAt = (ev) => {
+    const pos = pixelAt(ev);
+    if (!pos) return;
+    if (state.tool === "eyedropper") {
+      state.ink = tile.pixels[pos.y * TILE_PX + pos.x];
+      render();
+      return;
+    }
+    if (state.tool === "fill") {
+      floodFill(tile.pixels, pos.x, pos.y, state.ink);
+    } else {
+      tile.pixels[pos.y * TILE_PX + pos.x] = state.ink;
+    }
+    repaintEditor();
+  };
+
+  let painting = false;
+  canvas.addEventListener("pointerdown", (ev) => {
+    if (state.tool !== "eyedropper") snapshot();  // whole stroke = one undo step
+    painting = state.tool === "pencil";
+    applyAt(ev);
+  });
+  canvas.addEventListener("pointermove", (ev) => { if (painting) applyAt(ev); });
+  const stop = () => { if (painting) { painting = false; refreshTileThumb(tile); } };
+  canvas.addEventListener("pointerup", stop);
+  canvas.addEventListener("pointerleave", stop);
+  ed.appendChild(canvas);
+
+  cols.appendChild(ed);
+  root.appendChild(cols);
+}
+
+// Redraw a single library thumbnail without rebuilding the whole panel, so
+// dragging in the editor stays smooth.
+function refreshTileThumb(tile) {
+  const index = state.project.tiles.indexOf(tile);
+  const cell = document.querySelectorAll(".lib-grid .lib-cell")[index];
+  if (!cell) return;
+  paintTileThumb(cell.querySelector("canvas"), tile, colorsForPalette(state.displayPaletteId));
+}
+
+function floodFill(pixels, x, y, newInk) {
+  const target = pixels[y * TILE_PX + x];
+  if (target === newInk) return;
+  const stack = [[x, y]];
+  while (stack.length) {
+    const [cx, cy] = stack.pop();
+    if (cx < 0 || cx > 7 || cy < 0 || cy > 7) continue;
+    if (pixels[cy * TILE_PX + cx] !== target) continue;
+    pixels[cy * TILE_PX + cx] = newInk;
+    stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
+  }
+}
+
+/* ============================================================
+   PNG import / export
+   ============================================================
+
+   Import slices a PNG into 8x8 tiles. Transparency: if the image has an alpha
+   channel, transparent pixels become value 0 and opaque pixels quantize into
+   values 1..3 by luminance. If it is fully opaque, an import dialog asks which
+   of the four quantized shades should mean transparent; the remaining shades
+   remap to 1..3 keeping their lightness order.
+
+   The dialog can also slice the sheet into metasprites: one metasprite per
+   frame cell of a chosen size, skipping fully transparent tiles and reusing
+   duplicate tiles instead of adding them twice.
+
+   Export writes all tiles as a 16-column sheet where value 0 is transparent
+   and values 1..3 are grays at the importer's bucket midpoints, so an
+   exported sheet re-imports losslessly. */
+
+const PNG_VISIBLE_SHADES = [null, "#aaaaaa", "#555555", "#000000"];
+const SHADE_LABELS = ["lightest", "light", "dark", "darkest"];
+
+// Luminance (0..255) -> value 0..3 (lightest = 0), same buckets as the world editor.
+function shade4(lum) { return 3 - Math.min(3, Math.floor(lum / 64)); }
+// Luminance -> value 1..3 for pixels that are known to be visible.
+function shade3(lum) { return 3 - Math.min(2, Math.floor(lum / 85)); }
+
+function importSheetPng() {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "image/png,image/*";
+  input.addEventListener("change", () => {
+    const file = input.files[0];
+    if (!file) return;
+    const img = new Image();
+    img.onload = () => {
+      try { openImportDialog(img, file.name); }
+      catch (err) { alert("Could not import image: " + err.message); }
+      URL.revokeObjectURL(img.src);
+    };
+    img.onerror = () => alert("Could not read that file as an image.");
+    img.src = URL.createObjectURL(file);
+  });
+  input.click();
+}
+
+function openImportDialog(img, fileName) {
+  if (img.width < TILE_PX || img.height < TILE_PX) { alert("Image is smaller than one 8x8 tile."); return; }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = img.width; canvas.height = img.height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0);
+  const data = ctx.getImageData(0, 0, img.width, img.height).data;
+
+  let hasAlpha = false;
+  for (let i = 3; i < data.length; i += 4) {
+    if (data[i] < 128) { hasAlpha = true; break; }
+  }
+
+  openModal("Import sprite sheet", (modal) => {
+    modal.appendChild(el("p", "hint",
+      fileName + " — " + img.width + "×" + img.height + " px, " +
+      Math.floor(img.width / TILE_PX) * Math.floor(img.height / TILE_PX) + " full 8×8 tiles."));
+
+    // Transparency handling.
+    let transparentShade = 0;
+    if (hasAlpha) {
+      modal.appendChild(el("p", "hint",
+        "Transparency: PNG alpha → value 0; opaque pixels quantize to values 1-3."));
+    } else {
+      const trow = el("div", "row");
+      trow.appendChild(el("span", "cell-label", "Transparent shade"));
+      trow.appendChild(selectFrom(
+        SHADE_LABELS.map((l, i) => ({ value: i, label: l })),
+        0, v => { transparentShade = Number(v); }));
+      modal.appendChild(trow);
+      modal.appendChild(el("p", "hint",
+        "No alpha channel found. Pixels quantize to four shades; the chosen shade " +
+        "becomes transparent (value 0), the rest remap to values 1-3."));
+    }
+
+    // Optional metasprite slicing.
+    modal.appendChild(spacer(10));
+    let makeMs = false;
+    const frameW = numberInput(16, TILE_PX, WORKSPACE);
+    const frameH = numberInput(16, TILE_PX, WORKSPACE);
+    modal.appendChild(toggle("Also slice into metasprites (one per frame cell)", false, v => { makeMs = v; }));
+    const frow = el("div", "row");
+    frow.style.marginTop = "8px";
+    const fw = el("div", "field"); fw.append(label("Frame width (px)"), frameW);
+    const fh = el("div", "field"); fh.append(label("Frame height (px)"), frameH);
+    frow.append(fw, fh);
+    modal.appendChild(frow);
+
+    modal.appendChild(spacer(12));
+    const go = el("button", "primary", "Import");
+    go.addEventListener("click", () => {
+      const opts = {
+        hasAlpha, transparentShade,
+        makeMetasprites: makeMs,
+        frameW: clampInt(frameW.value, TILE_PX, WORKSPACE),
+        frameH: clampInt(frameH.value, TILE_PX, WORKSPACE),
+        baseName: fileName.replace(/\.[^.]*$/, ""),
+      };
+      if (opts.frameW % TILE_PX || opts.frameH % TILE_PX) {
+        alert("Frame size must be a multiple of 8."); return;
+      }
+      closeModal();
+      runSheetImport(img.width, img.height, data, opts);
+    });
+    modal.appendChild(go);
+  });
+}
+
+// Read one 8x8 tile's quantized pixels out of the sheet's RGBA data.
+function readSheetTile(data, imgW, px, py, opts) {
+  const pixels = new Array(PIXELS_PER_TILE);
+  for (let y = 0; y < TILE_PX; y++) {
+    for (let x = 0; x < TILE_PX; x++) {
+      const i = ((py + y) * imgW + (px + x)) * 4;
+      const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      let v;
+      if (opts.hasAlpha) {
+        v = data[i + 3] < 128 ? 0 : shade3(lum);
+      } else {
+        v = shade4(lum);
+        if (v === opts.transparentShade) v = 0;
+        // Remap the remaining shades to 1..3 preserving lightness order.
+        else v = [0, 1, 2, 3].filter(s => s !== opts.transparentShade).indexOf(v) + 1;
+      }
+      pixels[y * TILE_PX + x] = v;
+    }
+  }
+  return pixels;
+}
+
+function runSheetImport(imgW, imgH, data, opts) {
+  const p = state.project;
+  snapshot();
+
+  // Dedupe against existing tiles; reuse ids so metasprite slicing can share art.
+  const idByKey = new Map(p.tiles.map(t => [t.pixels.join(""), t.id]));
+  let added = 0, reused = 0, skippedEmpty = 0;
+
+  const internTile = (pixels) => {
+    const key = pixels.join("");
+    if (idByKey.has(key)) { reused++; return idByKey.get(key); }
+    const tile = { id: genId(), pixels };
+    p.tiles.push(tile);
+    idByKey.set(key, tile.id);
+    added++;
+    return tile.id;
+  };
+  const isEmpty = (pixels) => pixels.every(v => v === 0);
+
+  if (!opts.makeMetasprites) {
+    // Plain tile import: left-to-right, top-to-bottom, skipping blanks and dupes.
+    for (let ty = 0; ty + TILE_PX <= imgH; ty += TILE_PX) {
+      for (let tx = 0; tx + TILE_PX <= imgW; tx += TILE_PX) {
+        const pixels = readSheetTile(data, imgW, tx, ty, opts);
+        if (isEmpty(pixels)) { skippedEmpty++; continue; }
+        internTile(pixels);
+      }
+    }
+  } else {
+    // Frame slicing: one metasprite per frame cell, parts per 8xH sprite cell.
+    const cellH = objHeight();
+    if (opts.frameH % cellH) {
+      alert("Frame height must be a multiple of " + cellH + " in " + p.meta.spriteMode + " mode.");
+      history.undo.pop();  // nothing was mutated; drop the snapshot we just took
+      updateHistoryButtons();
+      return;
+    }
+    const pal = state.displayPaletteId;
+    const ox = Math.floor((WORKSPACE - opts.frameW) / 2);
+    const oy = Math.floor((WORKSPACE - opts.frameH) / 2);
+    let frameNo = 0;
+    for (let fy = 0; fy + opts.frameH <= imgH; fy += opts.frameH) {
+      for (let fx = 0; fx + opts.frameW <= imgW; fx += opts.frameW) {
+        const parts = [];
+        for (let cy = 0; cy < opts.frameH; cy += cellH) {
+          for (let cx = 0; cx < opts.frameW; cx += TILE_PX) {
+            const tiles = [];
+            let allEmpty = true;
+            for (let sub = 0; sub < cellH; sub += TILE_PX) {
+              const pixels = readSheetTile(data, imgW, fx + cx, fy + cy + sub, opts);
+              if (isEmpty(pixels)) { skippedEmpty++; tiles.push(null); continue; }
+              allEmpty = false;
+              tiles.push(internTile(pixels));
+            }
+            if (allEmpty) continue;
+            parts.push({ tiles, x: ox + cx, y: oy + cy, hFlip: false, vFlip: false, paletteId: pal });
+          }
+        }
+        frameNo++;
+        if (parts.length) {
+          p.metasprites.push({ id: genId(), name: opts.baseName + " " + frameNo, parts });
+        }
+      }
+    }
+  }
+
+  if (added === 0 && !opts.makeMetasprites) {
+    alert("No new tiles (" + reused + " duplicate(s), " + skippedEmpty + " blank tile(s) skipped).");
+    history.undo.pop();  // nothing was mutated; drop the snapshot
+    updateHistoryButtons();
+    return;
+  }
+  if (p.tiles.length > TILE_BUDGET) {
+    alert("Warning: tileset now holds " + p.tiles.length + " tiles, over the " + TILE_BUDGET + " VRAM budget.");
+  }
+  state.selectedTileId = p.tiles[p.tiles.length - 1].id;
+  if (opts.makeMetasprites && p.metasprites.length) {
+    state.selectedMetaspriteId = p.metasprites[p.metasprites.length - 1].id;
+  }
+  render();
+  alert("Imported " + added + " tile(s)" +
+    (reused ? ", reused " + reused + " duplicate(s)" : "") +
+    (skippedEmpty ? ", skipped " + skippedEmpty + " blank(s)" : "") + ".");
+}
+
+function exportTilesToPng() {
+  const tiles = state.project.tiles;
+  const cols = 16;
+  const rowsCount = Math.max(1, Math.ceil(tiles.length / cols));
+  const canvas = document.createElement("canvas");
+  canvas.width = cols * TILE_PX;
+  canvas.height = rowsCount * TILE_PX;
+  const ctx = canvas.getContext("2d");
+  // Value 0 stays unpainted, so the exported PNG is transparent there.
+  tiles.forEach((tile, index) => {
+    drawSpritePixels(ctx, tile.pixels, PNG_VISIBLE_SHADES, 1,
+      (index % cols) * TILE_PX, Math.floor(index / cols) * TILE_PX);
+  });
+  const name = safeBaseName() + "-tiles.png";
+  canvas.toBlob(blob => {
+    if (blob) downloadBlob(name, blob);
+    else alert("Could not encode the PNG.");
+  }, "image/png");
+}
+
+// Render one metasprite to a PNG, trimmed to its painted bounding box.
+function exportMetaspriteToPng(ms) {
+  const full = document.createElement("canvas");
+  full.width = WORKSPACE; full.height = WORKSPACE;
+  const ctx = full.getContext("2d");
+  drawMetasprite(ctx, ms, 1);
+
+  const data = ctx.getImageData(0, 0, WORKSPACE, WORKSPACE).data;
+  let minX = WORKSPACE, minY = WORKSPACE, maxX = -1, maxY = -1;
+  for (let y = 0; y < WORKSPACE; y++) {
+    for (let x = 0; x < WORKSPACE; x++) {
+      if (data[(y * WORKSPACE + x) * 4 + 3] > 0) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < 0) { alert("This metasprite has no visible pixels."); return; }
+
+  const out = document.createElement("canvas");
+  out.width = maxX - minX + 1; out.height = maxY - minY + 1;
+  out.getContext("2d").drawImage(full, -minX, -minY);
+  const name = (ms.name || "metasprite").replace(/[^a-z0-9_-]+/gi, "_") + ".png";
+  out.toBlob(blob => {
+    if (blob) downloadBlob(name, blob);
+    else alert("Could not encode the PNG.");
+  }, "image/png");
+}
+
+/* ============================================================
+   Panel: Metasprites
+   ============================================================ */
+
+const COMPOSE_SCALE = 6;  // pixels per sprite-pixel in the composer canvas
+
+// Switching the global OBJ size converts every part so no art is lost:
+// to 8x16 each part gains an empty bottom slot; back to 8x8 a filled bottom
+// slot splits off into its own part 8px lower.
+function convertSpriteMode(newMode) {
+  const p = state.project;
+  if (p.meta.spriteMode === newMode) return;
+  snapshot();
+  p.metasprites.forEach(ms => {
+    if (newMode === "8x16") {
+      ms.parts.forEach(part => { part.tiles = [part.tiles[0] ?? null, null]; });
+    } else {
+      const split = [];
+      ms.parts.forEach(part => {
+        const [top, bottom] = [part.tiles[0] ?? null, part.tiles[1] ?? null];
+        part.tiles = [top];
+        if (bottom != null) {
+          split.push({ ...part, tiles: [bottom], y: part.y + TILE_PX });
+        }
+      });
+      ms.parts.push(...split);
+    }
+  });
+  p.meta.spriteMode = newMode;
+  state.selectedPartCell = 0;
+  render();
+}
+
+function renderMetaspritesPanel(root) {
+  const p = state.project;
+  const cols = el("div", "cols");
+
+  /* ---- left: metasprite list ---- */
+  const lib = el("div", "card col-library");
+  lib.appendChild(el("h2", null, "Metasprites"));
+
+  if (p.metasprites.length === 0) {
+    lib.appendChild(el("p", "hint", "No metasprites yet. Create one to start arranging hardware sprites."));
+  }
+
+  const list = el("div", "ms-list");
+  p.metasprites.forEach((ms, index) => {
+    const row = el("div", "ms-row" + (ms.id === state.selectedMetaspriteId ? " selected" : ""));
+    const c = document.createElement("canvas");
+    c.width = 40; c.height = 40;
+    paintMetaspriteThumb(c, ms);
+    c.style.border = "1px solid var(--border)";
+    const name = el("span", "ms-name", "#" + index + "  " + ms.name);
+    const meta = el("span", "ms-meta", ms.parts.length + " part" + (ms.parts.length === 1 ? "" : "s"));
+    row.append(c, name, meta);
+    row.addEventListener("click", () => {
+      state.selectedMetaspriteId = ms.id; state.selectedPartIndex = -1; render();
+    });
+    list.appendChild(row);
+  });
+  lib.appendChild(list);
+
+  const libBtns = el("div", "row");
+  libBtns.style.marginTop = "12px";
+  const addBtn = el("button", null, "+ New metasprite");
+  addBtn.addEventListener("click", () => {
+    snapshot();
+    const ms = { id: genId(), name: "metasprite", parts: [] };
+    p.metasprites.push(ms);
+    state.selectedMetaspriteId = ms.id; state.selectedPartIndex = -1; render();
+  });
+  const dupBtn = el("button", null, "Duplicate");
+  dupBtn.addEventListener("click", () => {
+    const src = selectedMetasprite();
+    if (!src) return;
+    snapshot();
+    const ms = {
+      id: genId(), name: src.name + " copy",
+      parts: src.parts.map(part => ({ ...part, tiles: [...part.tiles] })),
+    };
+    p.metasprites.push(ms);
+    state.selectedMetaspriteId = ms.id; state.selectedPartIndex = -1; render();
+  });
+  const delBtn = el("button", "danger", "Delete");
+  delBtn.addEventListener("click", () => {
+    const ms = selectedMetasprite();
+    if (!ms) return;
+    const refs = countMetaspriteReferences(ms.id);
+    if (refs > 0) { alert("This metasprite is used by " + refs + " animation frame(s). Remove it there first."); return; }
+    snapshot();
+    p.metasprites = p.metasprites.filter(m => m.id !== ms.id);
+    state.selectedMetaspriteId = p.metasprites[0] ? p.metasprites[0].id : null;
+    state.selectedPartIndex = -1;
+    render();
+  });
+  libBtns.append(addBtn, dupBtn, delBtn);
+  lib.appendChild(libBtns);
+
+  cols.appendChild(lib);
+
+  /* ---- right: composer ---- */
+  const ed = el("div", "card col-editor");
+  ed.appendChild(el("h2", null, "Composer"));
+
+  const ms = selectedMetasprite();
+  if (!ms) { ed.appendChild(el("p", "hint", "Select a metasprite.")); cols.appendChild(ed); root.appendChild(cols); return; }
+
+  const nameRow = el("div", "row");
+  const nameField = el("div", "field");
+  nameField.appendChild(label("Name"));
+  const nameInput = inputText(ms.name, 160);
+  nameInput.addEventListener("input", () => { ms.name = nameInput.value; });
+  nameField.appendChild(nameInput);
+  nameRow.appendChild(nameField);
+  const pngBtn = el("button", "tiny", "Export PNG");
+  pngBtn.addEventListener("click", () => exportMetaspriteToPng(ms));
+  nameRow.appendChild(pngBtn);
+  nameRow.appendChild(toggle("Snap to 8px grid", state.snapToGrid, v => { state.snapToGrid = v; }));
+  ed.appendChild(nameRow);
+  ed.appendChild(spacer(8));
+
+  // The 64x64 workspace canvas. Parts drag with the pointer.
+  const canvas = document.createElement("canvas");
+  canvas.className = "composer-canvas";
+  canvas.width = WORKSPACE * COMPOSE_SCALE;
+  canvas.height = WORKSPACE * COMPOSE_SCALE;
+  const ctx = canvas.getContext("2d");
+
+  const cellH = objHeight();
+
+  const repaintComposer = () => {
+    drawChecker(ctx, canvas.width, canvas.height, 0, 0, TILE_PX * COMPOSE_SCALE);
+    // Center crosshair as a composition reference.
+    ctx.strokeStyle = "rgba(184,242,90,0.25)";
+    ctx.lineWidth = 1;
+    const mid = (WORKSPACE / 2) * COMPOSE_SCALE + 0.5;
+    ctx.beginPath(); ctx.moveTo(mid, 0); ctx.lineTo(mid, canvas.height); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(canvas.width, mid); ctx.stroke();
+    drawMetasprite(ctx, ms, COMPOSE_SCALE);
+    // Outline the selected part.
+    const sel = ms.parts[state.selectedPartIndex];
+    if (sel) {
+      ctx.strokeStyle = "#b8f25a";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(sel.x * COMPOSE_SCALE, sel.y * COMPOSE_SCALE,
+        TILE_PX * COMPOSE_SCALE, cellH * COMPOSE_SCALE);
+    }
+  };
+  repaintComposer();
+
+  // Hit test in part order: parts[0] is topmost (OAM priority), so it wins.
+  const partAt = (px, py) => ms.parts.findIndex(part =>
+    px >= part.x && px < part.x + TILE_PX && py >= part.y && py < part.y + cellH);
+
+  let drag = null;  // { grabX, grabY } while a part is being moved
+  canvas.addEventListener("pointerdown", (ev) => {
+    const px = ev.offsetX / COMPOSE_SCALE;
+    const py = ev.offsetY / COMPOSE_SCALE;
+    const hit = partAt(px, py);
+    if (hit !== state.selectedPartIndex) {
+      state.selectedPartIndex = hit;
+      render();  // rebuild so the part controls follow the selection
+      return;
+    }
+    if (hit < 0) return;
+    snapshot();  // the whole drag collapses into one undo step
+    const part = ms.parts[hit];
+    drag = { grabX: px - part.x, grabY: py - part.y };
+    canvas.setPointerCapture(ev.pointerId);
+  });
+  canvas.addEventListener("pointermove", (ev) => {
+    if (!drag) return;
+    const part = ms.parts[state.selectedPartIndex];
+    if (!part) return;
+    let nx = Math.round(ev.offsetX / COMPOSE_SCALE - drag.grabX);
+    let ny = Math.round(ev.offsetY / COMPOSE_SCALE - drag.grabY);
+    if (state.snapToGrid) { nx = Math.round(nx / TILE_PX) * TILE_PX; ny = Math.round(ny / TILE_PX) * TILE_PX; }
+    part.x = Math.max(0, Math.min(WORKSPACE - TILE_PX, nx));
+    part.y = Math.max(0, Math.min(WORKSPACE - cellH, ny));
+    repaintComposer();
+  });
+  const endDrag = () => { if (drag) { drag = null; render(); } };
+  canvas.addEventListener("pointerup", endDrag);
+  canvas.addEventListener("pointercancel", endDrag);
+  ed.appendChild(canvas);
+
+  /* ---- part controls ---- */
+  const part = ms.parts[state.selectedPartIndex];
+
+  const partBtns = el("div", "row");
+  partBtns.style.marginTop = "10px";
+  const addPart = el("button", null, "+ Add part");
+  addPart.title = "Adds a hardware sprite using the tile picked below";
+  addPart.addEventListener("click", () => {
+    snapshot();
+    const tiles = new Array(tilesPerPart()).fill(null);
+    tiles[0] = state.selectedTileId;
+    ms.parts.push({
+      tiles,
+      x: (WORKSPACE - TILE_PX) / 2, y: (WORKSPACE - cellH) / 2,
+      hFlip: false, vFlip: false,
+      paletteId: state.displayPaletteId,
+    });
+    state.selectedPartIndex = ms.parts.length - 1;
+    render();
+  });
+  const dupPart = el("button", null, "Duplicate part");
+  dupPart.disabled = !part;
+  dupPart.addEventListener("click", () => {
+    if (!part) return;
+    snapshot();
+    ms.parts.push({ ...part, tiles: [...part.tiles], x: Math.min(WORKSPACE - TILE_PX, part.x + TILE_PX) });
+    state.selectedPartIndex = ms.parts.length - 1;
+    render();
+  });
+  const delPart = el("button", "danger", "Delete part");
+  delPart.disabled = !part;
+  delPart.addEventListener("click", () => {
+    if (!part) return;
+    snapshot();
+    ms.parts.splice(state.selectedPartIndex, 1);
+    state.selectedPartIndex = -1;
+    render();
+  });
+  partBtns.append(addPart, dupPart, delPart);
+  ed.appendChild(partBtns);
+
+  if (part) {
+    const ctlRow = el("div", "row");
+    ctlRow.style.marginTop = "10px";
+
+    const xField = el("div", "field");
+    xField.appendChild(label("X"));
+    const xIn = numberInput(part.x, 0, WORKSPACE - TILE_PX);
+    xIn.addEventListener("change", () => { snapshot(); part.x = clampInt(xIn.value, 0, WORKSPACE - TILE_PX); render(); });
+    xField.appendChild(xIn);
+
+    const yField = el("div", "field");
+    yField.appendChild(label("Y"));
+    const yIn = numberInput(part.y, 0, WORKSPACE - cellH);
+    yIn.addEventListener("change", () => { snapshot(); part.y = clampInt(yIn.value, 0, WORKSPACE - cellH); render(); });
+    yField.appendChild(yIn);
+
+    const palField = el("div", "field");
+    palField.appendChild(label("Palette"));
+    palField.appendChild(selectFrom(
+      p.palettes.map(pl => ({ value: pl.id, label: pl.name })),
+      part.paletteId,
+      v => { snapshot(); part.paletteId = Number(v); render(); }));
+
+    ctlRow.append(xField, yField, palField);
+    ctlRow.appendChild(toggle("H flip", part.hFlip, v => { snapshot(); part.hFlip = v; render(); }));
+    ctlRow.appendChild(toggle("V flip", part.vFlip, v => { snapshot(); part.vFlip = v; render(); }));
+    ed.appendChild(ctlRow);
+
+    // Priority: lower part index draws on top, like a lower OAM index.
+    const orderRow = el("div", "row");
+    orderRow.style.marginTop = "8px";
+    orderRow.appendChild(el("span", "cell-label",
+      "Part " + state.selectedPartIndex + " of " + ms.parts.length + " (lower = on top)"));
+    const upBtn = el("button", "tiny", "Raise");
+    upBtn.disabled = state.selectedPartIndex === 0;
+    upBtn.addEventListener("click", () => {
+      snapshot();
+      const i = state.selectedPartIndex;
+      [ms.parts[i - 1], ms.parts[i]] = [ms.parts[i], ms.parts[i - 1]];
+      state.selectedPartIndex = i - 1;
+      render();
+    });
+    const downBtn = el("button", "tiny", "Lower");
+    downBtn.disabled = state.selectedPartIndex >= ms.parts.length - 1;
+    downBtn.addEventListener("click", () => {
+      snapshot();
+      const i = state.selectedPartIndex;
+      [ms.parts[i + 1], ms.parts[i]] = [ms.parts[i], ms.parts[i + 1]];
+      state.selectedPartIndex = i + 1;
+      render();
+    });
+    orderRow.append(upBtn, downBtn);
+    ed.appendChild(orderRow);
+
+    // Tile assignment: pick which cell of the part to fill (8x16 has two),
+    // then click a tile in the picker grid below.
+    ed.appendChild(spacer(10));
+    const assignRow = el("div", "row");
+    assignRow.appendChild(el("span", "cell-label", "Assign tile to"));
+    if (tilesPerPart() === 2) {
+      ["Top", "Bottom"].forEach((lbl, i) => {
+        const b = el("button", "tiny cell-toggle" + (state.selectedPartCell === i ? " active" : ""), lbl);
+        b.addEventListener("click", () => { state.selectedPartCell = i; render(); });
+        assignRow.appendChild(b);
+      });
+    } else {
+      state.selectedPartCell = 0;
+      assignRow.appendChild(el("span", "hint", "this part (click a tile below)"));
+    }
+    const clearCell = el("button", "tiny danger", "Clear cell");
+    clearCell.addEventListener("click", () => {
+      snapshot();
+      part.tiles[state.selectedPartCell] = null;
+      render();
+    });
+    assignRow.appendChild(clearCell);
+    ed.appendChild(assignRow);
+  } else {
+    ed.appendChild(spacer(8));
+    ed.appendChild(el("p", "hint",
+      "Click a part on the canvas to select it, drag to move it. " +
+      "“+ Add part” places the tile picked below."));
+  }
+
+  // Tile picker: clicking assigns to the selected part cell (or just picks the
+  // tile that "+ Add part" will use when no part is selected).
+  ed.appendChild(spacer(10));
+  ed.appendChild(el("span", "cell-label", "Tile picker"));
+  ed.appendChild(spacer(6));
+  const picker = el("div", "lib-grid");
+  const colors = colorsForPalette(state.displayPaletteId);
+  p.tiles.forEach((tile, index) => {
+    const cell = document.createElement("button");
+    cell.className = "lib-cell" + (tile.id === state.selectedTileId ? " selected" : "");
+    const c = document.createElement("canvas");
+    c.width = 38; c.height = 38;
+    paintTileThumb(c, tile, colors);
+    cell.appendChild(c);
+    cell.appendChild(el("span", "idx", String(index)));
+    cell.addEventListener("click", () => {
+      state.selectedTileId = tile.id;
+      if (part) { snapshot(); part.tiles[state.selectedPartCell] = tile.id; }
+      render();
+    });
+    picker.appendChild(cell);
+  });
+  ed.appendChild(picker);
+
+  cols.appendChild(ed);
+  root.appendChild(cols);
+}
+
+/* ============================================================
+   Panel: Animations
+   ============================================================ */
+
+// Playback runs on requestAnimationFrame, counting time in 60Hz ticks so a
+// frame's duration means the same thing here and on hardware.
+const animPreview = { raf: 0, ctx: null, anim: null, frame: 0, ticksLeft: 0, lastMs: 0 };
+
+function stopAnimPreview() {
+  if (animPreview.raf) { cancelAnimationFrame(animPreview.raf); animPreview.raf = 0; }
+  animPreview.anim = null;
+}
+
+function startAnimPreview(canvas, anim) {
+  stopAnimPreview();
+  if (!anim.frames.length) return;
+  animPreview.ctx = canvas.getContext("2d");
+  animPreview.anim = anim;
+  animPreview.frame = 0;
+  animPreview.ticksLeft = anim.frames[0].duration;
+  animPreview.lastMs = performance.now();
+  paintAnimFrame(canvas.width);
+  if (state.animPlay) animPreview.raf = requestAnimationFrame(animPreviewLoop);
+}
+
+function paintAnimFrame(sizePx) {
+  const { ctx, anim, frame } = animPreview;
+  drawChecker(ctx, sizePx, sizePx, 0, 0, sizePx / 8);
+  const ms = metaspriteById(anim.frames[frame].metaspriteId);
+  if (ms) drawMetasprite(ctx, ms, sizePx / WORKSPACE);
+}
+
+function animPreviewLoop(nowMs) {
+  const ap = animPreview;
+  if (!ap.anim) return;
+  ap.raf = requestAnimationFrame(animPreviewLoop);
+  const ticks = (nowMs - ap.lastMs) / (1000 / 60);
+  if (ticks < 1) return;
+  ap.lastMs = nowMs;
+  ap.ticksLeft -= ticks;
+  let advanced = false;
+  while (ap.ticksLeft <= 0) {
+    if (ap.frame + 1 >= ap.anim.frames.length && !ap.anim.loop) {
+      cancelAnimationFrame(ap.raf); ap.raf = 0;   // hold on the last frame
+      ap.ticksLeft = 0;
+      return;
+    }
+    ap.frame = (ap.frame + 1) % ap.anim.frames.length;
+    ap.ticksLeft += Math.max(1, ap.anim.frames[ap.frame].duration);
+    advanced = true;
+  }
+  if (advanced) paintAnimFrame(ap.ctx.canvas.width);
+}
+
+function renderAnimationsPanel(root) {
+  const p = state.project;
+  const cols = el("div", "cols");
+
+  /* ---- left: animation list ---- */
+  const lib = el("div", "card col-library");
+  lib.appendChild(el("h2", null, "Animations"));
+
+  if (p.animations.length === 0) {
+    lib.appendChild(el("p", "hint", "No animations yet. Create one to sequence metasprites."));
+  }
+
+  const list = el("div", "anim-list");
+  p.animations.forEach((anim, index) => {
+    const row = el("div", "ms-row" + (anim.id === state.selectedAnimationId ? " selected" : ""));
+    const c = document.createElement("canvas");
+    c.width = 40; c.height = 40;
+    paintMetaspriteThumb(c, anim.frames[0] ? metaspriteById(anim.frames[0].metaspriteId) : null);
+    c.style.border = "1px solid var(--border)";
+    const name = el("span", "ms-name", "#" + index + "  " + anim.name);
+    const meta = el("span", "ms-meta",
+      anim.frames.length + " frame" + (anim.frames.length === 1 ? "" : "s") + (anim.loop ? " · loop" : ""));
+    row.append(c, name, meta);
+    row.addEventListener("click", () => {
+      state.selectedAnimationId = anim.id; state.selectedFrameIndex = -1; render();
+    });
+    list.appendChild(row);
+  });
+  lib.appendChild(list);
+
+  const libBtns = el("div", "row");
+  libBtns.style.marginTop = "12px";
+  const addBtn = el("button", null, "+ New animation");
+  addBtn.addEventListener("click", () => {
+    snapshot();
+    const anim = { id: genId(), name: "animation", loop: true, frames: [] };
+    p.animations.push(anim);
+    state.selectedAnimationId = anim.id; state.selectedFrameIndex = -1; render();
+  });
+  const dupBtn = el("button", null, "Duplicate");
+  dupBtn.addEventListener("click", () => {
+    const src = selectedAnimation();
+    if (!src) return;
+    snapshot();
+    const anim = { id: genId(), name: src.name + " copy", loop: src.loop, frames: src.frames.map(f => ({ ...f })) };
+    p.animations.push(anim);
+    state.selectedAnimationId = anim.id; state.selectedFrameIndex = -1; render();
+  });
+  const delBtn = el("button", "danger", "Delete");
+  delBtn.addEventListener("click", () => {
+    const anim = selectedAnimation();
+    if (!anim) return;
+    snapshot();
+    p.animations = p.animations.filter(a => a.id !== anim.id);
+    state.selectedAnimationId = p.animations[0] ? p.animations[0].id : null;
+    state.selectedFrameIndex = -1;
+    render();
+  });
+  libBtns.append(addBtn, dupBtn, delBtn);
+  lib.appendChild(libBtns);
+
+  cols.appendChild(lib);
+
+  /* ---- right: animation editor ---- */
+  const ed = el("div", "card col-editor");
+  ed.appendChild(el("h2", null, "Animation editor"));
+
+  const anim = selectedAnimation();
+  if (!anim) { ed.appendChild(el("p", "hint", "Select an animation.")); cols.appendChild(ed); root.appendChild(cols); return; }
+
+  const nameRow = el("div", "row");
+  const nameField = el("div", "field");
+  nameField.appendChild(label("Name"));
+  const nameInput = inputText(anim.name, 160);
+  nameInput.addEventListener("input", () => { anim.name = nameInput.value; });
+  nameField.appendChild(nameInput);
+  nameRow.appendChild(nameField);
+  nameRow.appendChild(toggle("Loop", anim.loop, v => { snapshot(); anim.loop = v; render(); }));
+  const playBtn = el("button", "tiny" + (state.animPlay ? " tool-btn active" : ""), state.animPlay ? "Pause" : "Play");
+  playBtn.addEventListener("click", () => { state.animPlay = !state.animPlay; render(); });
+  nameRow.appendChild(playBtn);
+  ed.appendChild(nameRow);
+  ed.appendChild(spacer(8));
+
+  // Live preview.
+  const preview = document.createElement("canvas");
+  preview.className = "anim-preview";
+  preview.width = WORKSPACE * 4; preview.height = WORKSPACE * 4;
+  ed.appendChild(preview);
+  if (anim.frames.length) {
+    startAnimPreview(preview, anim);
+  } else {
+    drawChecker(preview.getContext("2d"), preview.width, preview.height, 0, 0, preview.width / 8);
+  }
+
+  // Frame strip: thumbnails with the duration (in 60Hz ticks) as the badge.
+  ed.appendChild(spacer(12));
+  ed.appendChild(el("span", "cell-label", "Frames (click to edit; badge = ticks, 60 = 1s)"));
+  ed.appendChild(spacer(6));
+
+  const strip = el("div", "frame-strip");
+  anim.frames.forEach((frame, i) => {
+    const fc = el("button", "frame-cell" + (state.selectedFrameIndex === i ? " selected" : ""));
+    const fcanvas = document.createElement("canvas");
+    fcanvas.width = 42; fcanvas.height = 42;
+    paintMetaspriteThumb(fcanvas, metaspriteById(frame.metaspriteId));
+    fc.appendChild(fcanvas);
+    fc.appendChild(el("span", "fnum", String(frame.duration)));
+    fc.addEventListener("click", () => { state.selectedFrameIndex = i; render(); });
+    strip.appendChild(fc);
+  });
+  const addFrame = el("button", "frame-cell", "+");
+  addFrame.style.fontSize = "20px";
+  addFrame.title = "Add a frame (uses the first metasprite, change it after)";
+  addFrame.disabled = p.metasprites.length === 0;
+  addFrame.addEventListener("click", () => {
+    snapshot();
+    // Repeat the last frame's metasprite when there is one; sequels usually continue.
+    const last = anim.frames[anim.frames.length - 1];
+    anim.frames.push({
+      metaspriteId: last ? last.metaspriteId : p.metasprites[0].id,
+      duration: last ? last.duration : 10,
+    });
+    state.selectedFrameIndex = anim.frames.length - 1;
+    render();
+  });
+  strip.appendChild(addFrame);
+  ed.appendChild(strip);
+
+  // Selected-frame controls.
+  const frame = anim.frames[state.selectedFrameIndex];
+  if (frame) {
+    ed.appendChild(spacer(10));
+    const fRow = el("div", "row");
+
+    const msField = el("div", "field");
+    msField.appendChild(label("Metasprite"));
+    msField.appendChild(selectFrom(
+      p.metasprites.map(m => ({ value: m.id, label: m.name })),
+      frame.metaspriteId,
+      v => { snapshot(); frame.metaspriteId = Number(v); render(); }));
+
+    const durField = el("div", "field");
+    durField.appendChild(label("Duration (ticks)"));
+    const dur = numberInput(frame.duration, 1, 600);
+    dur.addEventListener("change", () => { snapshot(); frame.duration = clampInt(dur.value, 1, 600); render(); });
+    durField.appendChild(dur);
+
+    fRow.append(msField, durField);
+
+    const left = el("button", "tiny", "← Move");
+    left.disabled = state.selectedFrameIndex === 0;
+    left.addEventListener("click", () => {
+      snapshot();
+      const i = state.selectedFrameIndex;
+      [anim.frames[i - 1], anim.frames[i]] = [anim.frames[i], anim.frames[i - 1]];
+      state.selectedFrameIndex = i - 1;
+      render();
+    });
+    const right = el("button", "tiny", "Move →");
+    right.disabled = state.selectedFrameIndex >= anim.frames.length - 1;
+    right.addEventListener("click", () => {
+      snapshot();
+      const i = state.selectedFrameIndex;
+      [anim.frames[i + 1], anim.frames[i]] = [anim.frames[i], anim.frames[i + 1]];
+      state.selectedFrameIndex = i + 1;
+      render();
+    });
+    const delFrame = el("button", "tiny danger", "Delete frame");
+    delFrame.addEventListener("click", () => {
+      snapshot();
+      anim.frames.splice(state.selectedFrameIndex, 1);
+      state.selectedFrameIndex = -1;
+      render();
+    });
+    fRow.append(left, right, delFrame);
+    ed.appendChild(fRow);
+  }
+
+  cols.appendChild(ed);
+  root.appendChild(cols);
+}
+
+/* ============================================================
+   JSON export / import (same modal pattern as the world editor)
+   ============================================================ */
+
+function safeBaseName() {
+  return (state.project.meta.name || "sprites").replace(/[^a-z0-9_-]+/gi, "_");
+}
+
+function projectJson() {
+  state.project._displayPaletteId = state.displayPaletteId;
+  return JSON.stringify(state.project, null, 2);
+}
+
+function exportProject() {
+  const json = projectJson();
+  openModal("Export project", (modal) => {
+    modal.appendChild(el("p", "hint",
+      "Download the .json, or if the download is blocked here, copy the text below into a file."));
+    const btnRow = el("div", "row");
+    btnRow.style.margin = "10px 0";
+    const dl = el("button", "primary", "Download .json");
+    dl.addEventListener("click", () => downloadText(safeBaseName() + ".gbsprite.json", json, "application/json"));
+    const copy = el("button", null, "Copy to clipboard");
+    btnRow.append(dl, copy);
+    modal.appendChild(btnRow);
+
+    const ta = document.createElement("textarea");
+    ta.value = json; ta.readOnly = true;
+    ta.addEventListener("focus", () => ta.select());
+    modal.appendChild(ta);
+
+    copy.addEventListener("click", async () => {
+      const ok = await copyText(json);
+      copy.textContent = ok ? "Copied" : "Press Ctrl/Cmd+C";
+      if (ok) setTimeout(() => copy.textContent = "Copy to clipboard", 1200);
+    });
+  });
+}
+
+function loadProjectFrom(text) {
+  const parsed = JSON.parse(text);
+  if (parsed.tilesets) throw new Error("This looks like a world project (.gbworld.json), not a sprite project.");
+  if (!parsed.tiles || !parsed.palettes) throw new Error("Missing tiles or palettes.");
+  if (parsed.formatVersion !== FORMAT_VERSION) {
+    if (!confirm("This file is format v" + parsed.formatVersion + ", editor is v" + FORMAT_VERSION + ". Try to open anyway?")) return;
+  }
+  // Backfill fields that older exports may lack, so they open cleanly.
+  parsed.metasprites = parsed.metasprites || [];
+  parsed.animations = parsed.animations || [];
+  parsed.meta.spriteMode = parsed.meta.spriteMode === "8x16" ? "8x16" : "8x8";
+  state.project = parsed;
+  syncSelectionsToProject();
+  resetHistory();
+  state.activePanel = "tiles";
+  closeModal();
+  render();
+}
+
+function importProject() {
+  openModal("Import project", (modal) => {
+    modal.appendChild(el("p", "hint", "Open a .gbsprite.json file, or paste its contents below."));
+    const fileBtn = el("button", "primary", "Choose file");
+    fileBtn.style.margin = "10px 0";
+    fileBtn.addEventListener("click", () => document.getElementById("file-input").click());
+    modal.appendChild(fileBtn);
+
+    const ta = document.createElement("textarea");
+    ta.placeholder = "Paste project JSON here...";
+    modal.appendChild(ta);
+
+    const loadBtn = el("button", null, "Load pasted JSON");
+    loadBtn.style.marginTop = "10px";
+    loadBtn.addEventListener("click", () => {
+      try { loadProjectFrom(ta.value); }
+      catch (err) { alert("Could not open project: " + err.message); }
+    });
+    modal.appendChild(loadBtn);
+  });
+}
+
+/* ============================================================
+   Wiring (done once; only the panel re-renders afterward)
+   ============================================================ */
+
+document.getElementById("project-name").addEventListener("input", (e) => {
+  state.project.meta.name = e.target.value;
+});
+document.getElementById("sprite-mode").addEventListener("change", (e) => {
+  const newMode = e.target.value;
+  const msg = newMode === "8x16"
+    ? "Switch to 8×16 sprites? Every part gains an empty bottom tile slot."
+    : "Switch to 8×8 sprites? Parts with a bottom tile split into two parts.";
+  if (confirm(msg)) convertSpriteMode(newMode);
+  else e.target.value = state.project.meta.spriteMode;
+});
+document.getElementById("btn-new").addEventListener("click", () => {
+  if (!confirm("Start a new project? Unsaved changes are lost. Export first to keep them.")) return;
+  state.project = makeDefaultProject();
+  syncSelectionsToProject();
+  resetHistory();
+  state.activePanel = "tiles";
+  render();
+});
+document.getElementById("btn-export").addEventListener("click", exportProject);
+document.getElementById("btn-import").addEventListener("click", importProject);
+document.getElementById("btn-undo").addEventListener("click", undo);
+document.getElementById("btn-redo").addEventListener("click", redo);
+document.getElementById("file-input").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (file) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try { loadProjectFrom(reader.result); }
+      catch (err) { alert("Could not open project: " + err.message); }
+    };
+    reader.readAsText(file);
+  }
+  e.target.value = "";   // allow re-importing the same file
+});
+document.querySelectorAll(".tab").forEach(tab => {
+  tab.addEventListener("click", () => { state.activePanel = tab.dataset.panel; render(); });
+});
+
+// Keyboard undo/redo, but let native text editing keep its own undo in fields.
+document.addEventListener("keydown", (e) => {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  const tag = (document.activeElement && document.activeElement.tagName) || "";
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  const key = e.key.toLowerCase();
+  if (key === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
+  else if ((key === "z" && e.shiftKey) || key === "y") { e.preventDefault(); redo(); }
+});
+
+syncSelectionsToProject();
+render();
+</script>
+</body>
+</html>

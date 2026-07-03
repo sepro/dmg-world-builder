@@ -9,12 +9,13 @@ The tools are static HTML with no build step. Serve the repo root over HTTP and 
 ```bash
 python3 -m http.server 8000
 # world editor:    http://localhost:8000/dist/gb-world-editor.html
+# sprite editor:   http://localhost:8000/dist/gb-sprite-editor.html
 # music generator: http://localhost:8000/dist/gb-music-generator.html
 ```
 
 Inside the devcontainer a static server starts automatically on port 5500 via VS Code Live Server.
 
-The two pages live in `dist/` and share `dist/gb-theme.css` (the DMG design tokens + generic components: top bar, tabs, cards, controls, modal) and `dist/gb-common.js` (DOM/form helpers, the modal, and `downloadBlob`/`downloadText`/`copyText`). Each page keeps its own page-specific CSS inline and links these two shared files. Because they are linked (not inlined), the pages must be served over HTTP — opening the `.html` via `file://` will not load the shared assets.
+The pages live in `dist/` and share `dist/gb-theme.css` (the DMG design tokens + generic components: top bar, tabs, cards, controls, modal) and `dist/gb-common.js` (DOM/form helpers, the modal, and `downloadBlob`/`downloadText`/`copyText`). Each page keeps its own page-specific CSS inline and links these two shared files. Because they are linked (not inlined), the pages must be served over HTTP — opening the `.html` via `file://` will not load the shared assets.
 
 ## Tooling commands
 
@@ -53,6 +54,18 @@ The entire authoring tool lives in one ~2300-line HTML file: CSS at the top, sta
 | map | W×H blocks | row-major |
 
 Event/warp coordinates are in **metatile cells** (2× the block resolution per axis). Map size and `blockGrid` are in **blocks**.
+
+### The sprite editor (`dist/gb-sprite-editor.html`)
+
+A single-file tool (same conventions as the world editor: `makeDefaultProject`, `const state`, full-rebuild `render()`, JSON-snapshot undo, stable integer ids) for authoring OBJs. Hierarchy: 8×8 tile → **metasprite** (parts = hardware sprites with pixel offsets, H/V flip, palette) → **animation** (frames = metasprite + duration in 60Hz ticks).
+
+Hardware rules the editor models — keep these invariants when editing:
+- **OBJ size is global**: `meta.spriteMode` is `"8x8"` or `"8x16"` for the whole project (LCDC bit 2 can't mix sizes). In 8×16 mode a part has `tiles: [top, bottom]`; switching modes converts parts losslessly (`convertSpriteMode`).
+- **Pixel value 0 is always transparent** for sprites (rendered as a checker). PNG import maps alpha → 0, or, for opaque sheets, a user-chosen shade → 0 with the rest remapped to 1..3.
+- **Part order = OAM priority**: `parts[0]` draws on top; drawing iterates parts last-to-first.
+- Sprites *do* support per-object H/V flip (unlike DMG BG tiles); `drawPart` swaps the two 8×8 halves on vertical flip in 8×16 mode.
+
+PNG export writes value 0 as transparent and 1..3 at the importer's bucket midpoints (`#aaaaaa`/`#555555`/`#000000`) so a tile sheet round-trips losslessly. The saved file is `.gbsprite.json` (settings-free full project, `formatVersion 1`); import rejects `.gbworld.json` files by detecting `tilesets`.
 
 ### The music generator (`dist/gb-music-generator.html`)
 

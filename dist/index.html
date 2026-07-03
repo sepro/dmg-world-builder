@@ -1,8 +1,8 @@
 <!--
   GB Tool Suite - landing page
-  A themed front door for the two tools in dist/: the world editor and the
-  music generator. Static HTML, shares gb-theme.css with both pages, so it
-  must be served over HTTP like the rest of the suite.
+  A themed front door for the tools in dist/: the world editor, the sprite
+  editor, and the music generator. Static HTML, shares gb-theme.css with the
+  tool pages, so it must be served over HTTP like the rest of the suite.
 -->
 <!DOCTYPE html>
 <html lang="en">
@@ -65,7 +65,7 @@
 
   <div class="hero">
     <h1>Game Boy Tool Suite</h1>
-    <p>Build worlds and improvise chiptunes for GBDK-2020, right in the browser.</p>
+    <p>Build worlds, sprites and chiptunes for GBDK-2020, right in the browser.</p>
   </div>
 
   <main class="tools">
@@ -74,6 +74,14 @@
       <h2>World Editor</h2>
       <p>Draw 8&times;8 tiles, compose metatiles and blocks, paint maps, place
          warps and events. Exports .gbworld.json, convertible to GBDK-2020 C.</p>
+      <span class="go">Open editor &raquo;</span>
+    </a>
+    <a class="tool-card" href="gb-sprite-editor.html">
+      <canvas id="preview-sprite" width="160" height="48"></canvas>
+      <h2>Sprite Editor</h2>
+      <p>Draw or import sprite sheets, arrange 8&times;8 / 8&times;16 hardware
+         sprites into metasprites, and sequence them into animations. Exports
+         .gbsprite.json and PNG.</p>
       <span class="go">Open editor &raquo;</span>
     </a>
     <a class="tool-card" href="gb-music-generator.html">
@@ -103,6 +111,28 @@ const SHADES = ["#e0f8d0", "#88c070", "#346856", "#081820"];
   [[3,2],[5,7],[14,3],[18,8],[22,5],[13,9]].forEach(([x, y]) => {              // trees
     px(x, y, 3); px(x + 1, y, 3); px(x, y + 1, 3); px(x + 1, y + 1, 3);
   });
+})();
+
+/* Sprite preview: a little walking creature and its animation "frames". */
+(() => {
+  const ctx = document.getElementById("preview-sprite").getContext("2d");
+  ctx.fillStyle = SHADES[3];
+  ctx.fillRect(0, 0, 160, 48);
+  const px = (x, y, v) => { ctx.fillStyle = SHADES[v]; ctx.fillRect(x * 4, y * 4, 4, 4); };
+  // Three frames of a tiny blob hopping across the card.
+  const blob = (ox, oy, squash) => {
+    const h = squash ? 4 : 5;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < 6; x++) {
+        const edge = (y === 0 || y === h - 1 || x === 0 || x === 5);
+        px(ox + x, oy + (5 - h) + y, edge ? 1 : 0);
+      }
+    }
+    px(ox + 1, oy + (5 - h) + 1, 2); px(ox + 4, oy + (5 - h) + 1, 2);   // eyes
+  };
+  blob(4, 4, false); blob(17, 2, false); blob(30, 5, true);
+  // A ground line beneath the hops.
+  for (let x = 2; x < 38; x++) px(x, 10, 2);
 })();
 
 /* Music preview: a piano-roll-ish scatter of note bars. */
