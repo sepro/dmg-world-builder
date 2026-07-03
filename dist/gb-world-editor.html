@@ -817,6 +817,16 @@ function renderTilesPanel(root) {
   libBtns.append(addBtn, dupBtn, delBtn);
   lib.appendChild(libBtns);
 
+  // PNG round-trip: import a 2-bit sheet as tiles, export all tiles as a sheet.
+  const pngBtns = el("div", "row");
+  pngBtns.style.marginTop = "8px";
+  const importPngBtn = el("button", null, "Import PNG");
+  importPngBtn.addEventListener("click", () => importTilesFromPng(ts));
+  const exportPngBtn = el("button", null, "Export PNG");
+  exportPngBtn.addEventListener("click", () => exportTilesToPng(ts));
+  pngBtns.append(importPngBtn, exportPngBtn);
+  lib.appendChild(pngBtns);
+
   cols.appendChild(lib);
 
   /* ---- right: pixel editor ---- */
@@ -1016,6 +1026,120 @@ function floodFill(pixels, x, y, newInk) {
     pixels[cy * TILE_PX + cx] = newInk;
     stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
   }
+}
+
+/* ============================================================
+   PNG import / export for tiles
+   ============================================================
+
+   Import slices any PNG into 8x8 tiles (left-to-right, top-to-bottom),
+   quantizing each pixel's luminance into the four DMG shades (lightest = 0).
+   Exact duplicates are skipped, both within the image and against tiles
+   already in the tileset. Export writes all tiles as a 16-column grayscale
+   sheet at 1x scale, using the same four shades the importer buckets to,
+   so an exported sheet re-imports losslessly. */
+
+// The export shades are bucket midpoints of the importer's luminance ranges,
+// which is what makes the round-trip lossless.
+const PNG_SHADES = ["#ffffff", "#aaaaaa", "#555555", "#000000"];
+
+// Luminance (0..255) -> pixel value 0..3. Lightest maps to ink 0.
+function shadeFromLuminance(lum) {
+  return 3 - Math.min(3, Math.floor(lum / 64));
+}
+
+function importTilesFromPng(ts) {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "image/png,image/*";
+  input.addEventListener("change", () => {
+    const file = input.files[0];
+    if (!file) return;
+    const img = new Image();
+    img.onload = () => {
+      try { addTilesFromImage(ts, img); }
+      catch (err) { alert("Could not import image: " + err.message); }
+      URL.revokeObjectURL(img.src);
+    };
+    img.onerror = () => alert("Could not read that file as an image.");
+    img.src = URL.createObjectURL(file);
+  });
+  input.click();
+}
+
+function addTilesFromImage(ts, img) {
+  const tilesAcross = Math.floor(img.width / TILE_PX);
+  const tilesDown = Math.floor(img.height / TILE_PX);
+  if (tilesAcross === 0 || tilesDown === 0) { alert("Image is smaller than one 8x8 tile."); return; }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = img.width; canvas.height = img.height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0);
+  const data = ctx.getImageData(0, 0, img.width, img.height).data;
+
+  // Seed the dedupe set with tiles already in the project.
+  const seen = new Set(ts.tiles.map(t => t.pixels.join("")));
+
+  const newTiles = [];
+  let duplicates = 0;
+  for (let ty = 0; ty < tilesDown; ty++) {
+    for (let tx = 0; tx < tilesAcross; tx++) {
+      const pixels = new Array(PIXELS_PER_TILE);
+      for (let y = 0; y < TILE_PX; y++) {
+        for (let x = 0; x < TILE_PX; x++) {
+          const i = (((ty * TILE_PX + y) * img.width) + (tx * TILE_PX + x)) * 4;
+          // Fully transparent pixels read as the lightest shade.
+          const lum = data[i + 3] === 0
+            ? 255
+            : 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+          pixels[y * TILE_PX + x] = shadeFromLuminance(lum);
+        }
+      }
+      const key = pixels.join("");
+      if (seen.has(key)) { duplicates++; continue; }
+      seen.add(key);
+      newTiles.push(pixels);
+    }
+  }
+
+  if (newTiles.length === 0) {
+    alert("No new tiles: all " + duplicates + " tiles in the image already exist.");
+    return;
+  }
+  const total = ts.tiles.length + newTiles.length;
+  if (total > ts.tileBudget &&
+      !confirm("Importing " + newTiles.length + " tiles brings the tileset to " + total +
+               ", over the budget of " + ts.tileBudget + ". Import anyway?")) return;
+
+  snapshot();
+  newTiles.forEach(pixels => ts.tiles.push({ id: genId(), pixels }));
+  state.selectedTileId = ts.tiles[ts.tiles.length - 1].id;
+  state.selectedFrame = 0;
+  render();
+  alert("Imported " + newTiles.length + " tile(s)" +
+        (duplicates ? " (" + duplicates + " duplicate(s) skipped)" : "") + ".");
+}
+
+function exportTilesToPng(ts) {
+  const cols = 16;
+  const rowsCount = Math.ceil(ts.tiles.length / cols);
+  const canvas = document.createElement("canvas");
+  canvas.width = cols * TILE_PX;
+  canvas.height = Math.max(1, rowsCount) * TILE_PX;
+  const ctx = canvas.getContext("2d");
+  // Empty cells at the end of the last row export as the lightest shade.
+  ctx.fillStyle = PNG_SHADES[0];
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ts.tiles.forEach((tile, index) => {
+    drawPixels(ctx, tile.pixels, PNG_SHADES, 1,
+      (index % cols) * TILE_PX, Math.floor(index / cols) * TILE_PX);
+  });
+  const name = (ts.name || "tiles").replace(/[^a-z0-9_-]+/gi, "_") + "-tiles.png";
+  canvas.toBlob(blob => {
+    if (blob) downloadBlob(name, blob);
+    else alert("Could not encode the PNG.");
+  }, "image/png");
 }
 
 /* ============================================================

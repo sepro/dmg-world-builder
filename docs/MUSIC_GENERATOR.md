@@ -33,6 +33,12 @@ from the key:
 | Major Pentatonic | open, cheerful (5 notes) | 0 2 4 7 9 |
 | Minor Pentatonic | bluesy, safe (5 notes) | 0 3 5 7 10 |
 | Blues | gritty (with "blue" note) | 0 3 5 6 7 10 |
+| Melodic Minor | minor with a bright lift | 0 2 3 5 7 9 11 |
+| Hungarian Minor | exotic, gypsy/dramatic | 0 2 3 6 7 8 11 |
+| Whole Tone | weightless, dreamlike | 0 2 4 6 8 10 |
+| Hirajoshi (Japanese) | sparse, Eastern (5 notes) | 0 2 3 7 8 |
+| Egyptian (sus pent.) | open, suspended (5 notes) | 0 2 5 7 10 |
+| Okinawan (Ryukyu) | sunny, island (5 notes) | 0 4 5 7 11 |
 | Chromatic | all 12 notes, atonal | 0…11 |
 
 The scale also feeds chord building: triads are stacked in thirds within the
@@ -57,6 +63,7 @@ improvisation. Moods are grouped:
 - **Classic** — Happy/Upbeat, Sad/Melancholy, Heroic/Adventure, Spooky/Tense, Calm/Peaceful, Mysterious
 - **Battle** — Boss Battle, Chase, Victory Fanfare, Game Over
 - **Town** — Town, Shop, Overworld, Cave/Dungeon, Title Screen
+- **Scene** — Credits/Ending, Lullaby, Festival, Sea/Sailing, Desert Ruins, Factory, Space Station, Racing
 
 A mood adjusts:
 
@@ -81,6 +88,9 @@ The **rhythmic engine** — how notes are spaced in time, per channel:
 | Ballad | Slow and sparse — long, sustained notes. |
 | Driving 8ths | Constant eighth-note motion in bass & harmony; energetic. |
 | Call & Response | Lead plays a phrase, then rests so harmony "answers" in alternating bars. |
+| Syncopated / Funk | Off-beat pushes in lead & harmony over a steady quarter-note bass. |
+| Galop | Relentless eighths with the bass pumping root–octave; classic action-chiptune drive. |
+| Ostinato | Busy repeating accompaniment under a slower, singing lead. |
 
 ### Chord progression
 The harmonic backbone — a sequence of chords (one per bar, looped). Written as
@@ -98,6 +108,14 @@ diatonic scale degrees (Roman numerals):
 | i–iv–v | 1 4 5 5 | Minor blues/rock. |
 | i–VII–VI–V | 1 7 6 5 | Andalusian cadence (Spanish/dramatic). |
 | 12-bar blues | 1 1 1 1 4 4 1 1 5 4 1 5 | 12-bar form; pairs with Blues/Mixolydian. |
+| vi–IV–I–V (axis) | 6 4 1 5 | The "axis of awesome" loop, wistful-epic. |
+| IV–V–iii–vi (royal road) | 4 5 3 6 | Signature J-pop/anime progression. |
+| I–vi–ii–V (turnaround) | 1 6 2 5 | Smooth jazz-standard turnaround. |
+| I–VII–IV (rock) | 1 7 4 1 | Modal rock; shines in Mixolydian. |
+| i–IV vamp (modal) | 1 4 1 4 | Two-chord vamp; shines in Dorian. |
+| i–VI–iv–V (epic) | 1 6 4 5 | Big cinematic minor loop. |
+| I–V–IV–V (drift) | 1 5 4 5 | Floating, unresolved motion. |
+| i–VII–VI–VII | 1 7 6 7 | Lament-style oscillation. |
 
 The degrees are interpreted *within the chosen scale*, so the same progression
 sounds major or minor depending on the scale.
@@ -119,11 +137,6 @@ the structure envelope is applied across them.
 0–100%. Delays the off-beat of each beat to create a shuffled, "swung" groove.
 0% is straight/mechanical. Baked into note timing so it shows in playback **and**
 the exported MIDI.
-
-### Humanize
-0–100%. Adds small, **seed-deterministic** variation to each note's timing and
-velocity so the performance feels less robotic. Because it's derived from the
-seed, it stays reproducible.
 
 ---
 
@@ -147,7 +160,7 @@ The GB channels are monophonic, so "chords" are arpeggiated one note at a time.
 - **Density** — how active the bass line is; it alternates root and fifth on busier settings.
 
 ### Noise — Drums
-- **Drum style** — Auto (from mood), Rock kit (backbeat with hi-hats), Marching (military snare), Busy / 16ths (dense), or Silent.
+- **Drum style** — Auto (from mood), Rock kit (backbeat with hi-hats), Marching (military snare), Busy / 16ths (dense), Dance / 4-on-floor (kick every beat, off-beat hats), Half-time (spacious backbeat), or Silent. Every style adds a rising snare fill in the last beat of each 4-bar phrase.
 
 Mapped to General MIDI drums on export: kick = 36, snare = 38, hi-hat = 42.
 
