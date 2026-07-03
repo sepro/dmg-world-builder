@@ -11,6 +11,7 @@ python3 -m http.server 8000
 # world editor:    http://localhost:8000/dist/gb-world-editor.html
 # sprite editor:   http://localhost:8000/dist/gb-sprite-editor.html
 # music generator: http://localhost:8000/dist/gb-music-generator.html
+# tile reducer:    http://localhost:8000/dist/gb-tile-reducer.html
 ```
 
 Inside the devcontainer a static server starts automatically on port 5500 via VS Code Live Server.
@@ -78,6 +79,12 @@ A deterministic chiptune improviser for the four GB channels (Pulse 1 = lead, Pu
 **Output**: piano-roll and simplified-staff views are drawn to `<canvas>` (`buildPianoRoll`, `buildStaff`), with a separate overlay canvas for the playhead. Export is `.gbmusic.json` (settings) and Standard MIDI File (`midiBytes`, format 1, drums on MIDI channel 10).
 
 See `docs/MUSIC_GENERATOR.md` for an end-user guide to every control.
+
+### The tile reducer (`dist/gb-tile-reducer.html`)
+
+A stateless single-file utility (no project file, no undo): load a PNG, quantize it to the four DMG shades (same luminance buckets as the editors' importers, alpha = lightest), slice into 8×8 tiles, and merge similar tiles so the image fits a tile budget. Mirrored tiles are deliberately NOT merged — DMG BG tiles can't be flipped, so counts stay honest for the target.
+
+Two clusterers (`greedyCluster`, `agglomerativeCluster`) share the cluster bookkeeping (per-pixel shade histogram, hybrid rep = frequency-weighted per-pixel mode, always 0..3, no gray averaging). Greedy: single pass over unique tiles ordered by frequency; a tile joins the closest cluster within the weighted-SSD threshold or seeds a new one; "target count" mode binary-searches the smallest threshold that fits. Agglomerative: merge the globally cheapest pair repeatedly via nearest-neighbor arrays; O(n²), falls back to greedy above `AGGLO_MAX` (4096) unique tiles. User options in `state`: `repMode` (hybrid synthesized / most-used member / best-fit member), `freqWeight` (Ward factor n1·n2/(n1+n2) so frequent tiles resist merging), `edgeWeight` (border pixels ×2, normalized so thresholds stay comparable), and `refinePasses` (k-means-style reassignment, never grows the cluster count). The reduced PNG downloads at 1× in either bundled palette; both quantize back to the same values, so the file re-imports losslessly into the world/sprite editors.
 
 ### Converter (`tools/gbworld_to_c.py`)
 

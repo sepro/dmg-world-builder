@@ -65,7 +65,8 @@
 
   <div class="hero">
     <h1>Game Boy Tool Suite</h1>
-    <p>Build worlds, sprites and chiptunes for GBDK-2020, right in the browser.</p>
+    <p>Build worlds, sprites and chiptunes for GBDK-2020 — and squeeze your
+       art into VRAM — right in the browser.</p>
   </div>
 
   <main class="tools">
@@ -90,6 +91,14 @@
       <p>A deterministic four-channel chiptune improviser. Pick key, mood,
          pattern and seed; export settings as .gbmusic.json or a MIDI file.</p>
       <span class="go">Open generator &raquo;</span>
+    </a>
+    <a class="tool-card" href="gb-tile-reducer.html">
+      <canvas id="preview-reducer" width="160" height="48"></canvas>
+      <h2>Tile Reducer</h2>
+      <p>Load a PNG, count its unique 8&times;8 tiles, and merge similar ones
+         until the image fits your VRAM budget while staying close to the
+         original.</p>
+      <span class="go">Open reducer &raquo;</span>
     </a>
   </main>
 
@@ -133,6 +142,25 @@ const SHADES = ["#e0f8d0", "#88c070", "#346856", "#081820"];
   blob(4, 4, false); blob(17, 2, false); blob(30, 5, true);
   // A ground line beneath the hops.
   for (let x = 2; x < 38; x++) px(x, 10, 2);
+})();
+
+/* Reducer preview: a dense tile grid collapsing into fewer tiles. */
+(() => {
+  const ctx = document.getElementById("preview-reducer").getContext("2d");
+  ctx.fillStyle = SHADES[3];
+  ctx.fillRect(0, 0, 160, 48);
+  // Left: a "many unique tiles" jumble; right: the same area from 3 tiles.
+  const cell = (x, y, v) => { ctx.fillStyle = SHADES[v]; ctx.fillRect(x, y, 10, 10); };
+  let seed = 7;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  for (let y = 0; y < 4; y++)
+    for (let x = 0; x < 5; x++) cell(6 + x * 12, 2 + y * 11, Math.floor(rnd() * 3));
+  // Arrow.
+  ctx.fillStyle = SHADES[0];
+  ctx.fillRect(72, 21, 14, 4);
+  ctx.beginPath(); ctx.moveTo(86, 15); ctx.lineTo(94, 23); ctx.lineTo(86, 31); ctx.fill();
+  for (let y = 0; y < 4; y++)
+    for (let x = 0; x < 5; x++) cell(100 + x * 12, 2 + y * 11, (x + y) % 2 ? 1 : 2);
 })();
 
 /* Music preview: a piano-roll-ish scatter of note bars. */
