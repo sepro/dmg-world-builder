@@ -82,6 +82,39 @@ function closeModal() {
   if (existing) existing.remove();
 }
 
+/* ---- Cross-tool image handoff ---- */
+
+// Lets one tool pass its output image straight into another (e.g. Pixelizer ->
+// Tile Reducer) without a download/upload round trip. The image travels as a
+// PNG data URL through sessionStorage, which survives a same-tab navigation on
+// the same origin. The key is read-and-removed on pickup, so nothing persists
+// beyond the hop (the tools otherwise avoid browser storage on purpose).
+const IMAGE_HANDOFF_KEY = "gb-image-handoff";
+
+function sendImageHandoff(targetPage, name, dataUrl) {
+  try {
+    sessionStorage.setItem(IMAGE_HANDOFF_KEY, JSON.stringify({ name, dataUrl }));
+  } catch (err) {
+    // Quota or a storage-blocking context: fall back to the manual route.
+    alert("Could not hand the image over (" + err.message + "). " +
+      "Download the PNG and load it in the other tool instead.");
+    return;
+  }
+  location.href = targetPage;
+}
+
+function takeImageHandoff() {
+  try {
+    const raw = sessionStorage.getItem(IMAGE_HANDOFF_KEY);
+    if (!raw) return null;
+    sessionStorage.removeItem(IMAGE_HANDOFF_KEY);
+    const handoff = JSON.parse(raw);
+    return (handoff && typeof handoff.dataUrl === "string") ? handoff : null;
+  } catch {
+    return null;
+  }
+}
+
 /* ---- File / clipboard ---- */
 
 // Try a real file download. This works when the page is opened directly, but a

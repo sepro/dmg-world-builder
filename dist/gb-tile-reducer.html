@@ -14,6 +14,11 @@
   - Target count: reduce until the unique tile count fits the requested number.
   - Threshold: merge any tiles closer than a chosen distance, for exploring.
 
+  Protected regions: tiles can be marked on the original preview (brush or
+  Shift-drag rectangle) as untouchable - faces, text, logos. Their art is
+  pinned exactly as drawn; other tiles may still merge INTO them (reusing a
+  pinned tile elsewhere costs nothing, since it occupies a VRAM slot anyway).
+
   Stateless by design: no project file, no undo. The outputs are the stats and
   the reduced PNG, which re-imports losslessly into the world/sprite editors
   (both bundled palettes quantize back to the same four values).
@@ -110,6 +115,9 @@ const state = {
   paletteIndex: 0,
   zoom: 0,                  // 0 = auto
   highlightChanged: true,
+
+  protectedTiles: null,     // Uint8Array per tile position: 1 = must stay exactly as drawn
+  protectTool: "protect",   // protect | erase - brush mode on the original preview
 };
 
 /* ============================================================
@@ -235,13 +243,28 @@ function newCluster() {
     rep: new Uint8Array(PIXELS_PER_TILE),
     weight: 0,                                     // sum of member tile counts
     members: [],                                   // indices into unique
+    frozen: false,                                 // protected: rep never changes
+    pinnedIdx: -1,                                 // unique index this cluster pins
   };
+}
+
+// A frozen cluster pins one protected tile: its rep is that tile's exact
+// pixels, forever. Other tiles may join it (they become copies of the
+// protected art), but nothing can alter the rep.
+function makeFrozenCluster(unique, idx) {
+  const c = newCluster();
+  c.frozen = true;
+  c.pinnedIdx = idx;
+  c.rep = Uint8Array.from(unique[idx].pixels);
+  addTileToCluster(c, unique, idx);
+  return c;
 }
 
 // The hybrid representative: per-pixel frequency-weighted mode. Both
 // algorithms use it as the linkage point even if the final rep mode differs,
 // because it tracks the cluster's content cheaply and stays in 0..3.
 function refreshHybridRep(c) {
+  if (c.frozen) return;   // protected art is immutable
   for (let i = 0; i < PIXELS_PER_TILE; i++) {
     let best = 0, bestN = c.hist[i * 4];
     for (let v = 1; v < 4; v++) {
@@ -260,6 +283,8 @@ function addTileToCluster(c, unique, idx) {
   refreshHybridRep(c);
 }
 
+// Caller guarantees b is not frozen (a frozen survivor keeps its rep because
+// refreshHybridRep skips frozen clusters; two frozen clusters never merge).
 function mergeClusters(a, b) {
   for (let i = 0; i < a.hist.length; i++) a.hist[i] += b.hist[i];
   a.weight += b.weight;
@@ -269,10 +294,14 @@ function mergeClusters(a, b) {
 
 /* ---- the two clusterers ---- */
 
-function greedyCluster(unique, threshold, wv) {
+function greedyCluster(unique, threshold, wv, pinned) {
   const order = unique.map((_, i) => i).sort((a, b) => unique[b].count - unique[a].count);
   const clusters = [];
+  // Protected tiles seed frozen clusters up front so free tiles can merge
+  // into them (adopting the protected art) but never the other way around.
+  for (const idx of pinned) clusters.push(makeFrozenCluster(unique, idx));
   for (const idx of order) {
+    if (pinned.has(idx)) continue;
     const tile = unique[idx];
     let bestC = -1, bestD = threshold;   // only clusters within the threshold qualify
     for (let c = 0; c < clusters.length; c++) {
@@ -287,8 +316,9 @@ function greedyCluster(unique, threshold, wv) {
 
 // Merge the globally cheapest pair until the stop condition is reached:
 // stop.target = merge down to a count, stop.threshold = merge while cheap.
-function agglomerativeCluster(unique, wv, stop) {
+function agglomerativeCluster(unique, wv, stop, pinned) {
   const clusters = unique.map((_, idx) => {
+    if (pinned.has(idx)) return makeFrozenCluster(unique, idx);
     const c = newCluster();
     addTileToCluster(c, unique, idx);
     return c;
@@ -296,8 +326,11 @@ function agglomerativeCluster(unique, wv, stop) {
   const active = new Array(clusters.length).fill(true);
   let activeCount = clusters.length;
 
+  // Two frozen clusters can never merge: both reps are untouchable.
   const cost = (i, j) =>
-    wssd(clusters[i].rep, clusters[j].rep, wv) * mergeFactor(clusters[i].weight, clusters[j].weight);
+    clusters[i].frozen && clusters[j].frozen
+      ? Infinity
+      : wssd(clusters[i].rep, clusters[j].rep, wv) * mergeFactor(clusters[i].weight, clusters[j].weight);
 
   // Nearest-neighbor arrays: nn[i] is i's cheapest partner, nnd[i] that cost.
   const nn = new Int32Array(clusters.length).fill(-1);
@@ -320,23 +353,27 @@ function agglomerativeCluster(unique, wv, stop) {
       if (active[i] && (a < 0 || nnd[i] < nnd[a])) a = i;
     }
     if (stop.threshold != null && nnd[a] > stop.threshold) break;
+    if (!isFinite(nnd[a])) break;   // only frozen-frozen pairs remain
     const b = nn[a];
 
-    mergeClusters(clusters[a], clusters[b]);
-    active[b] = false;
+    // A frozen cluster must be the survivor so its rep persists.
+    const survivor = (clusters[b].frozen && !clusters[a].frozen) ? b : a;
+    const absorbed = survivor === a ? b : a;
+    mergeClusters(clusters[survivor], clusters[absorbed]);
+    active[absorbed] = false;
     activeCount--;
 
-    // Repair the neighbor arrays: a moved, b vanished. Anyone pointing at
-    // either rescans; everyone else just checks whether the merged cluster
-    // came closer than their current partner.
-    computeNN(a);
+    // Repair the neighbor arrays: the survivor moved, the absorbed vanished.
+    // Anyone pointing at either rescans; everyone else just checks whether
+    // the merged cluster came closer than their current partner.
+    computeNN(survivor);
     for (let i = 0; i < clusters.length; i++) {
-      if (!active[i] || i === a) continue;
+      if (!active[i] || i === survivor) continue;
       if (nn[i] === a || nn[i] === b) {
         computeNN(i);
       } else {
-        const d = cost(i, a);
-        if (d < nnd[i]) { nnd[i] = d; nn[i] = a; }
+        const d = cost(i, survivor);
+        if (d < nnd[i]) { nnd[i] = d; nn[i] = survivor; }
       }
     }
   }
@@ -347,6 +384,7 @@ function agglomerativeCluster(unique, wv, stop) {
 
 function finalizeReps(clusters, unique, wv) {
   clusters.forEach(c => {
+    if (c.frozen) return;   // pinned art stays exactly as drawn
     if (state.repMode === "hybrid" || c.members.length === 1) { refreshHybridRep(c); return; }
     if (state.repMode === "most-used") {
       const best = c.members.reduce((a, b) => unique[b].count > unique[a].count ? b : a);
@@ -382,8 +420,21 @@ function finalizeReps(clusters, unique, wv) {
 function refineClusters(clusters, unique, wv, passes) {
   for (let pass = 0; pass < passes; pass++) {
     const reps = clusters.map(c => c.rep);
-    const next = reps.map(() => newCluster());
+    const next = clusters.map(c => {
+      const n = newCluster();
+      if (c.frozen) {
+        n.frozen = true;
+        n.pinnedIdx = c.pinnedIdx;
+        n.rep = Uint8Array.from(c.rep);
+      }
+      return n;
+    });
+    // Pinned tiles are not free to move: they stay in their frozen cluster.
+    const frozenClusterOf = new Map();
+    clusters.forEach((c, i) => { if (c.frozen) frozenClusterOf.set(c.pinnedIdx, i); });
     unique.forEach((tile, idx) => {
+      const home = frozenClusterOf.get(idx);
+      if (home !== undefined) { addTileToCluster(next[home], unique, idx); return; }
       let best = 0, bestD = Infinity;
       for (let c = 0; c < reps.length; c++) {
         const d = wssd(tile.pixels, reps[c], wv);
@@ -429,10 +480,23 @@ function rebuildImage(res) {
   return res;
 }
 
+// Unique-tile indices that appear at any protected position. Protection is
+// per unique tile: since the pinned tile occupies a VRAM slot regardless,
+// keeping ALL its copies unchanged costs nothing and loses no budget.
+function pinnedUniqueIndices() {
+  const pinned = new Set();
+  if (!state.protectedTiles) return pinned;
+  for (let t = 0; t < state.tileMap.length; t++) {
+    if (state.protectedTiles[t]) pinned.add(state.tileMap[t]);
+  }
+  return pinned;
+}
+
 function recompute() {
   if (!state.shades) return;
   const unique = state.unique;
   const wv = pixelWeights();
+  const pinned = pinnedUniqueIndices();
 
   // Agglomerative is O(n^2) in unique tiles; past the cap use greedy and say so.
   const wantAgglo = state.algorithm === "agglomerative";
@@ -441,12 +505,13 @@ function recompute() {
   let clusters;
   let usedThreshold = null;
   if (state.mode === "target") {
-    const target = Math.max(1, state.target);
+    // Pinned tiles can't merge with each other, so they set a floor.
+    const target = Math.max(1, state.target, pinned.size);
     if (unique.length <= target) {
-      clusters = greedyCluster(unique, 0, wv);         // nothing needs merging
+      clusters = greedyCluster(unique, 0, wv, pinned); // nothing needs merging
       usedThreshold = 0;
     } else if (useAgglo) {
-      clusters = agglomerativeCluster(unique, wv, { target });
+      clusters = agglomerativeCluster(unique, wv, { target }, pinned);
     } else {
       // Binary-search the smallest greedy threshold that fits the target. With
       // frequency protection on, costs scale up by the Ward factor, so the
@@ -457,16 +522,16 @@ function recompute() {
       let best = null;
       while (lo <= hi) {
         const mid = Math.floor((lo + hi) / 2);
-        const res = greedyCluster(unique, mid, wv);
+        const res = greedyCluster(unique, mid, wv, pinned);
         if (res.length <= target) { best = res; usedThreshold = mid; hi = mid - 1; }
         else lo = mid + 1;
       }
-      clusters = best;   // the ceiling always fits (a single cluster)
+      clusters = best;   // the ceiling always fits (everything joins the pinned tiles)
     }
   } else {
     clusters = useAgglo
-      ? agglomerativeCluster(unique, wv, { threshold: state.threshold })
-      : greedyCluster(unique, state.threshold, wv);
+      ? agglomerativeCluster(unique, wv, { threshold: state.threshold }, pinned)
+      : greedyCluster(unique, state.threshold, wv, pinned);
     usedThreshold = state.threshold;
   }
 
@@ -476,6 +541,7 @@ function recompute() {
   const res = clustersToResult(clusters, unique);
   res.usedThreshold = usedThreshold;
   res.aggloFellBack = wantAgglo && !useAgglo;
+  res.pinnedCount = pinned.size;
   state.result = rebuildImage(res);
 }
 
@@ -483,32 +549,48 @@ function recompute() {
    Image loading
    ============================================================ */
 
+// Quantize a decoded image and reset the tool around it. Shared by file
+// loading and the cross-tool handoff (e.g. "Send to Reducer" in the Pixelizer).
+function ingestImage(img, name) {
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = img.width; canvas.height = img.height;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0);
+    const data = ctx.getImageData(0, 0, img.width, img.height).data;
+
+    const { shades, w, h } = quantizeImage(data, img.width, img.height);
+    const { unique, tileMap } = sliceTiles(shades, w, h);
+    state.fileName = name;
+    state.width = w; state.height = h;
+    state.shades = shades;
+    state.unique = unique;
+    state.tileMap = tileMap;
+    state.protectedTiles = new Uint8Array(tileMap.length);   // protection resets per image
+    recompute();
+    render();
+  } catch (err) {
+    alert("Could not load image: " + err.message);
+  }
+}
+
 function loadImageFile(file) {
   const img = new Image();
   img.onload = () => {
-    try {
-      const canvas = document.createElement("canvas");
-      canvas.width = img.width; canvas.height = img.height;
-      const ctx = canvas.getContext("2d", { willReadFrequently: true });
-      ctx.drawImage(img, 0, 0);
-      const data = ctx.getImageData(0, 0, img.width, img.height).data;
-
-      const { shades, w, h } = quantizeImage(data, img.width, img.height);
-      const { unique, tileMap } = sliceTiles(shades, w, h);
-      state.fileName = file.name;
-      state.width = w; state.height = h;
-      state.shades = shades;
-      state.unique = unique;
-      state.tileMap = tileMap;
-      recompute();
-      render();
-    } catch (err) {
-      alert("Could not load image: " + err.message);
-    }
+    ingestImage(img, file.name);
     URL.revokeObjectURL(img.src);
   };
   img.onerror = () => alert("Could not read that file as an image.");
   img.src = URL.createObjectURL(file);
+}
+
+// Pick up an image handed over by another tool (read-and-removed, so a
+// reload of this page goes back to the normal drop zone).
+function loadHandoffImage(handoff) {
+  const img = new Image();
+  img.onload = () => ingestImage(img, handoff.name || "handoff.png");
+  img.onerror = () => alert("Could not read the handed-over image.");
+  img.src = handoff.dataUrl;
 }
 
 /* ============================================================
@@ -543,6 +625,32 @@ function paintShades(canvas, shades, zoom, colors) {
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(src, 0, 0, canvas.width, canvas.height);
   return ctx;
+}
+
+const PROTECT_COLOR = "#4fae7a";   // protected-tile overlay (both previews)
+
+function outlineTile(ctx, t, tilesX, zoom) {
+  ctx.strokeRect(
+    (t % tilesX) * TILE_PX * zoom + 0.5,
+    Math.floor(t / tilesX) * TILE_PX * zoom + 0.5,
+    TILE_PX * zoom - 1, TILE_PX * zoom - 1);
+}
+
+function drawProtectedOverlay(ctx, zoom, fill) {
+  if (!state.protectedTiles) return;
+  const tilesX = state.width / TILE_PX;
+  ctx.strokeStyle = PROTECT_COLOR;
+  ctx.fillStyle = "rgba(79, 174, 122, 0.28)";
+  ctx.lineWidth = 1;
+  for (let t = 0; t < state.protectedTiles.length; t++) {
+    if (!state.protectedTiles[t]) continue;
+    if (fill) {
+      ctx.fillRect(
+        (t % tilesX) * TILE_PX * zoom, Math.floor(t / tilesX) * TILE_PX * zoom,
+        TILE_PX * zoom, TILE_PX * zoom);
+    }
+    outlineTile(ctx, t, tilesX, zoom);
+  }
 }
 
 function render() {
@@ -613,6 +721,10 @@ function render() {
     ctl.appendChild(el("p", "hint", res.usedThreshold != null
       ? "Finds the gentlest merge that fits the target (used threshold: " + res.usedThreshold + ")."
       : "Merges the cheapest pair until the count fits the target."));
+    if (res.pinnedCount > Math.max(1, state.target)) {
+      ctl.appendChild(el("p", "hint",
+        res.pinnedCount + " protected tiles can't merge with each other, so they set the floor."));
+    }
   } else {
     const sField = el("div", "field");
     sField.appendChild(label("Merge distance (0 = exact only, " + MAX_DIST + " = everything)"));
@@ -685,6 +797,8 @@ function render() {
   trow("Unique tiles after", String(after));
   trow("Algorithm", res.aggloFellBack ? "greedy (fallback)" : state.algorithm);
   trow("Tiles changed", res.changedTiles.length + " / " + state.tileMap.length);
+  const protectedCount = state.protectedTiles.reduce((s, v) => s + v, 0);
+  trow("Protected", protectedCount + " positions (" + res.pinnedCount + " tiles pinned)");
   ctl.appendChild(table);
 
   const fits = after <= TILE_BUDGET;
@@ -722,9 +836,99 @@ function render() {
 
   const beforeCard = el("div", "card col-editor");
   beforeCard.appendChild(el("h2", null, "Original (quantized) — " + before + " tiles"));
+
+  /* Protect brush: paint tiles that must come through the reduction
+     untouched. Click/drag paints single tiles; Shift-drag marks a rectangle. */
+  const toolRow = el("div", "row");
+  [["protect", "Protect"], ["erase", "Erase"]].forEach(([tool, lbl]) => {
+    const b = el("button", "mode-btn" + (state.protectTool === tool ? " active" : ""), lbl);
+    b.addEventListener("click", () => { state.protectTool = tool; render(); });
+    toolRow.appendChild(b);
+  });
+  const clearBtn = el("button", null, "Clear");
+  clearBtn.addEventListener("click", () => {
+    state.protectedTiles.fill(0);
+    recompute(); render();
+  });
+  toolRow.appendChild(clearBtn);
+  beforeCard.appendChild(toolRow);
+  beforeCard.appendChild(el("p", "hint",
+    "Drag to mark tiles that must not change (faces, text). Shift-drag for a rectangle."));
+
   const beforeWrap = el("div", "preview-wrap");
   const beforeCanvas = document.createElement("canvas");
-  paintShades(beforeCanvas, state.shades, zoom, colors);
+  beforeCanvas.style.cursor = "crosshair";
+  beforeCanvas.style.touchAction = "none";
+  const tilesX = state.width / TILE_PX, tilesY = state.height / TILE_PX;
+
+  const repaintBefore = (pendingRect) => {
+    const ctx = paintShades(beforeCanvas, state.shades, zoom, colors);
+    drawProtectedOverlay(ctx, zoom, true);
+    if (pendingRect) {
+      ctx.strokeStyle = PROTECT_COLOR;
+      ctx.lineWidth = 1;
+      const x0 = Math.min(pendingRect.a.tx, pendingRect.b.tx), x1 = Math.max(pendingRect.a.tx, pendingRect.b.tx);
+      const y0 = Math.min(pendingRect.a.ty, pendingRect.b.ty), y1 = Math.max(pendingRect.a.ty, pendingRect.b.ty);
+      ctx.strokeRect(
+        x0 * TILE_PX * zoom + 0.5, y0 * TILE_PX * zoom + 0.5,
+        (x1 - x0 + 1) * TILE_PX * zoom - 1, (y1 - y0 + 1) * TILE_PX * zoom - 1);
+    }
+  };
+  repaintBefore(null);
+
+  const tileAt = (e) => {
+    const r = beforeCanvas.getBoundingClientRect();
+    const tx = Math.floor((e.clientX - r.left) / (TILE_PX * zoom));
+    const ty = Math.floor((e.clientY - r.top) / (TILE_PX * zoom));
+    if (tx < 0 || ty < 0 || tx >= tilesX || ty >= tilesY) return null;
+    return { tx, ty };
+  };
+  const brushValue = () => state.protectTool === "protect" ? 1 : 0;
+
+  // Painting only touches state.protectedTiles + the local overlay; the
+  // (potentially slow) recompute runs once, on pointerup.
+  let painting = false, rectAnchor = null, dirty = false;
+  const paintTile = (cell) => {
+    const i = cell.ty * tilesX + cell.tx;
+    if (state.protectedTiles[i] !== brushValue()) {
+      state.protectedTiles[i] = brushValue();
+      dirty = true;
+    }
+  };
+  beforeCanvas.addEventListener("pointerdown", (e) => {
+    const cell = tileAt(e);
+    if (!cell) return;
+    beforeCanvas.setPointerCapture(e.pointerId);
+    if (e.shiftKey) {
+      rectAnchor = cell;
+      repaintBefore({ a: rectAnchor, b: cell });
+    } else {
+      painting = true;
+      paintTile(cell);
+      repaintBefore(null);
+    }
+  });
+  beforeCanvas.addEventListener("pointermove", (e) => {
+    const cell = tileAt(e);
+    if (!cell) return;
+    if (rectAnchor) repaintBefore({ a: rectAnchor, b: cell });
+    else if (painting) { paintTile(cell); repaintBefore(null); }
+  });
+  beforeCanvas.addEventListener("pointerup", (e) => {
+    if (rectAnchor) {
+      const cell = tileAt(e) || rectAnchor;
+      const x0 = Math.min(rectAnchor.tx, cell.tx), x1 = Math.max(rectAnchor.tx, cell.tx);
+      const y0 = Math.min(rectAnchor.ty, cell.ty), y1 = Math.max(rectAnchor.ty, cell.ty);
+      for (let ty = y0; ty <= y1; ty++)
+        for (let tx = x0; tx <= x1; tx++)
+          paintTile({ tx, ty });
+    }
+    painting = false;
+    rectAnchor = null;
+    if (dirty) { recompute(); render(); }
+    else repaintBefore(null);
+  });
+
   beforeWrap.appendChild(beforeCanvas);
   beforeCard.appendChild(beforeWrap);
   cols.appendChild(beforeCard);
@@ -735,16 +939,11 @@ function render() {
   const afterCanvas = document.createElement("canvas");
   const actx = paintShades(afterCanvas, res.reducedShades, zoom, colors);
   if (state.highlightChanged) {
-    const tilesX = state.width / TILE_PX;
     actx.strokeStyle = "#e08a5a";
     actx.lineWidth = 1;
-    res.changedTiles.forEach(t => {
-      actx.strokeRect(
-        (t % tilesX) * TILE_PX * zoom + 0.5,
-        Math.floor(t / tilesX) * TILE_PX * zoom + 0.5,
-        TILE_PX * zoom - 1, TILE_PX * zoom - 1);
-    });
+    res.changedTiles.forEach(t => outlineTile(actx, t, tilesX, zoom));
   }
+  drawProtectedOverlay(actx, zoom, false);   // confirm the protected art came through
   afterWrap.appendChild(afterCanvas);
   afterCard.appendChild(afterWrap);
   cols.appendChild(afterCard);
@@ -782,6 +981,11 @@ document.getElementById("file-input").addEventListener("change", (e) => {
 });
 
 render();
+
+// If another tool navigated here with an image (Pixelizer's "Send to
+// Reducer"), load it now; the drop zone shows until the image decodes.
+const handoff = takeImageHandoff();
+if (handoff) loadHandoffImage(handoff);
 </script>
 </body>
 </html>

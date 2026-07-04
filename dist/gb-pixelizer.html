@@ -69,6 +69,7 @@
     <a class="nav-link" href="gb-tile-reducer.html">Reducer</a>
     <a class="nav-link" href="gb-music-generator.html">Music ♪</a>
     <button id="btn-load">Load image</button>
+    <button id="btn-send" disabled title="Open the result in the Tile Reducer">Send to Reducer</button>
     <button class="primary" id="btn-download" disabled>Download PNG</button>
     <input type="file" id="file-input" accept="image/*" style="display:none;">
   </header>
@@ -465,6 +466,7 @@ function sliderRow(text, min, max, step, value, format, onChange) {
 
 function render() {
   document.getElementById("btn-download").disabled = !state.result;
+  document.getElementById("btn-send").disabled = !state.result;
   const panel = document.getElementById("panel");
   panel.innerHTML = "";
 
@@ -639,7 +641,7 @@ function render() {
   const fits = res.uniqueTiles <= TILE_BUDGET;
   ctl.appendChild(el("p", fits ? "budget-ok" : "budget-over",
     res.uniqueTiles + " / " + TILE_BUDGET + " VRAM budget" +
-    (fits ? "" : "  (run the result through the Tile Reducer)")));
+    (fits ? "" : "  (use “Send to Reducer” to merge tiles)")));
 
   ctl.appendChild(spacer(10));
   const viewRow = el("div", "row");
@@ -695,17 +697,33 @@ function render() {
    Download
    ============================================================ */
 
-function downloadResult() {
-  if (!state.result) return;
+// The result at 1x in the current palette: the exact pixels the download and
+// the reducer handoff share, so both routes re-import identically.
+function resultCanvas() {
   const { shades, w, h } = state.result;
   const canvas = document.createElement("canvas");
-  // 1x scale so the file re-imports directly as tiles.
   paintShades(canvas, shades, w, h, 1, PALETTES[state.paletteIndex].colors);
-  const base = (state.fileName || "image").replace(/\.[^.]*$/, "").replace(/[^a-z0-9_-]+/gi, "_");
-  canvas.toBlob(blob => {
-    if (blob) downloadBlob(base + "-2bpp.png", blob);
+  return canvas;
+}
+
+function resultBaseName() {
+  return (state.fileName || "image").replace(/\.[^.]*$/, "").replace(/[^a-z0-9_-]+/gi, "_");
+}
+
+function downloadResult() {
+  if (!state.result) return;
+  resultCanvas().toBlob(blob => {
+    if (blob) downloadBlob(resultBaseName() + "-2bpp.png", blob);
     else alert("Could not encode the PNG.");
   }, "image/png");
+}
+
+// Hand the result to the tile reducer without a download/upload round trip.
+function sendToReducer() {
+  if (!state.result) return;
+  sendImageHandoff("gb-tile-reducer.html",
+    resultBaseName() + "-2bpp.png",
+    resultCanvas().toDataURL("image/png"));
 }
 
 /* ============================================================
@@ -715,6 +733,7 @@ function downloadResult() {
 document.getElementById("btn-load").addEventListener("click", () =>
   document.getElementById("file-input").click());
 document.getElementById("btn-download").addEventListener("click", downloadResult);
+document.getElementById("btn-send").addEventListener("click", sendToReducer);
 document.getElementById("file-input").addEventListener("change", (e) => {
   const file = e.target.files[0];
   if (file) loadImageFile(file);
