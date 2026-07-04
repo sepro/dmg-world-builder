@@ -69,6 +69,8 @@ Hardware rules the editor models — keep these invariants when editing:
 
 PNG export writes value 0 as transparent and 1..3 at the importer's bucket midpoints (`#aaaaaa`/`#555555`/`#000000`) so a tile sheet round-trips losslessly. The saved file is `.gbsprite.json` (settings-free full project, `formatVersion 1`); import rejects `.gbworld.json` files by detecting `tilesets`.
 
+Animation workflow: the composer onion-skins the neighboring animation frames (`animationNeighborsFor` + `rasterizeMetasprite`, prev orange / next cyan). "Draw on frame" (animations panel) rasterizes a frame's metasprite into a flat 64×64 bitmap for free-form painting, then `planBake` recompiles it: grid-alignment search (≤8×16 anchors) slices the drawing into part cells, matching each against existing tiles under all four flip combos (mirrored matches reuse the tile with flip flags — free on OBJs; new tiles dedupe the same way); the fewest-new-tiles alignment wins. `bakeDrawing` is copy-on-write: tiles are only ever added, and the metasprite is rebuilt in place only if no other frame references it. Orphaned tiles are swept by "Delete unused" in the Tiles tab.
+
 ### The music generator (`dist/gb-music-generator.html`)
 
 A deterministic chiptune improviser for the four GB channels (Pulse 1 = lead, Pulse 2 = harmony, Wave = bass, Noise = drums). Like the editor it is vanilla JS in one `<script>` block, links the two shared files, and holds all settings in a plain object (`state.settings`, `makeDefaultSettings`).

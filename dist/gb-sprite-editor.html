@@ -271,6 +271,9 @@ const state = {
   selectedAnimationId: null,
   selectedFrameIndex: -1,
   animPlay: true,
+
+  onionSkin: true,         // ghost neighboring animation frames in the composer
+  drawMode: null,          // { animId, frameIndex, bitmap, onion, grid } while drawing on a frame
 };
 
 function syncSelectionsToProject() {
@@ -349,6 +352,10 @@ function validateSelections() {
   if (!has(p.animations, state.selectedAnimationId)) state.selectedAnimationId = p.animations[0] ? p.animations[0].id : null;
   const anim = selectedAnimation();
   if (!anim || state.selectedFrameIndex >= anim.frames.length) state.selectedFrameIndex = -1;
+  if (state.drawMode) {
+    const dmAnim = animationById(state.drawMode.animId);
+    if (!dmAnim || state.drawMode.frameIndex >= dmAnim.frames.length) state.drawMode = null;
+  }
 }
 
 /* ============================================================
@@ -446,6 +453,229 @@ function paintTileThumb(canvas, tile, colors) {
   const ctx = canvas.getContext("2d");
   drawChecker(ctx, canvas.width, canvas.height, 0, 0, canvas.width / 4);
   drawSpritePixels(ctx, tile.pixels, colors, canvas.width / TILE_PX);
+}
+
+/* ============================================================
+   Rasterizing, onion skins, and the frame-drawing bake
+   ============================================================ */
+
+// Flip an 8x8 pixel array. Involution: applying the same flags twice returns
+// the original, so the same function converts drawn <-> stored pixels.
+function flipPixels(pixels, hFlip, vFlip) {
+  if (!hFlip && !vFlip) return Array.from(pixels);
+  const out = new Array(PIXELS_PER_TILE);
+  for (let y = 0; y < TILE_PX; y++) {
+    for (let x = 0; x < TILE_PX; x++) {
+      const sx = hFlip ? TILE_PX - 1 - x : x;
+      const sy = vFlip ? TILE_PX - 1 - y : y;
+      out[y * TILE_PX + x] = pixels[sy * TILE_PX + sx];
+    }
+  }
+  return out;
+}
+
+// Flatten a metasprite into a WORKSPACE^2 bitmap of pixel values 0..3.
+// Painted bottom-to-top so parts[0] wins overlaps, like the renderer.
+function rasterizeMetasprite(ms) {
+  const bmp = new Uint8Array(WORKSPACE * WORKSPACE);
+  for (let i = ms.parts.length - 1; i >= 0; i--) {
+    const part = ms.parts[i];
+    const n = part.tiles.length;
+    for (let t = 0; t < n; t++) {
+      const tile = part.tiles[t] != null ? tileById(part.tiles[t]) : null;
+      if (!tile) continue;
+      const slot = part.vFlip ? n - 1 - t : t;
+      for (let y = 0; y < TILE_PX; y++) {
+        for (let x = 0; x < TILE_PX; x++) {
+          const v = tile.pixels[y * TILE_PX + x];
+          if (v === 0) continue;
+          const px = part.x + (part.hFlip ? TILE_PX - 1 - x : x);
+          const py = part.y + slot * TILE_PX + (part.vFlip ? TILE_PX - 1 - y : y);
+          if (px >= 0 && px < WORKSPACE && py >= 0 && py < WORKSPACE) bmp[py * WORKSPACE + px] = v;
+        }
+      }
+    }
+  }
+  return bmp;
+}
+
+// Paint a bitmap as a flat-color silhouette: the onion-skin ghost.
+function drawGhostBitmap(ctx, bmp, scale, color, alpha) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  for (let y = 0; y < WORKSPACE; y++) {
+    for (let x = 0; x < WORKSPACE; x++) {
+      if (bmp[y * WORKSPACE + x]) ctx.fillRect(x * scale, y * scale, scale, scale);
+    }
+  }
+  ctx.restore();
+}
+
+// Which metasprites come before/after this one in an animation? Prefers the
+// selected animation, falls back to the first one that uses it.
+function animationNeighborsFor(msId) {
+  const anims = state.project.animations;
+  let anim = selectedAnimation();
+  if (!anim || !anim.frames.some(f => f.metaspriteId === msId)) {
+    anim = anims.find(a => a.frames.some(f => f.metaspriteId === msId)) || null;
+  }
+  if (!anim || anim.frames.length < 2) return null;
+  const i = anim.frames.findIndex(f => f.metaspriteId === msId);
+  const n = anim.frames.length;
+  const pi = anim.loop ? (i - 1 + n) % n : i - 1;
+  const ni = anim.loop ? (i + 1) % n : i + 1;
+  return {
+    prev: pi >= 0 && pi !== i ? metaspriteById(anim.frames[pi].metaspriteId) : null,
+    next: ni < n && ni !== i ? metaspriteById(anim.frames[ni].metaspriteId) : null,
+  };
+}
+
+/* ---- bake: compile a drawn bitmap into parts + tiles ----
+
+   The drawing is free-form; structure is recovered by slicing it into part
+   cells. For each candidate grid alignment (up to 8x16 offsets around the
+   painted bounding box) every non-empty cell is matched against existing
+   tiles under all four flip combinations - a mirrored match reuses the tile
+   with flip flags, which is free on OBJs. New tiles are deduped the same
+   way. The alignment producing the fewest new tiles (then fewest parts)
+   wins. Nothing is mutated here; bakeDrawing() applies the plan. */
+
+function planBake(bitmap) {
+  const p = state.project;
+  const cellH = objHeight();
+  const n = tilesPerPart();
+
+  let x0 = WORKSPACE, y0 = WORKSPACE, x1 = -1, y1 = -1;
+  for (let y = 0; y < WORKSPACE; y++) {
+    for (let x = 0; x < WORKSPACE; x++) {
+      if (bitmap[y * WORKSPACE + x]) {
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+      }
+    }
+  }
+  if (x1 < 0) return { parts: [], newTiles: new Map(), reused: 0 };
+
+  const existingByKey = new Map();
+  p.tiles.forEach(t => {
+    const k = t.pixels.join(",");
+    if (!existingByKey.has(k)) existingByKey.set(k, t.id);
+  });
+
+  const tileAt = (cx, cy) => {
+    const out = new Array(PIXELS_PER_TILE).fill(0);
+    for (let y = 0; y < TILE_PX; y++) {
+      for (let x = 0; x < TILE_PX; x++) {
+        const px = cx + x, py = cy + y;
+        if (px < WORKSPACE && py < WORKSPACE) out[y * TILE_PX + x] = bitmap[py * WORKSPACE + px];
+      }
+    }
+    return out;
+  };
+
+  const COMBOS = [[false, false], [true, false], [false, true], [true, true]];
+
+  const tryGrid = (gx, gy) => {
+    const newTiles = new Map();
+    const parts = [];
+    let reused = 0;
+    for (let cy = gy; cy <= y1; cy += cellH) {
+      for (let cx = gx; cx <= x1; cx += TILE_PX) {
+        const drawn = [];
+        let empty = true;
+        for (let s = 0; s < n; s++) {
+          const t = tileAt(cx, cy + s * TILE_PX);
+          if (t.some(v => v)) empty = false;
+          drawn.push(t);
+        }
+        if (empty) continue;
+
+        // Pick the flip combo that needs the fewest brand-new tiles.
+        let best = null;
+        for (const [h, v] of COMBOS) {
+          const stored = [];
+          let cost = 0;
+          for (let s = 0; s < n; s++) {
+            const src = drawn[v ? n - 1 - s : s];
+            if (!src.some(q => q)) { stored.push(null); continue; }
+            const t = flipPixels(src, h, v);
+            const k = t.join(",");
+            stored.push({ t, k });
+            if (!existingByKey.has(k) && !newTiles.has(k)) cost++;
+          }
+          if (!best || cost < best.cost) best = { h, v, stored, cost };
+          if (best.cost === 0) break;
+        }
+
+        const slots = best.stored.map(s => {
+          if (!s) return null;
+          if (existingByKey.has(s.k)) { reused++; return { existing: existingByKey.get(s.k) }; }
+          if (!newTiles.has(s.k)) newTiles.set(s.k, s.t);
+          return { key: s.k };
+        });
+        parts.push({ x: cx, y: cy, hFlip: best.h, vFlip: best.v, slots });
+      }
+    }
+    return { parts, newTiles, reused };
+  };
+
+  // Try grid anchors around the bounding box; keep the cheapest plan.
+  let best = null;
+  for (let sy = 0; sy < cellH; sy++) {
+    const gy = y0 - sy;
+    if (gy < 0 || gy + Math.ceil((y1 + 1 - gy) / cellH) * cellH > WORKSPACE) continue;
+    for (let sx = 0; sx < TILE_PX; sx++) {
+      const gx = x0 - sx;
+      if (gx < 0 || gx + Math.ceil((x1 + 1 - gx) / TILE_PX) * TILE_PX > WORKSPACE) continue;
+      const plan = tryGrid(gx, gy);
+      const score = plan.newTiles.size * 1000 + plan.parts.length;
+      if (!best || score < best.score) { best = plan; best.score = score; }
+    }
+  }
+  return best || tryGrid(0, 0);   // (0,0) always covers; unreachable in practice
+}
+
+// Apply a bake plan to the frame being drawn on. Copy-on-write throughout:
+// tiles are only ever added (never edited), and the metasprite is rebuilt in
+// place only when no other animation frame displays it.
+function bakeDrawing() {
+  const dm = state.drawMode;
+  const anim = animationById(dm.animId);
+  if (!anim) { state.drawMode = null; render(); return; }
+  const frame = anim.frames[dm.frameIndex];
+  const plan = planBake(dm.bitmap);
+  snapshot();
+  const p = state.project;
+
+  const idByKey = new Map();
+  plan.newTiles.forEach((pixels, key) => {
+    const tile = { id: genId(), pixels: Array.from(pixels) };
+    p.tiles.push(tile);
+    idByKey.set(key, tile.id);
+  });
+
+  const pal = state.displayPaletteId;
+  const parts = plan.parts.map(part => ({
+    tiles: part.slots.map(s => s == null ? null : (s.existing ?? idByKey.get(s.key))),
+    x: part.x, y: part.y,
+    hFlip: part.hFlip, vFlip: part.vFlip,
+    paletteId: pal,
+  }));
+
+  const src = metaspriteById(frame.metaspriteId);
+  if (src && countMetaspriteReferences(src.id) <= 1) {
+    src.parts = parts;
+  } else {
+    const ms = { id: genId(), name: (src ? src.name : "drawn") + " (frame " + (dm.frameIndex + 1) + ")", parts };
+    p.metasprites.push(ms);
+    frame.metaspriteId = ms.id;
+    state.selectedMetaspriteId = ms.id;
+  }
+  state.drawMode = null;
+  render();
 }
 
 /* ============================================================
@@ -618,7 +848,23 @@ function renderTilesPanel(root) {
     p.tiles = p.tiles.filter(t => t.id !== tile.id);
     state.selectedTileId = p.tiles[0].id; render();
   });
-  libBtns.append(addBtn, dupBtn, delBtn);
+  // Baking drawn frames orphans replaced tiles by design (copy-on-write);
+  // this sweeps up anything no metasprite references anymore.
+  const cleanBtn = el("button", null, "Delete unused");
+  cleanBtn.title = "Remove all tiles that no metasprite part references";
+  cleanBtn.addEventListener("click", () => {
+    const unused = p.tiles.filter(t => countTileReferences(t.id) === 0);
+    if (unused.length === 0) { alert("No unused tiles."); return; }
+    if (!confirm("Delete " + unused.length + " unused tile(s)?")) return;
+    snapshot();
+    p.tiles = p.tiles.filter(t => countTileReferences(t.id) > 0);
+    if (p.tiles.length === 0) {
+      p.tiles.push({ id: genId(), pixels: new Array(PIXELS_PER_TILE).fill(0) });
+    }
+    if (!p.tiles.some(t => t.id === state.selectedTileId)) state.selectedTileId = p.tiles[0].id;
+    render();
+  });
+  libBtns.append(addBtn, dupBtn, delBtn, cleanBtn);
   lib.appendChild(libBtns);
 
   // PNG round-trip: import a sprite sheet as tiles (and optionally metasprites),
@@ -1151,6 +1397,7 @@ function renderMetaspritesPanel(root) {
   pngBtn.addEventListener("click", () => exportMetaspriteToPng(ms));
   nameRow.appendChild(pngBtn);
   nameRow.appendChild(toggle("Snap to 8px grid", state.snapToGrid, v => { state.snapToGrid = v; }));
+  nameRow.appendChild(toggle("Onion skin", state.onionSkin, v => { state.onionSkin = v; render(); }));
   ed.appendChild(nameRow);
   ed.appendChild(spacer(8));
 
@@ -1171,6 +1418,15 @@ function renderMetaspritesPanel(root) {
     const mid = (WORKSPACE / 2) * COMPOSE_SCALE + 0.5;
     ctx.beginPath(); ctx.moveTo(mid, 0); ctx.lineTo(mid, canvas.height); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(canvas.width, mid); ctx.stroke();
+    // Onion skins: ghost the neighboring animation frames under the artwork
+    // (previous in orange, next in cyan) so poses line up between frames.
+    if (state.onionSkin) {
+      const nb = animationNeighborsFor(ms.id);
+      if (nb) {
+        if (nb.prev && nb.prev !== ms) drawGhostBitmap(ctx, rasterizeMetasprite(nb.prev), COMPOSE_SCALE, "#e08a5a", 0.30);
+        if (nb.next && nb.next !== ms && nb.next !== nb.prev) drawGhostBitmap(ctx, rasterizeMetasprite(nb.next), COMPOSE_SCALE, "#5ad6ff", 0.30);
+      }
+    }
     drawMetasprite(ctx, ms, COMPOSE_SCALE);
     // Outline the selected part.
     const sel = ms.parts[state.selectedPartIndex];
@@ -1450,7 +1706,9 @@ function renderAnimationsPanel(root) {
       anim.frames.length + " frame" + (anim.frames.length === 1 ? "" : "s") + (anim.loop ? " · loop" : ""));
     row.append(c, name, meta);
     row.addEventListener("click", () => {
-      state.selectedAnimationId = anim.id; state.selectedFrameIndex = -1; render();
+      state.selectedAnimationId = anim.id; state.selectedFrameIndex = -1;
+      state.drawMode = null;   // leaving the drawn frame discards the sketch
+      render();
     });
     list.appendChild(row);
   });
@@ -1488,6 +1746,13 @@ function renderAnimationsPanel(root) {
   lib.appendChild(libBtns);
 
   cols.appendChild(lib);
+
+  /* ---- right: draw-on-frame editor takes over while active ---- */
+  if (state.drawMode) {
+    cols.appendChild(buildDrawCard());
+    root.appendChild(cols);
+    return;
+  }
 
   /* ---- right: animation editor ---- */
   const ed = el("div", "card col-editor");
@@ -1603,10 +1868,195 @@ function renderAnimationsPanel(root) {
     });
     fRow.append(left, right, delFrame);
     ed.appendChild(fRow);
+
+    // Free-form drawing on this frame: paint pixels, then bake back into
+    // tiles + a metasprite (see planBake/bakeDrawing).
+    ed.appendChild(spacer(8));
+    const drawBtn = el("button", null, "✎ Draw on frame");
+    drawBtn.title = "Paint directly on this frame; tiles and the metasprite are rebuilt from the drawing";
+    drawBtn.addEventListener("click", () => {
+      const ms = metaspriteById(frame.metaspriteId);
+      state.drawMode = {
+        animId: anim.id,
+        frameIndex: state.selectedFrameIndex,
+        bitmap: ms ? rasterizeMetasprite(ms) : new Uint8Array(WORKSPACE * WORKSPACE),
+        onion: true,
+        grid: true,
+      };
+      render();
+    });
+    ed.appendChild(drawBtn);
   }
 
   cols.appendChild(ed);
   root.appendChild(cols);
+}
+
+/* ---- the draw-on-frame card ---- */
+
+const DRAW_SCALE = 6;
+
+function buildDrawCard() {
+  const dm = state.drawMode;
+  const anim = animationById(dm.animId);
+  const ed = el("div", "card col-editor");
+  ed.appendChild(el("h2", null,
+    "Drawing on frame " + (dm.frameIndex + 1) + " / " + anim.frames.length + " of “" + anim.name + "”"));
+
+  const colors = colorsForPalette(state.displayPaletteId);
+  const cellH = objHeight();
+
+  // Ink picker (0 = transparent) and tools, mirroring the tile editor.
+  const inkRow = el("div", "row");
+  const inks = el("div", "ink-swatches");
+  for (let v = 0; v < 4; v++) {
+    const sw = el("button", "ink-swatch" + (state.ink === v ? " active" : ""));
+    if (v === 0) {
+      sw.style.backgroundImage = "repeating-conic-gradient(#15281c 0% 25%, #0c1c12 0% 50%)";
+      sw.title = "Transparent (eraser)";
+    } else {
+      sw.style.background = colors[v];
+      sw.title = "Pixel value " + v;
+    }
+    sw.appendChild(el("span", "val", v === 0 ? "T" : String(v)));
+    sw.addEventListener("click", () => { state.ink = v; render(); });
+    inks.appendChild(sw);
+  }
+  inkRow.appendChild(el("span", "cell-label", "Ink"));
+  inkRow.appendChild(inks);
+  ["pencil", "fill", "eyedropper"].forEach(name => {
+    const b = el("button", "tool-btn" + (state.tool === name ? " active" : ""), name);
+    b.addEventListener("click", () => { state.tool = name; render(); });
+    inkRow.appendChild(b);
+  });
+  ed.appendChild(inkRow);
+
+  const optRow = el("div", "row");
+  optRow.style.marginTop = "8px";
+  optRow.appendChild(toggle("Onion skin", dm.onion, v => { dm.onion = v; repaint(); }));
+  optRow.appendChild(toggle("8px grid", dm.grid, v => { dm.grid = v; repaint(); }));
+  ed.appendChild(optRow);
+  ed.appendChild(spacer(8));
+
+  // Neighboring frames of this animation, rasterized once for ghosting.
+  const nFrames = anim.frames.length;
+  const wrap = (j) => anim.loop ? (j + nFrames) % nFrames : j;
+  const ghostFor = (j) => {
+    if (j < 0 || j >= nFrames || j === dm.frameIndex) return null;
+    const ms = metaspriteById(anim.frames[j].metaspriteId);
+    return ms ? rasterizeMetasprite(ms) : null;
+  };
+  const prevGhost = nFrames > 1 ? ghostFor(wrap(dm.frameIndex - 1)) : null;
+  const nextGhost = nFrames > 1 ? ghostFor(wrap(dm.frameIndex + 1)) : null;
+
+  const canvas = document.createElement("canvas");
+  canvas.className = "composer-canvas";
+  canvas.style.cursor = "crosshair";
+  canvas.width = WORKSPACE * DRAW_SCALE;
+  canvas.height = WORKSPACE * DRAW_SCALE;
+  const ctx = canvas.getContext("2d");
+
+  const repaint = () => {
+    drawChecker(ctx, canvas.width, canvas.height, 0, 0, TILE_PX * DRAW_SCALE);
+    if (dm.onion) {
+      if (prevGhost) drawGhostBitmap(ctx, prevGhost, DRAW_SCALE, "#e08a5a", 0.30);
+      if (nextGhost) drawGhostBitmap(ctx, nextGhost, DRAW_SCALE, "#5ad6ff", 0.30);
+    }
+    for (let y = 0; y < WORKSPACE; y++) {
+      for (let x = 0; x < WORKSPACE; x++) {
+        const v = dm.bitmap[y * WORKSPACE + x];
+        if (!v) continue;
+        ctx.fillStyle = colors[v];
+        ctx.fillRect(x * DRAW_SCALE, y * DRAW_SCALE, DRAW_SCALE, DRAW_SCALE);
+      }
+    }
+    if (dm.grid) {
+      ctx.strokeStyle = "rgba(224,248,208,0.10)";
+      ctx.lineWidth = 1;
+      for (let i = 0; i <= WORKSPACE; i += TILE_PX) {
+        const q = i * DRAW_SCALE + 0.5;
+        ctx.beginPath(); ctx.moveTo(q, 0); ctx.lineTo(q, canvas.height); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, q); ctx.lineTo(canvas.width, q); ctx.stroke();
+      }
+    }
+  };
+  repaint();
+
+  // Live cost readout so the price of free-form drawing is visible pre-bake.
+  const status = el("p", "hint", "");
+  const updateStatus = () => {
+    const plan = planBake(dm.bitmap);
+    const total = state.project.tiles.length + plan.newTiles.size;
+    status.textContent =
+      "Bake: " + plan.parts.length + " part(s), +" + plan.newTiles.size + " new tile(s), " +
+      plan.reused + " reused (flips count as reuse) · tiles " +
+      state.project.tiles.length + " → " + total +
+      (total > TILE_BUDGET ? "  — over the " + TILE_BUDGET + " budget!" : "");
+  };
+  updateStatus();
+
+  const pixelAt = (ev) => {
+    const x = Math.floor(ev.offsetX / DRAW_SCALE);
+    const y = Math.floor(ev.offsetY / DRAW_SCALE);
+    if (x < 0 || x >= WORKSPACE || y < 0 || y >= WORKSPACE) return null;
+    return { x, y };
+  };
+
+  const floodFill64 = (x, y, ink) => {
+    const target = dm.bitmap[y * WORKSPACE + x];
+    if (target === ink) return;
+    const stack = [[x, y]];
+    while (stack.length) {
+      const [cx, cy] = stack.pop();
+      if (cx < 0 || cx >= WORKSPACE || cy < 0 || cy >= WORKSPACE) continue;
+      if (dm.bitmap[cy * WORKSPACE + cx] !== target) continue;
+      dm.bitmap[cy * WORKSPACE + cx] = ink;
+      stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
+    }
+  };
+
+  const applyAt = (ev) => {
+    const pos = pixelAt(ev);
+    if (!pos) return;
+    if (state.tool === "eyedropper") {
+      state.ink = dm.bitmap[pos.y * WORKSPACE + pos.x];
+      render();
+      return;
+    }
+    if (state.tool === "fill") floodFill64(pos.x, pos.y, state.ink);
+    else dm.bitmap[pos.y * WORKSPACE + pos.x] = state.ink;
+    repaint();
+  };
+
+  let painting = false;
+  canvas.addEventListener("pointerdown", (ev) => {
+    painting = state.tool === "pencil";
+    applyAt(ev);
+    if (!painting) updateStatus();
+  });
+  canvas.addEventListener("pointermove", (ev) => { if (painting) applyAt(ev); });
+  const stop = () => { if (painting) { painting = false; updateStatus(); } };
+  canvas.addEventListener("pointerup", stop);
+  canvas.addEventListener("pointerleave", stop);
+  ed.appendChild(canvas);
+
+  ed.appendChild(spacer(8));
+  ed.appendChild(status);
+  ed.appendChild(el("p", "hint",
+    "Baking never edits shared tiles: matching art (including mirrored) is reused, the rest becomes " +
+    "new tiles, and the metasprite is copied first if other frames still show it. " +
+    "“Delete unused” in the Tiles tab cleans up orphans."));
+
+  const btnRow = el("div", "row");
+  btnRow.style.marginTop = "10px";
+  const bakeBtn = el("button", "primary", "Bake to frame");
+  bakeBtn.addEventListener("click", bakeDrawing);
+  const cancelBtn = el("button", null, "Cancel");
+  cancelBtn.addEventListener("click", () => { state.drawMode = null; render(); });
+  btnRow.append(bakeBtn, cancelBtn);
+  ed.appendChild(btnRow);
+
+  return ed;
 }
 
 /* ============================================================
