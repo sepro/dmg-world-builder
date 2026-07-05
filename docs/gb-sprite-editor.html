@@ -265,6 +265,7 @@ const state = {
   selection: null,         // { x, y, w, h } marquee in tile-pixel coords, or null
 
   selectedMetaspriteId: null,
+  msSort: "id",            // metasprite list order: "id" (array/C order) or "name"
   selectedPartIndex: -1,
   selectedPartCell: 0,     // 0 = top tile, 1 = bottom tile (8x16 mode only)
   snapToGrid: false,       // snap part dragging to the 8px grid
@@ -1478,8 +1479,28 @@ function renderMetaspritesPanel(root) {
     lib.appendChild(el("p", "hint", "No metasprites yet. Create one to start arranging hardware sprites."));
   }
 
+  // Sort control. This only changes the display order; the project array order
+  // is left untouched so it still drives the C metasprite index at export time.
+  if (p.metasprites.length > 1) {
+    const sortRow = el("div", "row");
+    sortRow.style.marginBottom = "8px";
+    sortRow.appendChild(el("span", "cell-label", "Sort by"));
+    sortRow.appendChild(selectFrom(
+      [{ value: "id", label: "# (ID order)" }, { value: "name", label: "Name" }],
+      state.msSort,
+      v => { state.msSort = v; render(); }));
+    lib.appendChild(sortRow);
+  }
+
   const list = el("div", "ms-list");
-  p.metasprites.forEach((ms, index) => {
+  // Display order follows the chosen sort, but each row keeps its true array
+  // index for the "#" label so the exported C order stays visible.
+  const displayOrder = p.metasprites.map((ms, index) => ({ ms, index }));
+  if (state.msSort === "name") {
+    displayOrder.sort((a, b) =>
+      a.ms.name.localeCompare(b.ms.name, undefined, { numeric: true, sensitivity: "base" }));
+  }
+  displayOrder.forEach(({ ms, index }) => {
     const row = el("div", "ms-row" + (ms.id === state.selectedMetaspriteId ? " selected" : ""));
     const c = document.createElement("canvas");
     c.width = 40; c.height = 40;
@@ -1531,12 +1552,21 @@ function renderMetaspritesPanel(root) {
   libBtns.append(addBtn, dupBtn, delBtn);
   lib.appendChild(libBtns);
 
+  const sortBtn = el("button", null, "Sort A–Z");
+  sortBtn.title = "Reorder the metasprites alphabetically (this changes their export/C index order)";
+  sortBtn.disabled = p.metasprites.length < 2;
+  sortBtn.addEventListener("click", () => {
+    snapshot();
+    p.metasprites.sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+    render();
+  });
   const sheetBtn = el("button", null, "Export sheet PNG");
   sheetBtn.title = "Export all metasprites side by side as one PNG spritesheet";
   sheetBtn.addEventListener("click", exportAllMetaspritesToPng);
   const sheetRow = el("div", "row");
   sheetRow.style.marginTop = "8px";
-  sheetRow.appendChild(sheetBtn);
+  sheetRow.append(sortBtn, sheetBtn);
   lib.appendChild(sheetRow);
 
   cols.appendChild(lib);
@@ -1558,6 +1588,21 @@ function renderMetaspritesPanel(root) {
   const pngBtn = el("button", "tiny", "Export PNG");
   pngBtn.addEventListener("click", () => exportMetaspriteToPng(ms));
   nameRow.appendChild(pngBtn);
+  const mirrorBtn = el("button", "tiny", "Mirror H");
+  mirrorBtn.title = "Flip the whole metasprite horizontally (mirrors every part's tiles and position)";
+  mirrorBtn.disabled = ms.parts.length === 0;
+  mirrorBtn.addEventListener("click", () => {
+    snapshot();
+    // Mirror each part around the workspace center: a part spanning [x, x+8)
+    // moves to the opposite side, and its own tiles flip via the hFlip flag
+    // (OBJs support per-sprite horizontal flip on hardware, so this is free).
+    ms.parts.forEach(part => {
+      part.x = WORKSPACE - part.x - TILE_PX;
+      part.hFlip = !part.hFlip;
+    });
+    render();
+  });
+  nameRow.appendChild(mirrorBtn);
   nameRow.appendChild(toggle("Snap to 8px grid", state.snapToGrid, v => { state.snapToGrid = v; }));
   nameRow.appendChild(toggle("Onion skin", state.onionSkin, v => { state.onionSkin = v; render(); }));
   ed.appendChild(nameRow);
@@ -1612,6 +1657,14 @@ function renderMetaspritesPanel(root) {
     const hit = partAt(px, py);
     if (hit !== state.selectedPartIndex) {
       state.selectedPartIndex = hit;
+      // Mirror the clicked part's tile in the picker below, so it's obvious
+      // which tile the part uses and easy to reassign it from there.
+      if (hit >= 0) {
+        const hitPart = ms.parts[hit];
+        const cellTile = hitPart.tiles[state.selectedPartCell];
+        const partTile = cellTile != null ? cellTile : hitPart.tiles.find(t => t != null);
+        if (partTile != null) state.selectedTileId = partTile;
+      }
       render();  // rebuild so the part controls follow the selection
       return;
     }
