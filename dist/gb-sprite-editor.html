@@ -261,7 +261,8 @@ const state = {
 
   selectedTileId: null,
   ink: 3,                  // current pixel value to paint (0..3; 0 = transparent)
-  tool: "pencil",          // pencil | fill | eyedropper
+  tool: "pencil",          // pencil | fill | eyedropper | select
+  selection: null,         // { x, y, w, h } marquee in tile-pixel coords, or null
 
   selectedMetaspriteId: null,
   selectedPartIndex: -1,
@@ -816,7 +817,7 @@ function renderTilesPanel(root) {
     paintTileThumb(c, tile, colors);
     cell.appendChild(c);
     cell.appendChild(el("span", "idx", String(index)));
-    cell.addEventListener("click", () => { state.selectedTileId = tile.id; render(); });
+    cell.addEventListener("click", () => { state.selectedTileId = tile.id; state.selection = null; render(); });
     grid.appendChild(cell);
   });
   lib.appendChild(grid);
@@ -911,9 +912,13 @@ function renderTilesPanel(root) {
   // Tools.
   const toolRow = el("div", "row");
   toolRow.style.marginTop = "10px";
-  ["pencil", "fill", "eyedropper"].forEach(name => {
+  ["pencil", "fill", "eyedropper", "select"].forEach(name => {
     const b = el("button", "tool-btn" + (state.tool === name ? " active" : ""), name);
-    b.addEventListener("click", () => { state.tool = name; render(); });
+    b.addEventListener("click", () => {
+      state.tool = name;
+      if (name !== "select") state.selection = null;  // marquee only makes sense with the select tool
+      render();
+    });
     toolRow.appendChild(b);
   });
   const clearBtn = el("button", "danger", "Clear");
@@ -923,6 +928,7 @@ function renderTilesPanel(root) {
 
   ed.appendChild(spacer(8));
   ed.appendChild(el("span", "hint", "Value 0 (checker) is transparent on hardware."));
+  ed.appendChild(el("span", "hint", "Select: drag a box, then drag inside it to move those pixels (source is left transparent)."));
 
   // The drawing surface. Internal size matches CSS size so offsetX maps directly.
   const canvas = document.createElement("canvas");
@@ -932,9 +938,11 @@ function renderTilesPanel(root) {
   canvas.style.marginTop = "8px";
   const ctx = canvas.getContext("2d");
 
-  const repaintEditor = () => {
+  // Draw the editor from a pixel array (defaults to the live tile, but a move
+  // preview passes its own composite so it doesn't touch the tile until drop).
+  const repaintEditor = (pixels = tile.pixels) => {
     drawChecker(ctx, canvas.width, canvas.height, 0, 0, EDIT_SCALE);
-    drawSpritePixels(ctx, tile.pixels, colors, EDIT_SCALE);
+    drawSpritePixels(ctx, pixels, colors, EDIT_SCALE);
     // Pixel grid for orientation.
     ctx.strokeStyle = "rgba(224,248,208,0.12)";
     ctx.lineWidth = 1;
@@ -942,6 +950,19 @@ function renderTilesPanel(root) {
       const q = i * EDIT_SCALE + 0.5;
       ctx.beginPath(); ctx.moveTo(q, 0); ctx.lineTo(q, canvas.height); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(0, q); ctx.lineTo(canvas.width, q); ctx.stroke();
+    }
+    // Marquee outline for the active selection (drawn on top of everything).
+    if (state.selection) {
+      const s = state.selection;
+      ctx.save();
+      ctx.setLineDash([6, 4]);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#0f380f";
+      ctx.strokeRect(s.x * EDIT_SCALE + 1, s.y * EDIT_SCALE + 1, s.w * EDIT_SCALE - 2, s.h * EDIT_SCALE - 2);
+      ctx.strokeStyle = "#e0f8d0";
+      ctx.lineDashOffset = 4;
+      ctx.strokeRect(s.x * EDIT_SCALE + 1, s.y * EDIT_SCALE + 1, s.w * EDIT_SCALE - 2, s.h * EDIT_SCALE - 2);
+      ctx.restore();
     }
   };
   repaintEditor();
@@ -952,6 +973,12 @@ function renderTilesPanel(root) {
     if (x < 0 || x > 7 || y < 0 || y > 7) return null;
     return { x, y };
   };
+  // Like pixelAt but clamped to the tile, so a marquee or move drag that leaves
+  // the canvas resolves to the nearest edge cell instead of returning null.
+  const clampedPixelAt = (ev) => ({
+    x: Math.min(7, Math.max(0, Math.floor(ev.offsetX / EDIT_SCALE))),
+    y: Math.min(7, Math.max(0, Math.floor(ev.offsetY / EDIT_SCALE))),
+  });
 
   const applyAt = (ev) => {
     const pos = pixelAt(ev);
@@ -969,14 +996,104 @@ function renderTilesPanel(root) {
     repaintEditor();
   };
 
+  /* ---- select-and-move interaction ----
+     Two gestures share the pointer handlers while the select tool is active:
+     dragging on empty space rubber-bands a new marquee; dragging that starts
+     inside the current selection lifts those pixels (leaving transparency
+     behind) and moves them, committing on release as a single undo step. */
+  let marquee = null;   // { ax, ay } anchor cell while rubber-banding a selection
+  let move = null;      // lifted-pixels bookkeeping while dragging a selection
+
+  const insideSelection = (pos) => {
+    const s = state.selection;
+    return s && pos.x >= s.x && pos.x < s.x + s.w && pos.y >= s.y && pos.y < s.y + s.h;
+  };
+
+  // The composite shown mid-move: base tile with the source region cleared,
+  // then the lifted buffer stamped at its current offset (clipped to the tile).
+  const moveComposite = () => {
+    const out = move.base.slice();
+    const dx = move.curX - move.startX, dy = move.curY - move.startY;
+    for (let yy = 0; yy < move.h; yy++) {
+      for (let xx = 0; xx < move.w; xx++) {
+        const v = move.buffer[yy * move.w + xx];
+        if (v === 0) continue;  // transparent pixels never overwrite the base
+        const tx = move.srcX + xx + dx, ty = move.srcY + yy + dy;
+        if (tx < 0 || tx > 7 || ty < 0 || ty > 7) continue;  // clip to the tile
+        out[ty * TILE_PX + tx] = v;
+      }
+    }
+    return out;
+  };
+
+  const beginMove = (pos) => {
+    const s = state.selection;
+    snapshot();  // one undo step covers the whole move
+    const base = tile.pixels.slice();
+    const buffer = new Array(s.w * s.h).fill(0);
+    for (let yy = 0; yy < s.h; yy++) {
+      for (let xx = 0; xx < s.w; xx++) {
+        const idx = (s.y + yy) * TILE_PX + (s.x + xx);
+        buffer[yy * s.w + xx] = base[idx];
+        base[idx] = 0;  // clearing the source is what makes it a move, not a copy
+      }
+    }
+    move = { base, buffer, w: s.w, h: s.h, srcX: s.x, srcY: s.y,
+             startX: pos.x, startY: pos.y, curX: pos.x, curY: pos.y };
+  };
+
   let painting = false;
   canvas.addEventListener("pointerdown", (ev) => {
+    if (state.tool === "select") {
+      const pos = clampedPixelAt(ev);
+      if (insideSelection(pos)) {
+        beginMove(pos);
+      } else {
+        marquee = { ax: pos.x, ay: pos.y };
+        state.selection = { x: pos.x, y: pos.y, w: 1, h: 1 };
+        repaintEditor();
+      }
+      return;
+    }
     if (state.tool !== "eyedropper") snapshot();  // whole stroke = one undo step
     painting = state.tool === "pencil";
     applyAt(ev);
   });
-  canvas.addEventListener("pointermove", (ev) => { if (painting) applyAt(ev); });
-  const stop = () => { if (painting) { painting = false; refreshTileThumb(tile); } };
+
+  canvas.addEventListener("pointermove", (ev) => {
+    if (state.tool === "select") {
+      if (move) {
+        const pos = clampedPixelAt(ev);
+        move.curX = pos.x; move.curY = pos.y;
+        repaintEditor(moveComposite());
+      } else if (marquee) {
+        const pos = clampedPixelAt(ev);
+        const x0 = Math.min(marquee.ax, pos.x), x1 = Math.max(marquee.ax, pos.x);
+        const y0 = Math.min(marquee.ay, pos.y), y1 = Math.max(marquee.ay, pos.y);
+        state.selection = { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+        repaintEditor();
+      }
+      return;
+    }
+    if (painting) applyAt(ev);
+  });
+
+  const stop = () => {
+    if (move) {
+      const composite = moveComposite();
+      for (let i = 0; i < composite.length; i++) tile.pixels[i] = composite[i];
+      // Let the marquee follow the pixels, clipped so it stays on the tile.
+      const nx = Math.min(7, Math.max(0, move.srcX + (move.curX - move.startX)));
+      const ny = Math.min(7, Math.max(0, move.srcY + (move.curY - move.startY)));
+      state.selection = { x: nx, y: ny, w: Math.min(move.w, TILE_PX - nx), h: Math.min(move.h, TILE_PX - ny) };
+      move = null;
+      refreshTileThumb(tile);
+      repaintEditor();
+      return;
+    }
+    if (marquee) { marquee = null; return; }
+    if (painting) { painting = false; refreshTileThumb(tile); }
+  };
   canvas.addEventListener("pointerup", stop);
   canvas.addEventListener("pointerleave", stop);
   ed.appendChild(canvas);
@@ -1250,6 +1367,18 @@ function exportTilesToPng() {
 
 // Render one metasprite to a PNG, trimmed to its painted bounding box.
 function exportMetaspriteToPng(ms) {
+  const trimmed = trimmedMetaspriteCanvas(ms);
+  if (!trimmed) { alert("This metasprite has no visible pixels."); return; }
+  const name = (ms.name || "metasprite").replace(/[^a-z0-9_-]+/gi, "_") + ".png";
+  trimmed.canvas.toBlob(blob => {
+    if (blob) downloadBlob(name, blob);
+    else alert("Could not encode the PNG.");
+  }, "image/png");
+}
+
+// Render one metasprite to a canvas trimmed to its painted bounding box.
+// Returns { canvas, w, h } or null when the metasprite has no visible pixels.
+function trimmedMetaspriteCanvas(ms) {
   const full = document.createElement("canvas");
   full.width = WORKSPACE; full.height = WORKSPACE;
   const ctx = full.getContext("2d");
@@ -1267,13 +1396,38 @@ function exportMetaspriteToPng(ms) {
       }
     }
   }
-  if (maxX < 0) { alert("This metasprite has no visible pixels."); return; }
+  if (maxX < 0) return null;
 
   const out = document.createElement("canvas");
   out.width = maxX - minX + 1; out.height = maxY - minY + 1;
   out.getContext("2d").drawImage(full, -minX, -minY);
-  const name = (ms.name || "metasprite").replace(/[^a-z0-9_-]+/gi, "_") + ".png";
-  out.toBlob(blob => {
+  return { canvas: out, w: out.width, h: out.height };
+}
+
+// Export every metasprite into one PNG, laid out left to right and top-aligned,
+// each trimmed to its own bounding box, placed flush so the sheet re-imports cleanly.
+function exportAllMetaspritesToPng() {
+  const metasprites = state.project.metasprites;
+  if (metasprites.length === 0) { alert("There are no metasprites to export."); return; }
+
+  const GAP = 0;  // no gap: sprites sit flush so the sheet re-imports cleanly
+  const trimmed = metasprites.map(trimmedMetaspriteCanvas).filter(Boolean);
+  if (trimmed.length === 0) { alert("No metasprite has any visible pixels."); return; }
+
+  const sheetW = trimmed.reduce((sum, t) => sum + t.w, 0) + GAP * (trimmed.length - 1);
+  const sheetH = trimmed.reduce((max, t) => Math.max(max, t.h), 0);
+
+  const sheet = document.createElement("canvas");
+  sheet.width = sheetW; sheet.height = sheetH;
+  const ctx = sheet.getContext("2d");
+  let x = 0;
+  for (const t of trimmed) {
+    ctx.drawImage(t.canvas, x, 0);  // top-aligned
+    x += t.w + GAP;
+  }
+
+  const name = safeBaseName() + "-metasprites.png";
+  sheet.toBlob(blob => {
     if (blob) downloadBlob(name, blob);
     else alert("Could not encode the PNG.");
   }, "image/png");
@@ -1376,6 +1530,14 @@ function renderMetaspritesPanel(root) {
   });
   libBtns.append(addBtn, dupBtn, delBtn);
   lib.appendChild(libBtns);
+
+  const sheetBtn = el("button", null, "Export sheet PNG");
+  sheetBtn.title = "Export all metasprites side by side as one PNG spritesheet";
+  sheetBtn.addEventListener("click", exportAllMetaspritesToPng);
+  const sheetRow = el("div", "row");
+  sheetRow.style.marginTop = "8px";
+  sheetRow.appendChild(sheetBtn);
+  lib.appendChild(sheetRow);
 
   cols.appendChild(lib);
 
