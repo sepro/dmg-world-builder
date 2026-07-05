@@ -769,4 +769,224 @@ function render() {
     "Border pixels count double: seams between neighboring tiles stay cleaner."));
 
   ctl.appendChild(spacer(6));
-  cons
+  const refField = el("div", "field");
+  refField.appendChild(label("Refinement passes (0-3)"));
+  const refIn = numberInput(state.refinePasses, 0, 3);
+  refIn.addEventListener("change", () => {
+    state.refinePasses = clampInt(refIn.value, 0, 3);
+    recompute(); render();
+  });
+  refField.appendChild(refIn);
+  ctl.appendChild(refField);
+  ctl.appendChild(el("p", "hint",
+    "Re-matches every tile to its nearest merged tile afterward (k-means style polish)."));
+
+  ctl.appendChild(spacer(12));
+  const before = state.unique.length;
+  const after = res.reps.length;
+  const table = document.createElement("table");
+  table.className = "stats-table";
+  const trow = (k, v) => {
+    const tr = document.createElement("tr");
+    tr.appendChild(el("td", null, k));
+    tr.appendChild(el("td", null, v));
+    table.appendChild(tr);
+  };
+  trow("Image", state.fileName + " (" + state.width + "×" + state.height + ")");
+  trow("Tile positions", String(state.tileMap.length));
+  trow("Unique tiles before", String(before));
+  trow("Unique tiles after", String(after));
+  trow("Algorithm", res.aggloFellBack ? "greedy (fallback)" : state.algorithm);
+  trow("Tiles changed", res.changedTiles.length + " / " + state.tileMap.length);
+  const protectedCount = state.protectedTiles.reduce((s, v) => s + v, 0);
+  trow("Protected", protectedCount + " positions (" + res.pinnedCount + " tiles pinned)");
+  ctl.appendChild(table);
+
+  const fits = after <= TILE_BUDGET;
+  ctl.appendChild(el("p", fits ? "budget-ok" : "budget-over",
+    after + " / " + TILE_BUDGET + " VRAM budget" + (fits ? "" : "  (still over)")));
+
+  ctl.appendChild(spacer(12));
+  const viewRow = el("div", "row");
+  const palField = el("div", "field");
+  palField.appendChild(label("Palette"));
+  palField.appendChild(selectFrom(
+    PALETTES.map((p, i) => ({ value: i, label: p.name })),
+    state.paletteIndex, v => { state.paletteIndex = Number(v); render(); }));
+  const zoomField = el("div", "field");
+  zoomField.appendChild(label("Zoom"));
+  zoomField.appendChild(selectFrom(
+    [{ value: 0, label: "auto" }, 1, 2, 3, 4],
+    state.zoom, v => { state.zoom = Number(v); render(); }));
+  viewRow.append(palField, zoomField);
+  ctl.appendChild(viewRow);
+  ctl.appendChild(spacer(6));
+  ctl.appendChild(toggle("Highlight changed tiles", state.highlightChanged,
+    v => { state.highlightChanged = v; render(); }));
+
+  ctl.appendChild(spacer(12));
+  const loadOther = el("button", null, "Load another PNG");
+  loadOther.addEventListener("click", () => document.getElementById("file-input").click());
+  ctl.appendChild(loadOther);
+
+  cols.appendChild(ctl);
+
+  /* ---- right: before / after previews ---- */
+  const zoom = state.zoom || autoZoom();
+  const colors = PALETTES[state.paletteIndex].colors;
+
+  const beforeCard = el("div", "card col-editor");
+  beforeCard.appendChild(el("h2", null, "Original (quantized) — " + before + " tiles"));
+
+  /* Protect brush: paint tiles that must come through the reduction
+     untouched. Click/drag paints single tiles; Shift-drag marks a rectangle. */
+  const toolRow = el("div", "row");
+  [["protect", "Protect"], ["erase", "Erase"]].forEach(([tool, lbl]) => {
+    const b = el("button", "mode-btn" + (state.protectTool === tool ? " active" : ""), lbl);
+    b.addEventListener("click", () => { state.protectTool = tool; render(); });
+    toolRow.appendChild(b);
+  });
+  const clearBtn = el("button", null, "Clear");
+  clearBtn.addEventListener("click", () => {
+    state.protectedTiles.fill(0);
+    recompute(); render();
+  });
+  toolRow.appendChild(clearBtn);
+  beforeCard.appendChild(toolRow);
+  beforeCard.appendChild(el("p", "hint",
+    "Drag to mark tiles that must not change (faces, text). Shift-drag for a rectangle."));
+
+  const beforeWrap = el("div", "preview-wrap");
+  const beforeCanvas = document.createElement("canvas");
+  beforeCanvas.style.cursor = "crosshair";
+  beforeCanvas.style.touchAction = "none";
+  const tilesX = state.width / TILE_PX, tilesY = state.height / TILE_PX;
+
+  const repaintBefore = (pendingRect) => {
+    const ctx = paintShades(beforeCanvas, state.shades, zoom, colors);
+    drawProtectedOverlay(ctx, zoom, true);
+    if (pendingRect) {
+      ctx.strokeStyle = PROTECT_COLOR;
+      ctx.lineWidth = 1;
+      const x0 = Math.min(pendingRect.a.tx, pendingRect.b.tx), x1 = Math.max(pendingRect.a.tx, pendingRect.b.tx);
+      const y0 = Math.min(pendingRect.a.ty, pendingRect.b.ty), y1 = Math.max(pendingRect.a.ty, pendingRect.b.ty);
+      ctx.strokeRect(
+        x0 * TILE_PX * zoom + 0.5, y0 * TILE_PX * zoom + 0.5,
+        (x1 - x0 + 1) * TILE_PX * zoom - 1, (y1 - y0 + 1) * TILE_PX * zoom - 1);
+    }
+  };
+  repaintBefore(null);
+
+  const tileAt = (e) => {
+    const r = beforeCanvas.getBoundingClientRect();
+    const tx = Math.floor((e.clientX - r.left) / (TILE_PX * zoom));
+    const ty = Math.floor((e.clientY - r.top) / (TILE_PX * zoom));
+    if (tx < 0 || ty < 0 || tx >= tilesX || ty >= tilesY) return null;
+    return { tx, ty };
+  };
+  const brushValue = () => state.protectTool === "protect" ? 1 : 0;
+
+  // Painting only touches state.protectedTiles + the local overlay; the
+  // (potentially slow) recompute runs once, on pointerup.
+  let painting = false, rectAnchor = null, dirty = false;
+  const paintTile = (cell) => {
+    const i = cell.ty * tilesX + cell.tx;
+    if (state.protectedTiles[i] !== brushValue()) {
+      state.protectedTiles[i] = brushValue();
+      dirty = true;
+    }
+  };
+  beforeCanvas.addEventListener("pointerdown", (e) => {
+    const cell = tileAt(e);
+    if (!cell) return;
+    beforeCanvas.setPointerCapture(e.pointerId);
+    if (e.shiftKey) {
+      rectAnchor = cell;
+      repaintBefore({ a: rectAnchor, b: cell });
+    } else {
+      painting = true;
+      paintTile(cell);
+      repaintBefore(null);
+    }
+  });
+  beforeCanvas.addEventListener("pointermove", (e) => {
+    const cell = tileAt(e);
+    if (!cell) return;
+    if (rectAnchor) repaintBefore({ a: rectAnchor, b: cell });
+    else if (painting) { paintTile(cell); repaintBefore(null); }
+  });
+  beforeCanvas.addEventListener("pointerup", (e) => {
+    if (rectAnchor) {
+      const cell = tileAt(e) || rectAnchor;
+      const x0 = Math.min(rectAnchor.tx, cell.tx), x1 = Math.max(rectAnchor.tx, cell.tx);
+      const y0 = Math.min(rectAnchor.ty, cell.ty), y1 = Math.max(rectAnchor.ty, cell.ty);
+      for (let ty = y0; ty <= y1; ty++)
+        for (let tx = x0; tx <= x1; tx++)
+          paintTile({ tx, ty });
+    }
+    painting = false;
+    rectAnchor = null;
+    if (dirty) { recompute(); render(); }
+    else repaintBefore(null);
+  });
+
+  beforeWrap.appendChild(beforeCanvas);
+  beforeCard.appendChild(beforeWrap);
+  cols.appendChild(beforeCard);
+
+  const afterCard = el("div", "card col-editor");
+  afterCard.appendChild(el("h2", null, "Reduced — " + after + " tiles"));
+  const afterWrap = el("div", "preview-wrap");
+  const afterCanvas = document.createElement("canvas");
+  const actx = paintShades(afterCanvas, res.reducedShades, zoom, colors);
+  if (state.highlightChanged) {
+    actx.strokeStyle = "#e08a5a";
+    actx.lineWidth = 1;
+    res.changedTiles.forEach(t => outlineTile(actx, t, tilesX, zoom));
+  }
+  drawProtectedOverlay(actx, zoom, false);   // confirm the protected art came through
+  afterWrap.appendChild(afterCanvas);
+  afterCard.appendChild(afterWrap);
+  cols.appendChild(afterCard);
+
+  panel.appendChild(cols);
+}
+
+/* ============================================================
+   Download
+   ============================================================ */
+
+function downloadReduced() {
+  if (!state.result) return;
+  const canvas = document.createElement("canvas");
+  // 1x scale so the file re-imports directly as tiles.
+  paintShades(canvas, state.result.reducedShades, 1, PALETTES[state.paletteIndex].colors);
+  const base = (state.fileName || "image").replace(/\.[^.]*$/, "").replace(/[^a-z0-9_-]+/gi, "_");
+  canvas.toBlob(blob => {
+    if (blob) downloadBlob(base + "-reduced.png", blob);
+    else alert("Could not encode the PNG.");
+  }, "image/png");
+}
+
+/* ============================================================
+   Wiring
+   ============================================================ */
+
+document.getElementById("btn-load").addEventListener("click", () =>
+  document.getElementById("file-input").click());
+document.getElementById("btn-download").addEventListener("click", downloadReduced);
+document.getElementById("file-input").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (file) loadImageFile(file);
+  e.target.value = "";   // allow reloading the same file
+});
+
+render();
+
+// If another tool navigated here with an image (Pixelizer's "Send to
+// Reducer"), load it now; the drop zone shows until the image decodes.
+const handoff = takeImageHandoff();
+if (handoff) loadHandoffImage(handoff);
+</script>
+</body>
+</html>

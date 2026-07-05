@@ -715,4 +715,172 @@ function render() {
       for (let c = 0; c < 4; c++) {
         if (!ns[c]) continue;                 // empty cluster keeps its center
         const next = sums[c] / ns[c];
-        if (Math.abs(n
+        if (Math.abs(next - centers[c]) > 0.25) moved = true;
+        centers[c] = next;
+      }
+      if (!moved) break;
+    }
+    centers.sort((a, b) => a - b);
+    // Boundaries halfway between adjacent centers, kept strictly ordered.
+    state.t1 = Math.max(1, Math.min(253, Math.round((centers[0] + centers[1]) / 2)));
+    state.t2 = Math.max(state.t1 + 1, Math.min(254, Math.round((centers[1] + centers[2]) / 2)));
+    state.t3 = Math.max(state.t2 + 1, Math.min(255, Math.round((centers[2] + centers[3]) / 2)));
+    recompute(); render();
+  });
+  ctl.appendChild(balanceBtn);
+
+  ctl.appendChild(spacer(10));
+  const dField = el("div", "field");
+  dField.appendChild(label("Dithering"));
+  dField.appendChild(selectFrom(
+    [{ value: "none", label: "None (best for tiles)" },
+     { value: "bayer2", label: "Bayer 2×2" },
+     { value: "bayer4", label: "Bayer 4×4" },
+     { value: "bayer8", label: "Bayer 8×8" },
+     { value: "fs", label: "Floyd–Steinberg" }],
+    state.dither, v => { state.dither = v; recompute(); render(); }));
+  ctl.appendChild(dField);
+  if (state.dither !== "none") {
+    ctl.appendChild(sliderRow("Dither strength (%)", 0, 150, 5, state.ditherStrength, v => String(v),
+      v => { state.ditherStrength = v; recompute(); render(); }));
+    ctl.appendChild(el("p", "hint",
+      "Dithering multiplies unique tile counts — watch the stat below if this art is headed for a tileset."));
+  }
+
+  /* ---- stats + view ---- */
+  ctl.appendChild(spacer(12));
+  const table = document.createElement("table");
+  table.className = "stats-table";
+  const trow = (k, v) => {
+    const tr = document.createElement("tr");
+    tr.appendChild(el("td", null, k));
+    tr.appendChild(el("td", null, v));
+    table.appendChild(tr);
+  };
+  trow("Source", state.fileName + " (" + state.srcW + "×" + state.srcH + ")");
+  trow("Output", res.w + "×" + res.h);
+  trow("Unique 8×8 tiles", String(res.uniqueTiles));
+  ctl.appendChild(table);
+  const fits = res.uniqueTiles <= TILE_BUDGET;
+  ctl.appendChild(el("p", fits ? "budget-ok" : "budget-over",
+    res.uniqueTiles + " / " + TILE_BUDGET + " VRAM budget" +
+    (fits ? "" : "  (use “Send to Reducer” to merge tiles)")));
+
+  ctl.appendChild(spacer(10));
+  const viewRow = el("div", "row");
+  const palField = el("div", "field");
+  palField.appendChild(label("Palette"));
+  palField.appendChild(selectFrom(
+    PALETTES.map((p, i) => ({ value: i, label: p.name })),
+    state.paletteIndex, v => { state.paletteIndex = Number(v); render(); }));
+  const zoomField = el("div", "field");
+  zoomField.appendChild(label("Zoom"));
+  zoomField.appendChild(selectFrom(
+    [{ value: 0, label: "auto" }, 1, 2, 3, 4, 6, 8],
+    state.zoom, v => { state.zoom = Number(v); render(); }));
+  viewRow.append(palField, zoomField);
+  ctl.appendChild(viewRow);
+
+  ctl.appendChild(spacer(12));
+  const loadOther = el("button", null, "Load another image");
+  loadOther.addEventListener("click", () => document.getElementById("file-input").click());
+  ctl.appendChild(loadOther);
+
+  cols.appendChild(ctl);
+
+  /* ---- right: source and result previews ---- */
+  const srcCard = el("div", "card col-editor");
+  srcCard.appendChild(el("h2", null, "Source" +
+    (state.picking ? " — click to pick the transparent color" : "")));
+  const srcWrap = el("div", "preview-wrap" + (state.picking ? " picking" : ""));
+  const srcView = document.createElement("canvas");
+  // Fit the source preview to roughly the same on-screen width as the result.
+  const fit = Math.min(1, 480 / state.srcW);
+  srcView.width = Math.max(1, Math.round(state.srcW * fit));
+  srcView.height = Math.max(1, Math.round(state.srcH * fit));
+  const sctx = srcView.getContext("2d");
+  sctx.drawImage(state.srcCanvas, 0, 0, srcView.width, srcView.height);
+  if (state.picking) {
+    // Eyedropper: map the click back to a source pixel and adopt its color.
+    srcView.addEventListener("click", (e) => {
+      const rect = srcView.getBoundingClientRect();
+      const sx = Math.floor((e.clientX - rect.left) / fit);
+      const sy = Math.floor((e.clientY - rect.top) / fit);
+      if (sx < 0 || sy < 0 || sx >= state.srcW || sy >= state.srcH) return;
+      const j = (sy * state.srcW + sx) * 4;
+      state.alphaColor = rgbToHex(state.srcRGBA[j], state.srcRGBA[j + 1], state.srcRGBA[j + 2]);
+      state.alphaEnabled = true;
+      state.picking = false;
+      state.srcAlpha = computeAlphaMask();
+      recompute(); render();
+    });
+  }
+  srcWrap.appendChild(srcView);
+  srcCard.appendChild(srcWrap);
+  cols.appendChild(srcCard);
+
+  const outCard = el("div", "card col-editor");
+  outCard.appendChild(el("h2", null, "Result — " + res.w + "×" + res.h +
+    " · " + res.uniqueTiles + " unique tiles"));
+  const hasAlpha = res.alpha && res.alpha.some(a => a);
+  const outWrap = el("div", "preview-wrap" + (hasAlpha ? " preview-checker" : ""));
+  const outView = document.createElement("canvas");
+  paintShades(outView, res.shades, res.alpha, res.w, res.h, state.zoom || autoZoom(), PALETTES[state.paletteIndex].colors);
+  outWrap.appendChild(outView);
+  outCard.appendChild(outWrap);
+  cols.appendChild(outCard);
+
+  panel.appendChild(cols);
+}
+
+/* ============================================================
+   Download
+   ============================================================ */
+
+// The result at 1x in the current palette: the exact pixels the download and
+// the reducer handoff share, so both routes re-import identically.
+function resultCanvas() {
+  const { shades, w, h } = state.result;
+  const canvas = document.createElement("canvas");
+  paintShades(canvas, shades, state.result.alpha, w, h, 1, PALETTES[state.paletteIndex].colors);
+  return canvas;
+}
+
+function resultBaseName() {
+  return (state.fileName || "image").replace(/\.[^.]*$/, "").replace(/[^a-z0-9_-]+/gi, "_");
+}
+
+function downloadResult() {
+  if (!state.result) return;
+  resultCanvas().toBlob(blob => {
+    if (blob) downloadBlob(resultBaseName() + "-2bpp.png", blob);
+    else alert("Could not encode the PNG.");
+  }, "image/png");
+}
+
+// Hand the result to the tile reducer without a download/upload round trip.
+function sendToReducer() {
+  if (!state.result) return;
+  sendImageHandoff("gb-tile-reducer.html",
+    resultBaseName() + "-2bpp.png",
+    resultCanvas().toDataURL("image/png"));
+}
+
+/* ============================================================
+   Wiring
+   ============================================================ */
+
+document.getElementById("btn-load").addEventListener("click", () =>
+  document.getElementById("file-input").click());
+document.getElementById("btn-download").addEventListener("click", downloadResult);
+document.getElementById("btn-send").addEventListener("click", sendToReducer);
+document.getElementById("file-input").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (file) loadImageFile(file);
+  e.target.value = "";   // allow reloading the same file
+});
+
+render();
+</script>
+</body>
+</html>

@@ -2201,4 +2201,12 @@ document.addEventListener("keydown", (e) => {
   const tag = (document.activeElement && document.activeElement.tagName) || "";
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
   const key = e.key.toLowerCase();
-  if (key === "z" && !e.shiftKey) {
+  if (key === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
+  else if ((key === "z" && e.shiftKey) || key === "y") { e.preventDefault(); redo(); }
+});
+
+syncSelectionsToProject();
+render();
+</script>
+</body>
+</html>
