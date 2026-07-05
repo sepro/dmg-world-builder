@@ -56,6 +56,20 @@
   .slider-row { display: flex; align-items: center; gap: 8px; }
   .slider-row input[type="range"] { flex: 1; min-width: 90px; }
   .slider-row .slider-val { width: 38px; text-align: right; color: var(--muted); font-size: 11px; }
+
+  .key-row { display: flex; align-items: center; gap: 8px; }
+  .key-row input[type="color"] { width: 34px; height: 26px; padding: 0; border: 1px solid var(--border); background: none; cursor: pointer; }
+
+  /* Checkerboard shown behind transparent output pixels. */
+  .preview-checker {
+    background-color: var(--gb-3);
+    background-image:
+      linear-gradient(45deg, rgba(0,0,0,.18) 25%, transparent 25%, transparent 75%, rgba(0,0,0,.18) 75%),
+      linear-gradient(45deg, rgba(0,0,0,.18) 25%, transparent 25%, transparent 75%, rgba(0,0,0,.18) 75%);
+    background-size: 16px 16px;
+    background-position: 0 0, 8px 8px;
+  }
+  .picking canvas { cursor: crosshair; }
 </style>
 </head>
 <body>
@@ -116,7 +130,16 @@ const state = {
   fileName: null,
   srcW: 0, srcH: 0,
   srcLum: null,             // Float32Array: source luminance 0..255 (alpha = lightest)
+  srcRGBA: null,            // Uint8ClampedArray: raw source pixels, for color-key matching
+  srcAlpha: null,           // Uint8Array: 1 = ignored/transparent source pixel
   srcCanvas: null,          // original image for the side-by-side preview
+
+  // Transparency (chroma key): one source color becomes the alpha channel and
+  // is left out of tone mapping, quantization, and the tile/palette stats.
+  alphaEnabled: false,
+  alphaColor: "#ff00ff",
+  alphaTolerance: 32,       // RGB euclidean radius around alphaColor
+  picking: false,           // eyedropper active: next source-canvas click sets alphaColor
 
   // Pipeline.
   order: "quantize-first",  // quantize-first | scale-first
@@ -142,20 +165,61 @@ const state = {
 };
 
 /* ============================================================
+   Transparency (chroma key)
+   ============================================================ */
+
+function hexToRgb(hex) {
+  return [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)];
+}
+
+function rgbToHex(r, g, b) {
+  const h = (v) => Math.max(0, Math.min(255, v)).toString(16).padStart(2, "0");
+  return "#" + h(r) + h(g) + h(b);
+}
+
+// Build the ignore mask: a pixel is transparent if it was already transparent
+// in the source, or (when enabled) its color is within tolerance of alphaColor.
+function computeAlphaMask() {
+  const n = state.srcW * state.srcH;
+  const mask = new Uint8Array(n);
+  const data = state.srcRGBA;
+  if (!data) return mask;
+
+  const key = state.alphaEnabled ? hexToRgb(state.alphaColor) : null;
+  const tol2 = state.alphaTolerance * state.alphaTolerance;
+  for (let i = 0; i < n; i++) {
+    const j = i * 4;
+    if (data[j + 3] < 128) { mask[i] = 1; continue; }
+    if (key) {
+      const dr = data[j] - key[0], dg = data[j + 1] - key[1], db = data[j + 2] - key[2];
+      if (dr * dr + dg * dg + db * db <= tol2) mask[i] = 1;
+    }
+  }
+  return mask;
+}
+
+/* ============================================================
    Tone mapping
    ============================================================ */
 
 // Apply auto-levels (percentile stretch), then brightness/contrast/gamma.
 // Input and output are luminance arrays in 0..255 (not yet clamped to int).
-function toneMap(lum) {
+// Transparent pixels (alpha[i] === 1) are left out of the percentile histogram
+// so a chroma-key background can't skew the levels.
+function toneMap(lum, alpha) {
   const out = new Float32Array(lum.length);
 
   let lo = 0, hi = 255;
   if (state.autoLevels) {
     // Stretch the 1st..99th percentile to full range; robust to outliers.
     const hist = new Uint32Array(256);
-    for (let i = 0; i < lum.length; i++) hist[Math.max(0, Math.min(255, Math.round(lum[i])))]++;
-    const total = lum.length;
+    let total = 0;
+    for (let i = 0; i < lum.length; i++) {
+      if (alpha && alpha[i]) continue;
+      hist[Math.max(0, Math.min(255, Math.round(lum[i])))]++;
+      total++;
+    }
+    if (total === 0) total = 1;
     let acc = 0;
     for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= total * 0.01) { lo = v; break; } }
     acc = 0;
@@ -238,13 +302,18 @@ function quantizeArr(gray, w, h) {
    on any numeric array, so the same code scales raw luminance (scale-first)
    or already-quantized shades (quantize-first, the default). */
 
-function blockValues(src, sw, dx, dy, xRatio, yRatio) {
+// Collect a block's non-transparent values. If every source pixel in the block
+// is transparent, the returned array is empty and the output pixel is alpha.
+function blockValues(src, srcAlpha, sw, dx, dy, xRatio, yRatio) {
   const x0 = Math.floor(dx * xRatio), x1 = Math.max(x0 + 1, Math.ceil((dx + 1) * xRatio));
   const y0 = Math.floor(dy * yRatio), y1 = Math.max(y0 + 1, Math.ceil((dy + 1) * yRatio));
   const values = [];
   for (let y = y0; y < y1; y++)
-    for (let x = x0; x < x1; x++)
-      values.push(src[y * sw + x]);
+    for (let x = x0; x < x1; x++) {
+      const idx = y * sw + x;
+      if (srcAlpha && srcAlpha[idx]) continue;
+      values.push(src[idx]);
+    }
   return values;
 }
 
@@ -309,21 +378,26 @@ function reduceNearest(values) {
   return values[Math.floor(values.length / 2)];   // center-ish sample
 }
 
-function scaleArray(src, sw, sh, dw, dh) {
+// Returns { out, alpha }: the reduced values and a matching transparency mask
+// (1 where the whole source block was transparent).
+function scaleArray(src, srcAlpha, sw, sh, dw, dh) {
   const out = new Float32Array(dw * dh);
+  const alpha = new Uint8Array(dw * dh);
   const xRatio = sw / dw, yRatio = sh / dh;
   for (let dy = 0; dy < dh; dy++) {
     for (let dx = 0; dx < dw; dx++) {
-      const values = blockValues(src, sw, dx, dy, xRatio, yRatio);
+      const i = dy * dw + dx;
+      const values = blockValues(src, srcAlpha, sw, dx, dy, xRatio, yRatio);
+      if (values.length === 0) { alpha[i] = 1; out[i] = 0; continue; }
       let v;
       if (state.scaleAlgo === "k-centroid") v = reduceKCentroid(values, state.kClusters);
       else if (state.scaleAlgo === "dominant") v = reduceDominant(values);
       else if (state.scaleAlgo === "nearest") v = reduceNearest(values);
       else v = reduceBox(values);
-      out[dy * dw + dx] = v;
+      out[i] = v;
     }
   }
-  return out;
+  return { out, alpha };
 }
 
 /* ============================================================
@@ -339,31 +413,35 @@ function outputSize() {
 function recompute() {
   if (!state.srcLum) return;
   const { dw, dh } = outputSize();
-  const tone = toneMap(state.srcLum);
+  const alphaMask = state.srcAlpha;
+  const tone = toneMap(state.srcLum, alphaMask);
 
-  let shades;
+  let shades, alpha;
   if (state.order === "quantize-first") {
     // Quantize at source resolution, then scale in shade space. The reducers
     // see values 0..3, and the result is rounded back to a valid shade.
     const srcShades = quantizeArr(tone, state.srcW, state.srcH);
-    const scaled = scaleArray(srcShades, state.srcW, state.srcH, dw, dh);
+    const scaled = scaleArray(srcShades, alphaMask, state.srcW, state.srcH, dw, dh);
+    alpha = scaled.alpha;
     shades = new Uint8Array(dw * dh);
     for (let i = 0; i < shades.length; i++) {
-      shades[i] = Math.max(0, Math.min(3, Math.round(scaled[i])));
+      shades[i] = Math.max(0, Math.min(3, Math.round(scaled.out[i])));
     }
   } else {
     // Scale the tone-mapped luminance, then quantize (dithering happens at
     // output resolution, which is what dithering usually wants).
-    const scaled = scaleArray(tone, state.srcW, state.srcH, dw, dh);
-    shades = quantizeArr(scaled, dw, dh);
+    const scaled = scaleArray(tone, alphaMask, state.srcW, state.srcH, dw, dh);
+    alpha = scaled.alpha;
+    shades = quantizeArr(scaled.out, dw, dh);
   }
 
-  state.result = { shades, w: dw, h: dh, uniqueTiles: countUniqueTiles(shades, dw, dh) };
+  state.result = { shades, alpha, w: dw, h: dh, uniqueTiles: countUniqueTiles(shades, alpha, dw, dh) };
 }
 
-// Unique 8x8 tiles the result would need (padded with the lightest shade),
-// as a preview of the VRAM cost before the image goes anywhere near a map.
-function countUniqueTiles(shades, w, h) {
+// Unique 8x8 tiles the result would need, as a preview of the VRAM cost before
+// the image goes anywhere near a map. Transparent pixels use a distinct symbol
+// so identical transparent regions dedupe and mixed tiles stay honest.
+function countUniqueTiles(shades, alpha, w, h) {
   const tw = Math.ceil(w / TILE_PX), th = Math.ceil(h / TILE_PX);
   const seen = new Set();
   for (let ty = 0; ty < th; ty++) {
@@ -372,7 +450,9 @@ function countUniqueTiles(shades, w, h) {
       for (let y = 0; y < TILE_PX; y++) {
         for (let x = 0; x < TILE_PX; x++) {
           const sx = tx * TILE_PX + x, sy = ty * TILE_PX + y;
-          key += (sx < w && sy < h) ? shades[sy * w + sx] : 0;
+          if (sx >= w || sy >= h) { key += "0"; continue; }
+          const idx = sy * w + sx;
+          key += (alpha && alpha[idx]) ? "t" : shades[idx];
         }
       }
       seen.add(key);
@@ -406,8 +486,11 @@ function loadImageFile(file) {
       state.fileName = file.name;
       state.srcW = img.width; state.srcH = img.height;
       state.srcLum = lum;
+      state.srcRGBA = data;
       state.srcCanvas = canvas;
       state.targetW = Math.min(img.width, 160);   // GB screen width as the default
+      state.picking = false;
+      state.srcAlpha = computeAlphaMask();
       recompute();
       render();
     } catch (err) {
@@ -428,7 +511,8 @@ function autoZoom() {
 }
 
 // Paint a shade array via 1x ImageData + scaled blit (crisp and fast).
-function paintShades(canvas, shades, w, h, zoom, colors) {
+// Pixels flagged in `alpha` are written fully transparent (alpha byte 0).
+function paintShades(canvas, shades, alpha, w, h, zoom, colors) {
   const rgb = colors.map(c => [
     parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16),
   ]);
@@ -437,9 +521,10 @@ function paintShades(canvas, shades, w, h, zoom, colors) {
   const sctx = src.getContext("2d");
   const img = sctx.createImageData(w, h);
   for (let i = 0; i < shades.length; i++) {
+    const transparent = alpha && alpha[i];
     const [r, g, b] = rgb[shades[i]];
     img.data[i * 4] = r; img.data[i * 4 + 1] = g; img.data[i * 4 + 2] = b;
-    img.data[i * 4 + 3] = 255;
+    img.data[i * 4 + 3] = transparent ? 0 : 255;
   }
   sctx.putImageData(img, 0, 0);
 
@@ -541,6 +626,40 @@ function render() {
     ctl.appendChild(kField);
   }
 
+  /* ---- transparency (chroma key) ---- */
+  ctl.appendChild(spacer(12));
+  ctl.appendChild(el("h2", null, "Transparency"));
+  ctl.appendChild(toggle("Key out a color (make it transparent)", state.alphaEnabled,
+    v => {
+      state.alphaEnabled = v;
+      if (!v) state.picking = false;
+      state.srcAlpha = computeAlphaMask();
+      recompute(); render();
+    }));
+  if (state.alphaEnabled) {
+    const keyField = el("div", "field");
+    keyField.appendChild(label("Transparent color"));
+    const keyRow = el("div", "key-row");
+    const colorIn = document.createElement("input");
+    colorIn.type = "color";
+    colorIn.value = state.alphaColor;
+    colorIn.addEventListener("input", () => {
+      state.alphaColor = colorIn.value;
+      state.srcAlpha = computeAlphaMask();
+      recompute(); render();
+    });
+    const pickBtn = el("button", "tiny", state.picking ? "Click the image…" : "Pick from image");
+    pickBtn.addEventListener("click", () => { state.picking = !state.picking; render(); });
+    keyRow.append(colorIn, pickBtn);
+    keyField.appendChild(keyRow);
+    ctl.appendChild(keyField);
+
+    ctl.appendChild(sliderRow("Tolerance", 0, 150, 1, state.alphaTolerance, v => String(v),
+      v => { state.alphaTolerance = v; state.srcAlpha = computeAlphaMask(); recompute(); render(); }));
+    ctl.appendChild(el("p", "hint",
+      "Matching pixels become the alpha channel: left out of tone mapping, the shade split, and the tile count, and written transparent in the PNG."));
+  }
+
   /* ---- tone ---- */
   ctl.appendChild(spacer(12));
   ctl.appendChild(el("h2", null, "Tone"));
@@ -571,9 +690,12 @@ function render() {
     // white background pushes all three boundaries to 255). Instead, run a
     // weighted 1D k-means over the histogram: a dominant background becomes
     // ONE cluster, and the thresholds land between the four cluster centers.
-    const tone = toneMap(state.srcLum);
+    const tone = toneMap(state.srcLum, state.srcAlpha);
     const hist = new Float64Array(256);
-    for (let i = 0; i < tone.length; i++) hist[Math.max(0, Math.min(255, Math.round(tone[i])))]++;
+    for (let i = 0; i < tone.length; i++) {
+      if (state.srcAlpha && state.srcAlpha[i]) continue;
+      hist[Math.max(0, Math.min(255, Math.round(tone[i])))]++;
+    }
 
     const centers = [32, 96, 160, 224];   // ascending init keeps clusters ordered
     for (let iter = 0; iter < 24; iter++) {
@@ -667,8 +789,9 @@ function render() {
 
   /* ---- right: source and result previews ---- */
   const srcCard = el("div", "card col-editor");
-  srcCard.appendChild(el("h2", null, "Source"));
-  const srcWrap = el("div", "preview-wrap");
+  srcCard.appendChild(el("h2", null, "Source" +
+    (state.picking ? " — click to pick the transparent color" : "")));
+  const srcWrap = el("div", "preview-wrap" + (state.picking ? " picking" : ""));
   const srcView = document.createElement("canvas");
   // Fit the source preview to roughly the same on-screen width as the result.
   const fit = Math.min(1, 480 / state.srcW);
@@ -676,6 +799,21 @@ function render() {
   srcView.height = Math.max(1, Math.round(state.srcH * fit));
   const sctx = srcView.getContext("2d");
   sctx.drawImage(state.srcCanvas, 0, 0, srcView.width, srcView.height);
+  if (state.picking) {
+    // Eyedropper: map the click back to a source pixel and adopt its color.
+    srcView.addEventListener("click", (e) => {
+      const rect = srcView.getBoundingClientRect();
+      const sx = Math.floor((e.clientX - rect.left) / fit);
+      const sy = Math.floor((e.clientY - rect.top) / fit);
+      if (sx < 0 || sy < 0 || sx >= state.srcW || sy >= state.srcH) return;
+      const j = (sy * state.srcW + sx) * 4;
+      state.alphaColor = rgbToHex(state.srcRGBA[j], state.srcRGBA[j + 1], state.srcRGBA[j + 2]);
+      state.alphaEnabled = true;
+      state.picking = false;
+      state.srcAlpha = computeAlphaMask();
+      recompute(); render();
+    });
+  }
   srcWrap.appendChild(srcView);
   srcCard.appendChild(srcWrap);
   cols.appendChild(srcCard);
@@ -683,9 +821,10 @@ function render() {
   const outCard = el("div", "card col-editor");
   outCard.appendChild(el("h2", null, "Result — " + res.w + "×" + res.h +
     " · " + res.uniqueTiles + " unique tiles"));
-  const outWrap = el("div", "preview-wrap");
+  const hasAlpha = res.alpha && res.alpha.some(a => a);
+  const outWrap = el("div", "preview-wrap" + (hasAlpha ? " preview-checker" : ""));
   const outView = document.createElement("canvas");
-  paintShades(outView, res.shades, res.w, res.h, state.zoom || autoZoom(), PALETTES[state.paletteIndex].colors);
+  paintShades(outView, res.shades, res.alpha, res.w, res.h, state.zoom || autoZoom(), PALETTES[state.paletteIndex].colors);
   outWrap.appendChild(outView);
   outCard.appendChild(outWrap);
   cols.appendChild(outCard);
@@ -702,7 +841,7 @@ function render() {
 function resultCanvas() {
   const { shades, w, h } = state.result;
   const canvas = document.createElement("canvas");
-  paintShades(canvas, shades, w, h, 1, PALETTES[state.paletteIndex].colors);
+  paintShades(canvas, shades, state.result.alpha, w, h, 1, PALETTES[state.paletteIndex].colors);
   return canvas;
 }
 
