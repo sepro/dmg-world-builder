@@ -10,6 +10,9 @@ files.
 - **Music Generator** — a deterministic chiptune improviser for the four GB channels
   that exports settings and Standard MIDI. See the
   [Music Generator guide](docs/MUSIC_GENERATOR.md).
+- **SFX Generator** — a sound-effect designer for the four GB channels. Start from a
+  preset (coin, laser, jump, explosion, hit, power-up, blip), refine with semantic
+  sliders, and export `.gbsfx.json`, a WAV, or GBDK-2020 C with a tiny frame player.
 
 ## Structure
 
@@ -51,6 +54,7 @@ Serve the repo root with anything static:
 python3 -m http.server 8000
 # world editor:    http://localhost:8000/dist/gb-world-editor.html
 # music generator: http://localhost:8000/dist/gb-music-generator.html
+# sfx generator:   http://localhost:8000/dist/gb-sfx-generator.html
 ```
 
 Both apps run entirely in the browser; the server only delivers the files.

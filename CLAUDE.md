@@ -11,6 +11,7 @@ python3 -m http.server 8000
 # world editor:    http://localhost:8000/dist/gb-world-editor.html
 # sprite editor:   http://localhost:8000/dist/gb-sprite-editor.html
 # music generator: http://localhost:8000/dist/gb-music-generator.html
+# sfx generator:   http://localhost:8000/dist/gb-sfx-generator.html
 # tile reducer:    http://localhost:8000/dist/gb-tile-reducer.html
 # pixelizer:       http://localhost:8000/dist/gb-pixelizer.html
 ```
@@ -82,6 +83,18 @@ A deterministic chiptune improviser for the four GB channels (Pulse 1 = lead, Pu
 **Output**: piano-roll and simplified-staff views are drawn to `<canvas>` (`buildPianoRoll`, `buildStaff`), with a separate overlay canvas for the playhead. Export is `.gbmusic.json` (settings) and Standard MIDI File (`midiBytes`, format 1, drums on MIDI channel 10).
 
 See `docs/MUSIC_GENERATOR.md` for an end-user guide to every control.
+
+### The SFX generator (`dist/gb-sfx-generator.html`)
+
+A single-file sound-effect designer for the four GB channels (vanilla JS, links the two shared files, full-rebuild `render()`, stable integer ids). The saved file is `.gbsfx.json` (`formatVersion 1`): a bank of `effects`, each with a `tickHz` (default 60) and a list of `layers`. A layer targets one `channel` (`pulse1`/`pulse2`/`wave`/`noise`) and is either `mode: "macro"` (generated) or `mode: "manual"` (hand-edited `steps`).
+
+**Macro model**: the UX is "category first, then refine" (sfxr-style). `CATEGORY_LIST` presets (`categoryMacro`) seed a semantic `macro` (length, pitch/baseNote or noiseTone, bend, jump, punch, decay, sustain, duty/width, vibrato); `regenerateEffect` re-derives macros deterministically from `effect.seed` via `makeRng` (mulberry32), so Randomize/seed are reproducible while Mutate (`mutateMacro`) nudges live values.
+
+**Compile pipeline is the contract**: `compileLayer(effect, layer)` turns a macro (or manual steps) into a per-frame program `{ vol 0..15, freqHz/note, noiseTone, duty, width }` plus `peakVol`/`decayPace`. Everything downstream consumes that program: the two-lane pitch/volume canvas (`drawViz`), the shared Web Audio scheduler (`audio.scheduleLayer`, used by both live preview and the offline WAV render via `renderWav`/`encodeWav`), and the C export.
+
+**Hardware mapping** (keep consistent between preview and export): pulse `freq = 131072/(2048-period)`, wave `freq = 65536/(2048-period)`; noise tone 0..15 maps to an LFSR clock shift (`noiseParams`). `CHANNELS[*].base` is the address of the first of five audio registers written per channel (`0xFF15`/`0xFF1F` land on unused NR slots so a uniform 5-register write is safe). Wave volume uses the `WAVE_VOLUME_CODE` mapping into NR32.
+
+**C export** (`exportC` → `gbsfx.h`/`gbsfx.c`): `buildEffectProgram`/`layerToRegisters` emit a compact byte program per effect for a tiny frame-stepped VM — `0x01 ch r0..r4` (write a channel's registers), `0x02 <16 bytes>` (load wave RAM once), `0xFF` (end frame), `0x00` (end effect). Frame 0 triggers each channel with the hardware volume envelope + length counter set from the macro, so decays run on real hardware; later frames rewrite only pitch (no re-trigger), avoiding the 60 Hz buzz that per-frame volume writes would cause on a DMG. The runtime API is `gbsfx_init()` (once), `gbsfx_play(id)`, and `gbsfx_update()` (call once per frame). Playback is a close Web Audio approximation, not a cycle-accurate emulator (e.g. duty is treated as constant across an effect in the preview).
 
 ### The tile reducer (`dist/gb-tile-reducer.html`)
 

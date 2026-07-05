@@ -1,0 +1,1374 @@
+<!--
+  GB SFX Generator - v1
+  A browser-based sound-effect designer for the Game Boy DMG's four channels:
+      Pulse 1  -> square with duty + sweep     (pitched blips, coins, lasers)
+      Pulse 2  -> square with duty              (a second pitched layer)
+      Wave     -> custom 32-step wavetable      (bells, bass, textures)
+      Noise    -> LFSR noise                    (explosions, hits, static)
+
+  The tool is "category first, then refine": press a preset (Coin, Laser, Jump,
+  Explosion, Hit, Powerup, Blip), which drops you into a small set of semantic
+  macro sliders (Length, Pitch, Bend, Punch, Decay, Tone). An Advanced drawer
+  exposes the extra parameters, a per-frame register inspector, and free-hand
+  frame editing.
+
+  An effect is authored as macros and compiled to a per-frame (60 Hz default)
+  register program. Playback is a close Web Audio approximation of the channels,
+  not a cycle-accurate emulator. Export is:
+      .gbsfx.json  - the editable source of truth (re-importable)
+      .wav         - a rendered preview
+      GBDK C       - gbsfx.h / gbsfx.c: a compact frame program + tiny player
+
+  No build step, no framework. Shared look lives in gb-theme.css and shared
+  helpers in gb-common.js, the same files the other suite pages use. Because
+  those are linked (not inlined), serve the repo over HTTP - opening via file://
+  will not load the shared assets.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GB SFX Generator</title>
+<link rel="stylesheet" href="gb-theme.css">
+<style>
+  /* SFX-generator-specific styling. Shared tokens/components live in gb-theme.css. */
+
+  .layout { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+  .col-left  { flex: 0 0 300px; min-width: 280px; }
+  .col-right { flex: 1 1 520px; min-width: 340px; }
+
+  /* preset grid */
+  .preset-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .preset-btn { padding: 10px 8px; text-align: center; letter-spacing: 0.06em; }
+  .preset-btn small { display: block; color: var(--muted); font-size: 9px; margin-top: 2px; text-transform: uppercase; }
+  .preset-btn:hover small { color: var(--accent); }
+
+  /* library list */
+  .lib-list { display: flex; flex-direction: column; gap: 4px; }
+  .lib-item {
+    display: flex; align-items: center; gap: 8px;
+    border: 1px solid var(--border); background: var(--panel-2);
+    padding: 6px 8px; cursor: pointer;
+  }
+  .lib-item.active { border-color: var(--accent); }
+  .lib-item .lib-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lib-item .lib-chan { color: var(--muted); font-size: 10px; text-transform: uppercase; }
+
+  /* transport */
+  .transport { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .btn-play { min-width: 78px; }
+  .seed-row { display: flex; align-items: center; gap: 6px; }
+  .seed-row input { width: 96px; }
+
+  /* macro sliders */
+  .slider-row { display: grid; grid-template-columns: 90px 1fr 52px; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .slider-row label { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+  .slider-row input[type="range"] { width: 100%; }
+  .slider-row .val { text-align: right; color: var(--accent); font-size: 11px; }
+
+  /* layer card */
+  .layer-card { border: 1px solid var(--border); background: var(--panel-2); padding: 10px 12px; margin-bottom: 12px; }
+  .layer-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .layer-head .dot { width: 12px; height: 12px; border: 1px solid var(--gb-3); }
+  .layer-head .layer-title { flex: 1; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+
+  /* visualization */
+  .viz-wrap { border: 1px solid var(--border); background: var(--gb-3); margin-bottom: 10px; }
+  .viz-wrap canvas { width: 100%; height: 160px; }
+  .viz-legend { display: flex; gap: 14px; font-size: 10px; color: var(--muted); margin: 4px 0 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .viz-legend .sw { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: -1px; border: 1px solid var(--gb-3); }
+
+  /* advanced drawer */
+  .adv { border-top: 1px dashed var(--line); margin-top: 10px; padding-top: 10px; }
+  .adv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+  .reg-table { width: 100%; border-collapse: collapse; font-size: 10px; margin-top: 6px; }
+  .reg-table th, .reg-table td { border: 1px solid var(--line); padding: 2px 5px; text-align: center; }
+  .reg-table th { color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  .reg-scroll { max-height: 168px; overflow: auto; border: 1px solid var(--border); }
+
+  .note-empty { color: var(--muted); padding: 40px; text-align: center; border: 1px dashed var(--line); }
+  .warn { color: var(--danger); font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header class="topbar">
+    <span class="brand">GB&nbsp;SFX&nbsp;Generator <span class="sub">v1</span></span>
+    <span class="target-tag">4 channels &middot; DMG</span>
+    <div class="spacer"></div>
+    <a class="nav-link" href="index.html">Suite</a>
+    <a class="nav-link" href="gb-world-editor.html">World</a>
+    <a class="nav-link" href="gb-sprite-editor.html">Sprites</a>
+    <a class="nav-link" href="gb-music-generator.html">Music</a>
+    <button id="btn-new">New</button>
+    <button id="btn-import">Import</button>
+    <button class="primary" id="btn-export">Export</button>
+  </header>
+
+  <main id="panel">
+    <div class="layout">
+      <section class="col-left" id="left-col"></section>
+      <section class="col-right" id="right-col"></section>
+    </div>
+  </main>
+</div>
+
+<script src="gb-common.js"></script>
+<script>
+"use strict";
+
+/* ============================================================
+   Constants and hardware reference tables
+   ============================================================ */
+
+const FORMAT_VERSION = 1;
+const DEFAULT_TICK_HZ = 60;      // effects step once per frame by default
+const MAX_FRAMES = 300;          // safety ceiling (~5 s at 60 Hz)
+
+// The four channels. `base` is the address of the first of the five audio
+// registers the C player writes for that channel (0xFF15 / 0xFF1F land on the
+// unused NR20 / NR41-1 slots, so a uniform 5-register write is safe).
+const CHANNELS = {
+  pulse1: { label: "Pulse 1", role: "square + sweep", dot: "#b8f25a", base: 0xFF10, pitched: true },
+  pulse2: { label: "Pulse 2", role: "square",         dot: "#88c070", base: 0xFF15, pitched: true },
+  wave:   { label: "Wave",    role: "wavetable",      dot: "#346856", base: 0xFF1A, pitched: true },
+  noise:  { label: "Noise",   role: "LFSR",           dot: "#e08a5a", base: 0xFF1F, pitched: false },
+};
+const CHANNEL_ORDER = ["pulse1", "pulse2", "wave", "noise"];
+const CHANNEL_INDEX = { pulse1: 0, pulse2: 1, wave: 2, noise: 3 };
+
+// Duty cycles selectable on the two pulse channels (NRx1 bits 6-7).
+const DUTY_LABELS = ["12.5%", "25%", "50%", "75%"];
+const DUTY_FRACTION = [0.125, 0.25, 0.5, 0.75];
+
+// Noise divisor codes -> actual divisor (NR43 bits 0-2).
+const NOISE_DIVISORS = [8, 16, 32, 48, 64, 80, 96, 112];
+
+// Wave-channel volume codes (NR32 bits 5-6): 0=mute, 1=100%, 2=50%, 3=25%.
+// Index by a "loudness" 0..3 (0 silent, 3 loudest) to get the register code.
+const WAVE_VOLUME_CODE = [0, 3, 2, 1];
+
+// Named 32-step wavetables (values 0..15) offered on the wave channel.
+const WAVE_PRESETS = {
+  sine:     makeWaveTable("sine"),
+  triangle: makeWaveTable("triangle"),
+  saw:      makeWaveTable("saw"),
+  square:   makeWaveTable("square"),
+  organ:    makeWaveTable("organ"),
+};
+const WAVE_PRESET_NAMES = Object.keys(WAVE_PRESETS);
+
+function makeWaveTable(kind) {
+  const t = new Array(32);
+  for (let i = 0; i < 32; i++) {
+    const p = i / 32;                       // phase 0..1
+    let v;
+    switch (kind) {
+      case "sine":     v = 0.5 + 0.5 * Math.sin(2 * Math.PI * p); break;
+      case "triangle": v = p < 0.5 ? p * 2 : 2 - p * 2; break;
+      case "saw":      v = p; break;
+      case "square":   v = p < 0.5 ? 1 : 0; break;
+      // Two stacked sines make a hollow, organ-ish tone.
+      case "organ":    v = 0.5 + 0.3 * Math.sin(2 * Math.PI * p) + 0.2 * Math.sin(4 * Math.PI * p); break;
+      default:         v = 0.5;
+    }
+    t[i] = clampInt(Math.round(v * 15), 0, 15);
+  }
+  return t;
+}
+
+// The seven classic sfxr-style categories. Each returns a base macro; the
+// randomizer jitters around it. `custom` is what a hand-added layer starts from.
+const CATEGORY_LIST = [
+  { key: "coin",      label: "Coin",     hint: "pickup" },
+  { key: "laser",     label: "Laser",    hint: "shoot" },
+  { key: "jump",      label: "Jump",     hint: "hop" },
+  { key: "explosion", label: "Explode",  hint: "boom" },
+  { key: "hit",       label: "Hit",      hint: "hurt" },
+  { key: "powerup",   label: "Power-up", hint: "level" },
+  { key: "blip",      label: "Blip",     hint: "select" },
+  { key: "custom",    label: "Custom",   hint: "blank" },
+];
+
+// Which channel each category prefers. Falling/rising pitch effects want the
+// sweep-capable Pulse 1; explosions and hits want Noise.
+const CATEGORY_CHANNEL = {
+  coin: "pulse1", laser: "pulse1", jump: "pulse1", powerup: "pulse1",
+  blip: "pulse2", explosion: "noise", hit: "noise", custom: "pulse1",
+};
+
+/* ============================================================
+   Macro model
+   ============================================================
+   A macro is the guided, semantic description of a sound. Fields are shared
+   across channels; the synthesizer reads whichever ones apply to the layer's
+   channel (e.g. `noiseTone`/`width` for noise, `baseNote`/`duty` for pulse).
+*/
+
+function makeMacro(overrides) {
+  return Object.assign({
+    lengthMs: 240,     // total duration
+    baseNote: 81,      // MIDI note for pitched channels (A5 = 880 Hz)
+    noiseTone: 8,      // 0..15 rumble..hiss for the noise channel
+    bend: 0,           // -1 down .. +1 up: direction+amount of the pitch glide
+    bendAmount: 0.4,   // 0..1 -> up to ~36 semitones (or noise steps) of glide
+    jump: 0,           // extra semitones added part-way through (coins/power-ups)
+    jumpAt: 0.3,       // 0..1 point in the sound where `jump` kicks in
+    punch: 0.7,        // 0..1 attack sharpness + peak volume
+    decay: 0.4,        // 0..1 how fast the volume falls (0 = sustain)
+    sustain: 0.0,      // 0..1 volume floor the decay settles toward
+    duty: 2,           // pulse duty index 0..3
+    width: 1,          // noise LFSR width: 1 = 15-bit hiss, 0 = 7-bit metallic
+    vibratoRate: 0,    // 0..1 -> 0..24 Hz warble
+    vibratoDepth: 0,   // 0..1 -> up to 2 semitones
+  }, overrides || {});
+}
+
+// Per-category starting macros. Kept deliberately punchy and short.
+function categoryMacro(category) {
+  switch (category) {
+    case "coin":      return makeMacro({ lengthMs: 260, baseNote: 84, bend: 0.25, bendAmount: 0.2, jump: 7, jumpAt: 0.25, punch: 0.7, decay: 0.35, duty: 2 });
+    case "laser":     return makeMacro({ lengthMs: 260, baseNote: 93, bend: -0.85, bendAmount: 0.55, punch: 0.9, decay: 0.45, duty: 2 });
+    case "jump":      return makeMacro({ lengthMs: 300, baseNote: 72, bend: 0.7, bendAmount: 0.35, punch: 0.6, decay: 0.15, duty: 2 });
+    case "explosion": return makeMacro({ lengthMs: 700, noiseTone: 5, bend: -0.6, bendAmount: 0.45, punch: 0.95, decay: 0.22, width: 1 });
+    case "hit":       return makeMacro({ lengthMs: 160, noiseTone: 10, bend: -0.2, bendAmount: 0.2, punch: 0.9, decay: 0.6, width: 0 });
+    case "powerup":   return makeMacro({ lengthMs: 520, baseNote: 72, bend: 0.55, bendAmount: 0.6, jump: 12, jumpAt: 0.5, punch: 0.6, decay: 0.1, duty: 2, vibratoRate: 0.3, vibratoDepth: 0.15 });
+    case "blip":      return makeMacro({ lengthMs: 90, baseNote: 81, bend: 0, bendAmount: 0, punch: 0.85, decay: 0.7, duty: 1 });
+    default:          return makeMacro({});
+  }
+}
+
+/* ============================================================
+   Project / effect / layer construction
+   ============================================================ */
+
+function makeDefaultProject() {
+  const proj = { formatVersion: FORMAT_VERSION, name: "sfx-bank", nextId: 1, effects: [] };
+  proj.effects.push(makeEffect(proj, "coin"));
+  return proj;
+}
+
+function makeEffect(proj, category) {
+  const cat = category || "coin";
+  const id = proj.nextId++;
+  return {
+    id,
+    name: defaultEffectName(cat, id),
+    seed: (Math.random() * 0xffffffff) >>> 0,
+    tickHz: DEFAULT_TICK_HZ,
+    layers: [makeLayer(proj, cat)],
+  };
+}
+
+function makeLayer(proj, category) {
+  const cat = category || "custom";
+  const channel = CATEGORY_CHANNEL[cat] || "pulse1";
+  return {
+    id: proj.nextId++,
+    channel,
+    category: cat,
+    mode: "macro",          // "macro" (generated) or "manual" (hand-edited frames)
+    macro: categoryMacro(cat),
+    wavePreset: "triangle", // used only when channel === "wave"
+    gain: 1,                // playback mix level, not exported to hardware
+    steps: null,            // populated when mode === "manual"
+  };
+}
+
+function defaultEffectName(category, id) {
+  const c = CATEGORY_LIST.find(x => x.key === category);
+  return (c ? c.label : "SFX").toLowerCase().replace(/[^a-z0-9]/g, "") + "_" + id;
+}
+
+/* ============================================================
+   Editor state (kept separate from the saved project)
+   ============================================================ */
+
+const state = {
+  project: makeDefaultProject(),
+  selectedEffectId: null,
+  advanced: false,
+  paintLane: null,          // active drag lane in manual mode: "pitch" | "vol"
+};
+state.selectedEffectId = state.project.effects[0].id;
+
+function selectedEffect() {
+  return state.project.effects.find(e => e.id === state.selectedEffectId) || null;
+}
+
+/* ============================================================
+   Deterministic RNG (mulberry32), matching the music generator's approach
+   ============================================================ */
+
+function makeRng(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+// Symmetric jitter in [-amt, +amt].
+function jitter(rng, amt) { return (rng() * 2 - 1) * amt; }
+function clamp01(x) { return Math.max(0, Math.min(1, x)); }
+function clampf(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
+
+/* ============================================================
+   Frequency <-> GB register helpers
+   ============================================================ */
+
+function freqFromNote(note) { return 440 * Math.pow(2, (note - 69) / 12); }
+
+// Square/pulse: freq = 131072 / (2048 - period)  ->  invert and clamp.
+function pulsePeriod(freqHz) {
+  const p = 2048 - Math.round(131072 / Math.max(freqHz, 32));
+  return clampInt(p, 0, 2047);
+}
+// Wave tone is half the pulse rate: freq = 65536 / (2048 - period).
+function wavePeriod(freqHz) {
+  const p = 2048 - Math.round(65536 / Math.max(freqHz, 16));
+  return clampInt(p, 0, 2047);
+}
+// Map a 0..15 "tone" onto an LFSR clock shift (NR43 bits 4-7). Higher tone =>
+// smaller shift => higher pitched hiss. Divisor is fixed at code 0 for a clean,
+// predictable mapping the ear reads as a single pitch axis.
+function noiseParams(tone) {
+  const shift = clampInt(Math.round(13 - (tone / 15) * 13), 0, 13);
+  return { shift, divisor: 0, width: 0 };
+}
+// Approximate audible frequency of a noise setting, for the Web Audio preview.
+function noiseFreqHz(shift, divisorCode) {
+  const div = NOISE_DIVISORS[divisorCode] || 8;
+  return 524288 / div / Math.pow(2, shift + 1);
+}
+
+/* ============================================================
+   Synthesis: macro -> per-frame program
+   ============================================================
+   The compiled program is what everything downstream consumes (visualization,
+   Web Audio preview, WAV render and C export). A frame carries the resolved
+   per-tick values; channel-specific fields are filled as relevant.
+
+     frame = { vol: 0..15, freqHz, note, noiseTone, duty, width }
+
+   The layer also reports steady values used to drive the hardware envelope on
+   export (peakVol, decayPace) so the generated C sounds like the preview.
+*/
+
+function compileLayer(effect, layer) {
+  const tickHz = effect.tickHz || DEFAULT_TICK_HZ;
+  const ch = layer.channel;
+
+  if (layer.mode === "manual" && Array.isArray(layer.steps)) {
+    return compileManual(layer, tickHz);
+  }
+
+  const m = layer.macro;
+  const nFrames = clampInt(Math.round((m.lengthMs / 1000) * tickHz), 1, MAX_FRAMES);
+  const frames = [];
+
+  // Peak volume and a hardware-envelope decay pace derived from the macro, so
+  // the C export can lean on the real envelope unit instead of rewriting volume
+  // every frame (which would buzz on hardware).
+  const peakVol = clampInt(Math.round(15 * (0.45 + 0.55 * m.punch)), 1, 15);
+  const decayPace = m.decay <= 0.02 ? 0 : clampInt(Math.round(7 - m.decay * 6), 1, 7);
+  const decayRate = m.decay <= 0.02 ? 0 : (0.03 + m.decay * 0.5);   // per-frame, for preview
+  const attackFrames = Math.round((1 - m.punch) * 0.18 * nFrames);
+  const floorVol = m.sustain * peakVol;
+
+  for (let i = 0; i < nFrames; i++) {
+    const t = nFrames > 1 ? i / (nFrames - 1) : 0;
+
+    // Volume: quick attack ramp, then exponential decay toward the floor.
+    let v = peakVol * Math.exp(-decayRate * i);
+    v = Math.max(v, floorVol);
+    if (attackFrames > 0 && i < attackFrames) v *= (i + 1) / (attackFrames + 1);
+    const vol = clampInt(Math.round(v), 0, 15);
+
+    const frame = { vol, duty: m.duty, width: m.width };
+
+    if (ch === "noise") {
+      // Glide the noise tone, plus any mid-sound jump.
+      let tone = m.noiseTone + m.bend * m.bendAmount * 15 * t;
+      if (m.jump && t >= m.jumpAt) tone += m.jump * 0.5;
+      frame.noiseTone = clampf(tone, 0, 15);
+    } else {
+      // Pitched channels: semitone glide + optional jump + vibrato.
+      let note = m.baseNote + m.bend * m.bendAmount * 36 * t;
+      if (m.jump && t >= m.jumpAt) note += m.jump;
+      if (m.vibratoDepth > 0 && m.vibratoRate > 0) {
+        const rateHz = m.vibratoRate * 24;
+        note += Math.sin(2 * Math.PI * rateHz * (i / tickHz)) * m.vibratoDepth * 2;
+      }
+      frame.note = note;
+      frame.freqHz = freqFromNote(note);
+    }
+    frames.push(frame);
+  }
+
+  return { channel: ch, tickHz, frames, peakVol, decayPace, wavePreset: layer.wavePreset };
+}
+
+// Manual mode: frames are stored directly as { vol, note } (pitched) or
+// { vol, noiseTone } (noise). Timbre stays constant from the macro.
+function compileManual(layer, tickHz) {
+  const m = layer.macro;
+  const ch = layer.channel;
+  const frames = layer.steps.map(s => {
+    const frame = { vol: clampInt(s.vol, 0, 15), duty: m.duty, width: m.width };
+    if (ch === "noise") {
+      frame.noiseTone = clampf(s.noiseTone != null ? s.noiseTone : m.noiseTone, 0, 15);
+    } else {
+      const note = s.note != null ? s.note : m.baseNote;
+      frame.note = note;
+      frame.freqHz = freqFromNote(note);
+    }
+    return frame;
+  });
+  const peakVol = frames.reduce((a, f) => Math.max(a, f.vol), 1);
+  return { channel: ch, tickHz, frames, peakVol, decayPace: 0, wavePreset: layer.wavePreset };
+}
+
+// Freeze the current macro program into editable manual steps.
+function freezeToManual(effect, layer) {
+  const prog = compileLayer(effect, layer);
+  layer.steps = prog.frames.map(f => (
+    layer.channel === "noise" ? { vol: f.vol, noiseTone: f.noiseTone } : { vol: f.vol, note: f.note }
+  ));
+  layer.mode = "manual";
+}
+
+/* ============================================================
+   Randomize / mutate
+   ============================================================ */
+
+function regenerateEffect(effect) {
+  const rng = makeRng(effect.seed);
+  effect.layers.forEach(layer => {
+    const base = categoryMacro(layer.category);
+    if (layer.category === "custom") {
+      // Nothing to reset toward: nudge the current macro instead.
+      mutateMacro(layer.macro, rng, 0.25);
+    } else {
+      layer.macro = jitterMacro(base, rng);
+    }
+    layer.mode = "macro";
+    layer.steps = null;
+  });
+}
+
+function jitterMacro(base, rng) {
+  const m = makeMacro(base);
+  m.lengthMs = clampf(m.lengthMs * (1 + jitter(rng, 0.3)), 40, 4000);
+  m.baseNote = clampf(m.baseNote + jitter(rng, 6), 24, 108);
+  m.noiseTone = clampf(m.noiseTone + jitter(rng, 3), 0, 15);
+  m.bendAmount = clamp01(m.bendAmount + jitter(rng, 0.2));
+  m.punch = clamp01(m.punch + jitter(rng, 0.15));
+  m.decay = clamp01(m.decay + jitter(rng, 0.15));
+  if (Math.abs(m.bend) > 0.01) m.bend = clampf(m.bend + jitter(rng, 0.15), -1, 1);
+  return m;
+}
+
+function mutateMacro(m, rng, amt) {
+  m.lengthMs = clampf(m.lengthMs * (1 + jitter(rng, amt * 0.5)), 40, 4000);
+  m.baseNote = clampf(m.baseNote + jitter(rng, amt * 8), 24, 108);
+  m.noiseTone = clampf(m.noiseTone + jitter(rng, amt * 5), 0, 15);
+  m.bend = clampf(m.bend + jitter(rng, amt * 0.4), -1, 1);
+  m.bendAmount = clamp01(m.bendAmount + jitter(rng, amt * 0.3));
+  m.punch = clamp01(m.punch + jitter(rng, amt * 0.3));
+  m.decay = clamp01(m.decay + jitter(rng, amt * 0.3));
+  m.jump = Math.round(clampf(m.jump + jitter(rng, amt * 6), -24, 24));
+}
+
+/* ============================================================
+   Audio engine (Web Audio approximation of the GB channels)
+   ============================================================
+   scheduleLayer works against any BaseAudioContext, so the live preview and the
+   offline WAV render share exactly one code path.
+*/
+
+const audio = {
+  ctx: null,
+  master: null,
+  noiseBuffer: null,
+  voices: [],
+  playing: false,
+
+  ensure() {
+    if (this.ctx) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    this.ctx = new AC();
+    this.master = this.ctx.createGain();
+    this.master.gain.value = 0.25;
+    this.master.connect(this.ctx.destination);
+  },
+
+  // A band-limited pulse wave of the given duty fraction.
+  pulseWave(ctx, duty) {
+    const n = 32;
+    const real = new Float32Array(n), imag = new Float32Array(n);
+    for (let k = 1; k < n; k++) imag[k] = (2 / (k * Math.PI)) * Math.sin(Math.PI * k * duty);
+    return ctx.createPeriodicWave(real, imag);
+  },
+
+  // A periodic wave built straight from a 32-step wavetable (values 0..15).
+  waveFromTable(ctx, table) {
+    const n = table.length;
+    const real = new Float32Array(n), imag = new Float32Array(n);
+    for (let k = 0; k < n; k++) {
+      let re = 0, im = 0;
+      for (let i = 0; i < n; i++) {
+        const ang = (2 * Math.PI * k * i) / n;
+        const s = (table[i] / 15) - 0.5;      // center around 0
+        re += s * Math.cos(ang);
+        im -= s * Math.sin(ang);
+      }
+      real[k] = re / n; imag[k] = im / n;
+    }
+    return ctx.createPeriodicWave(real, imag);
+  },
+
+  makeNoiseBuffer(ctx) {
+    const len = Math.floor(ctx.sampleRate * 1.5);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    return buf;
+  },
+
+  // Schedule one compiled layer onto `dest`, starting at absolute time t0.
+  // Returns the time the layer finishes (for computing total render length).
+  scheduleLayer(ctx, dest, prog, layerGain, t0) {
+    const tick = 1 / prog.tickHz;
+    const frames = prog.frames;
+    if (!frames.length) return t0;
+    const endT = t0 + frames.length * tick;
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    gain.connect(dest);
+
+    let src, filter;
+    if (prog.channel === "noise") {
+      src = ctx.createBufferSource();
+      src.buffer = this.makeNoiseBuffer(ctx);
+      src.loop = true;
+      filter = ctx.createBiquadFilter();
+      filter.type = "lowpass";
+      // 7-bit width reads as a tonal, metallic buzz: lift resonance for it.
+      filter.Q.value = frames[0].width === 0 ? 6 : 0.7;
+      src.connect(filter); filter.connect(gain);
+    } else {
+      src = ctx.createOscillator();
+      if (prog.channel === "wave") {
+        src.setPeriodicWave(this.waveFromTable(ctx, WAVE_PRESETS[prog.wavePreset] || WAVE_PRESETS.triangle));
+      } else {
+        // Duty is treated as constant across the effect (see header note).
+        src.setPeriodicWave(this.pulseWave(ctx, DUTY_FRACTION[frames[0].duty] || 0.5));
+      }
+      src.connect(gain);
+    }
+
+    // Step every parameter at each frame boundary; short ramps kill clicks.
+    for (let i = 0; i < frames.length; i++) {
+      const f = frames[i];
+      const at = t0 + i * tick;
+      const target = (f.vol / 15) * layerGain;
+      gain.gain.setTargetAtTime(target, at, 0.004);
+      if (prog.channel === "noise") {
+        const np = noiseParams(f.noiseTone);
+        const hz = noiseFreqHz(np.shift, np.divisor);
+        filter.frequency.setValueAtTime(clampf(hz, 120, 12000), at);
+      } else {
+        src.frequency.setValueAtTime(clampf(f.freqHz, 20, 15000), at);
+      }
+    }
+    gain.gain.setTargetAtTime(0, endT, 0.01);
+    src.start(t0);
+    src.stop(endT + 0.08);
+    this.voices.push(src);
+    return endT;
+  },
+
+  play(effect) {
+    this.ensure();
+    if (this.ctx.state === "suspended") this.ctx.resume();
+    this.stop();
+    this.playing = true;
+    const t0 = this.ctx.currentTime + 0.05;
+    effect.layers.forEach(layer => {
+      const prog = compileLayer(effect, layer);
+      this.scheduleLayer(this.ctx, this.master, prog, layer.gain, t0);
+    });
+  },
+
+  stop() {
+    this.voices.forEach(v => { try { v.stop(); } catch (e) {} });
+    this.voices = [];
+    this.playing = false;
+  },
+};
+
+// Render an effect to a mono 16-bit WAV via an offline context.
+async function renderWav(effect) {
+  const sampleRate = 44100;
+  let maxEnd = 0;
+  effect.layers.forEach(layer => {
+    const prog = compileLayer(effect, layer);
+    maxEnd = Math.max(maxEnd, prog.frames.length / prog.tickHz);
+  });
+  const durSec = maxEnd + 0.12;
+  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  const ctx = new OAC(1, Math.ceil(sampleRate * durSec), sampleRate);
+  const master = ctx.createGain();
+  master.gain.value = 0.25;
+  master.connect(ctx.destination);
+  effect.layers.forEach(layer => {
+    const prog = compileLayer(effect, layer);
+    audio.scheduleLayer(ctx, master, prog, layer.gain, 0);
+  });
+  const buffer = await ctx.startRendering();
+  return encodeWav(buffer.getChannelData(0), sampleRate);
+}
+
+function encodeWav(samples, sampleRate) {
+  const n = samples.length;
+  const buf = new ArrayBuffer(44 + n * 2);
+  const view = new DataView(buf);
+  const writeStr = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+  writeStr(0, "RIFF"); view.setUint32(4, 36 + n * 2, true); writeStr(8, "WAVE");
+  writeStr(12, "fmt "); view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  writeStr(36, "data"); view.setUint32(40, n * 2, true);
+  let off = 44;
+  for (let i = 0; i < n; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    off += 2;
+  }
+  return new Blob([buf], { type: "audio/wav" });
+}
+
+/* ============================================================
+   GBDK C export
+   ============================================================
+   Each effect compiles to a byte program consumed by a tiny frame-stepped VM:
+
+     0x01 ch r0 r1 r2 r3 r4   write channel ch's five registers (NRx0..NRx4)
+     0x02 <16 bytes>          load wave RAM (emitted once if a wave layer exists)
+     0xFF                     end of frame  (advance one tick)
+     0x00                     end of effect
+
+   Frame 0 triggers each channel with the hardware volume envelope + length
+   counter set from the macro, so decays run on real hardware. Later frames
+   rewrite only pitch (no re-trigger), which avoids the 60 Hz buzz that
+   per-frame volume writes would cause on a DMG.
+*/
+
+function buildEffectProgram(effect) {
+  // Resolve every layer to its register bytes per frame, then interleave.
+  const layerRegs = effect.layers.map(layer => layerToRegisters(effect, layer));
+  const nFrames = layerRegs.reduce((a, lr) => Math.max(a, lr.frames.length), 0);
+  const bytes = [];
+
+  // Load wave RAM up front if any layer uses the wave channel.
+  const waveLayer = effect.layers.find(l => l.channel === "wave");
+  if (waveLayer) {
+    bytes.push(0x02);
+    const table = WAVE_PRESETS[waveLayer.wavePreset] || WAVE_PRESETS.triangle;
+    for (let i = 0; i < 16; i++) bytes.push((table[i * 2] << 4) | (table[i * 2 + 1] & 0x0f));
+  }
+
+  for (let i = 0; i < nFrames; i++) {
+    layerRegs.forEach(lr => {
+      if (i >= lr.frames.length) return;
+      const r = lr.frames[i];
+      bytes.push(0x01, lr.channelIndex, r[0], r[1], r[2], r[3], r[4]);
+    });
+    bytes.push(0xFF);
+  }
+  bytes.push(0x00);
+  return bytes;
+}
+
+function layerToRegisters(effect, layer) {
+  const prog = compileLayer(effect, layer);
+  const ch = prog.channel;
+  const chIndex = CHANNEL_INDEX[ch];
+  const n = prog.frames.length;
+  const tickHz = prog.tickHz;
+
+  // Length counter so the channel auto-silences after the effect. Pulse/noise
+  // use a 64-step counter (t = (64-load)/256 s); wave uses a 256-step counter.
+  const durSec = n / tickHz;
+  const lenPulse = clampInt(64 - Math.round(durSec * 256), 0, 63);
+  const lenWave = clampInt(256 - Math.round(durSec * 256), 0, 255);
+
+  const rows = [];
+  for (let i = 0; i < n; i++) {
+    const f = prog.frames[i];
+    const trigger = i === 0 ? 0x80 : 0x00;
+    const lenEnable = 0x40;                 // stop at the length counter
+
+    if (ch === "pulse1" || ch === "pulse2") {
+      const period = pulsePeriod(f.freqHz);
+      const r0 = 0x00;                                            // NR10 sweep off (software-driven pitch)
+      const r1 = (f.duty << 6) | (i === 0 ? lenPulse : 0);       // NRx1 duty + length load
+      const r2 = i === 0 ? ((prog.peakVol << 4) | prog.decayPace) : ((prog.peakVol << 4) | prog.decayPace); // NRx2 envelope
+      const r3 = period & 0xFF;                                  // NRx3 period low
+      const r4 = trigger | lenEnable | ((period >> 8) & 0x07);   // NRx4 trigger + period high
+      rows.push([r0, r1, r2, r3, r4]);
+    } else if (ch === "wave") {
+      const period = wavePeriod(f.freqHz);
+      const loud = clampInt(Math.round(f.vol / 15 * 3), 0, 3);   // 0..3 loudness -> NR32 code
+      const r0 = 0x80;                                           // NR30 DAC on
+      const r1 = i === 0 ? lenWave : 0;                          // NR31 length load
+      const r2 = WAVE_VOLUME_CODE[loud] << 5;                    // NR32 volume code
+      const r3 = period & 0xFF;                                  // NR33 period low
+      const r4 = trigger | lenEnable | ((period >> 8) & 0x07);   // NR34 trigger + period high
+      rows.push([r0, r1, r2, r3, r4]);
+    } else { // noise
+      const np = noiseParams(f.noiseTone);
+      const r0 = 0x00;                                           // unused slot (base 0xFF1F)
+      const r1 = i === 0 ? lenPulse : 0;                         // NR41 length load
+      const r2 = (prog.peakVol << 4) | prog.decayPace;          // NR42 envelope
+      const r3 = (np.shift << 4) | (f.width << 3) | np.divisor;  // NR43 poly counter
+      const r4 = trigger | lenEnable;                           // NR44 trigger
+      rows.push([r0, r1, r2, r3, r4]);
+    }
+  }
+  return { channelIndex: chIndex, frames: rows };
+}
+
+function exportC(project) {
+  const H = [];
+  H.push("/* gbsfx.h - generated by GB SFX Generator. Do not hand-edit. */");
+  H.push("#ifndef GBSFX_H");
+  H.push("#define GBSFX_H");
+  H.push("#include <stdint.h>");
+  H.push("");
+  H.push("/* Call gbsfx_init() once (enables the APU), gbsfx_play(id) to start an");
+  H.push("   effect, and gbsfx_update() exactly once per frame (e.g. after wait_vbl). */");
+  H.push("void gbsfx_init(void);");
+  H.push("void gbsfx_play(uint8_t id);");
+  H.push("void gbsfx_update(void);");
+  H.push("");
+  project.effects.forEach((e, i) => H.push("#define SFX_" + cId(e.name).toUpperCase() + " " + i));
+  H.push("#define SFX_COUNT " + project.effects.length);
+  H.push("");
+  H.push("#endif");
+
+  const C = [];
+  C.push("/* gbsfx.c - generated by GB SFX Generator. Do not hand-edit. */");
+  C.push('#include "gbsfx.h"');
+  C.push("");
+  C.push("/* One byte program per effect (see the header of gb-sfx-generator.html");
+  C.push("   for the opcode format). */");
+  project.effects.forEach((e, i) => {
+    const bytes = buildEffectProgram(e);
+    C.push("static const uint8_t sfx_data_" + i + "[] = {");
+    C.push("  " + wrapBytes(bytes, 12));
+    C.push("};");
+  });
+  C.push("");
+  C.push("static const uint8_t *const sfx_table[SFX_COUNT] = {");
+  C.push("  " + project.effects.map((e, i) => "sfx_data_" + i).join(", "));
+  C.push("};");
+  C.push("");
+  C.push("/* First of the five audio registers written per channel. 0xFF15 and");
+  C.push("   0xFF1F are unused NR slots, so a uniform 5-byte write is harmless. */");
+  C.push("static uint8_t *const sfx_base[4] = {");
+  C.push("  (uint8_t *)0xFF10, (uint8_t *)0xFF15, (uint8_t *)0xFF1A, (uint8_t *)0xFF1F");
+  C.push("};");
+  C.push("");
+  C.push("static const uint8_t *sfx_ptr;");
+  C.push("static uint8_t sfx_active = 0;");
+  C.push("");
+  C.push("void gbsfx_init(void) {");
+  C.push("  *(uint8_t *)0xFF26 = 0x80; /* NR52: sound on            */");
+  C.push("  *(uint8_t *)0xFF24 = 0x77; /* NR50: full volume L/R     */");
+  C.push("  *(uint8_t *)0xFF25 = 0xFF; /* NR51: all channels L+R    */");
+  C.push("}");
+  C.push("");
+  C.push("void gbsfx_play(uint8_t id) {");
+  C.push("  if (id >= SFX_COUNT) return;");
+  C.push("  sfx_ptr = sfx_table[id];");
+  C.push("  sfx_active = 1;");
+  C.push("}");
+  C.push("");
+  C.push("void gbsfx_update(void) {");
+  C.push("  uint8_t cmd, ch, k;");
+  C.push("  uint8_t *addr;");
+  C.push("  if (!sfx_active) return;");
+  C.push("  for (;;) {");
+  C.push("    cmd = *sfx_ptr++;");
+  C.push("    if (cmd == 0x00) { sfx_active = 0; return; } /* end of effect */");
+  C.push("    if (cmd == 0xFF) { return; }                 /* end of frame  */");
+  C.push("    if (cmd == 0x01) {");
+  C.push("      ch = *sfx_ptr++;");
+  C.push("      addr = sfx_base[ch];");
+  C.push("      for (k = 0; k < 5; k++) addr[k] = *sfx_ptr++;");
+  C.push("    } else if (cmd == 0x02) {");
+  C.push("      addr = (uint8_t *)0xFF30;                   /* wave RAM */");
+  C.push("      for (k = 0; k < 16; k++) addr[k] = *sfx_ptr++;");
+  C.push("    }");
+  C.push("  }");
+  C.push("}");
+
+  return { h: H.join("\n") + "\n", c: C.join("\n") + "\n" };
+}
+
+// Sanitize an effect name into a valid C identifier.
+function cId(name) {
+  let s = String(name).replace(/[^A-Za-z0-9_]/g, "_");
+  if (/^[0-9]/.test(s)) s = "_" + s;
+  return s || "sfx";
+}
+function wrapBytes(bytes, perLine) {
+  const out = [];
+  for (let i = 0; i < bytes.length; i += perLine) {
+    out.push(bytes.slice(i, i + perLine).map(b => "0x" + b.toString(16).padStart(2, "0").toUpperCase()).join(", "));
+  }
+  return out.join(",\n  ");
+}
+
+/* ============================================================
+   Import / export plumbing
+   ============================================================ */
+
+function exportJson(project) {
+  return JSON.stringify(project, null, 2);
+}
+
+function importJson(text) {
+  const data = JSON.parse(text);
+  if (!data || !Array.isArray(data.effects)) throw new Error("Not a .gbsfx.json file (no effects array).");
+  // Backfill anything an older/partial file might miss.
+  data.formatVersion = data.formatVersion || FORMAT_VERSION;
+  data.nextId = data.nextId || 1;
+  data.effects.forEach(e => {
+    e.tickHz = e.tickHz || DEFAULT_TICK_HZ;
+    (e.layers || []).forEach(l => { l.macro = makeMacro(l.macro); if (l.mode == null) l.mode = "macro"; if (l.gain == null) l.gain = 1; });
+  });
+  return data;
+}
+
+function currentBaseName() {
+  const e = selectedEffect();
+  return cId((e && e.name) || state.project.name || "sfx");
+}
+
+function doExport() {
+  openModal("Export", (modal) => {
+    const info = el("p", "hint", "The .gbsfx.json is the editable source of truth. WAV renders the preview. C emits gbsfx.h / gbsfx.c for GBDK-2020.");
+    modal.appendChild(info);
+
+    const row = el("div", "row");
+    const jsonBtn = el("button", "primary", "Download .gbsfx.json");
+    jsonBtn.addEventListener("click", () => downloadText(cId(state.project.name) + ".gbsfx.json", exportJson(state.project), "application/json"));
+
+    const wavBtn = el("button", null, "Download .wav (selected)");
+    wavBtn.addEventListener("click", async () => {
+      const e = selectedEffect(); if (!e) return;
+      wavBtn.textContent = "Rendering...";
+      try {
+        const blob = await renderWav(e);
+        downloadBlob(currentBaseName() + ".wav", blob);
+      } catch (err) { alert("WAV render failed: " + err.message); }
+      wavBtn.textContent = "Download .wav (selected)";
+    });
+
+    const cBtn = el("button", null, "Show gbsfx.c / .h");
+    cBtn.addEventListener("click", () => showCExport());
+    row.append(jsonBtn, wavBtn, cBtn);
+    modal.appendChild(row);
+  });
+}
+
+function showCExport() {
+  const { h, c } = exportC(state.project);
+  openModal("GBDK C export", (modal) => {
+    modal.appendChild(el("p", "hint", "Two files for your GBDK-2020 project. Bytes are one frame program per effect, stepped by the included player."));
+    [["gbsfx.h", h], ["gbsfx.c", c]].forEach(([fname, text]) => {
+      modal.appendChild(el("h2", null, fname));
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.readOnly = true;
+      modal.appendChild(ta);
+      const row = el("div", "row");
+      const dl = el("button", null, "Download " + fname);
+      dl.addEventListener("click", () => downloadText(fname, text, "text/plain"));
+      const cp = el("button", "tiny", "Copy");
+      cp.addEventListener("click", async () => { cp.textContent = (await copyText(text)) ? "Copied" : "Copy failed"; });
+      row.append(dl, cp);
+      modal.appendChild(row);
+      modal.appendChild(spacer(8));
+    });
+  });
+}
+
+function doImport() {
+  openModal("Import .gbsfx.json", (modal) => {
+    modal.appendChild(el("p", "hint", "Paste a .gbsfx.json below, or choose a file."));
+    const file = document.createElement("input");
+    file.type = "file"; file.accept = ".json,application/json";
+    file.addEventListener("change", () => {
+      const f = file.files[0]; if (!f) return;
+      const r = new FileReader();
+      r.onload = () => { ta.value = r.result; };
+      r.readAsText(f);
+    });
+    modal.appendChild(file);
+    const ta = document.createElement("textarea");
+    modal.appendChild(ta);
+    const go = el("button", "primary", "Import");
+    go.addEventListener("click", () => {
+      try {
+        state.project = importJson(ta.value);
+        state.selectedEffectId = state.project.effects[0] ? state.project.effects[0].id : null;
+        closeModal(); render();
+      } catch (err) { alert("Import failed: " + err.message); }
+    });
+    modal.appendChild(el("div", "row")).appendChild(go);
+  });
+}
+
+/* ============================================================
+   Rendering
+   ============================================================ */
+
+const leftCol = document.getElementById("left-col");
+const rightCol = document.getElementById("right-col");
+
+function render() {
+  renderLeft();
+  renderRight();
+}
+
+function renderLeft() {
+  leftCol.innerHTML = "";
+  leftCol.appendChild(presetsCard());
+  leftCol.appendChild(transportCard());
+  leftCol.appendChild(libraryCard());
+}
+
+function presetsCard() {
+  const card = el("div", "card");
+  card.appendChild(el("h2", null, "New from preset"));
+  card.appendChild(el("p", "hint", "Creates an effect and drops you into the sliders."));
+  const grid = el("div", "preset-grid");
+  CATEGORY_LIST.forEach(cat => {
+    const b = el("button", "preset-btn");
+    b.appendChild(document.createTextNode(cat.label));
+    b.appendChild(el("small", null, cat.hint));
+    b.addEventListener("click", () => {
+      const e = makeEffect(state.project, cat.key);
+      regenerateEffect(e);
+      state.project.effects.push(e);
+      state.selectedEffectId = e.id;
+      render();
+      audio.play(e);
+    });
+    grid.appendChild(b);
+  });
+  card.appendChild(grid);
+  return card;
+}
+
+function transportCard() {
+  const e = selectedEffect();
+  const card = el("div", "card");
+  card.appendChild(el("h2", null, "Transport"));
+  const t = el("div", "transport");
+  const play = el("button", "primary btn-play", "Play");
+  play.disabled = !e;
+  play.addEventListener("click", () => e && audio.play(e));
+  const stop = el("button", null, "Stop");
+  stop.addEventListener("click", () => audio.stop());
+
+  const rnd = el("button", null, "Randomize");
+  rnd.disabled = !e;
+  rnd.addEventListener("click", () => {
+    e.seed = (Math.random() * 0xffffffff) >>> 0;
+    regenerateEffect(e); render(); audio.play(e);
+  });
+  const mut = el("button", null, "Mutate");
+  mut.disabled = !e;
+  mut.addEventListener("click", () => {
+    const rng = makeRng((e.seed = (e.seed + 0x9e3779b9) >>> 0));
+    e.layers.forEach(l => { if (l.mode === "macro") mutateMacro(l.macro, rng, 0.2); });
+    render(); audio.play(e);
+  });
+  t.append(play, stop, rnd, mut);
+  card.appendChild(t);
+
+  if (e) {
+    const seedRow = el("div", "seed-row");
+    seedRow.style.marginTop = "10px";
+    seedRow.appendChild(el("span", "hint", "Seed"));
+    const seedIn = numberInput(e.seed, 0, 0xffffffff);
+    seedIn.addEventListener("change", () => {
+      e.seed = clampInt(seedIn.value, 0, 0xffffffff);
+      regenerateEffect(e); render(); audio.play(e);
+    });
+    seedRow.appendChild(seedIn);
+    card.appendChild(seedRow);
+  }
+  return card;
+}
+
+function libraryCard() {
+  const card = el("div", "card");
+  card.appendChild(el("h2", null, "Library"));
+  const list = el("div", "lib-list");
+  state.project.effects.forEach(e => {
+    const item = el("div", "lib-item" + (e.id === state.selectedEffectId ? " active" : ""));
+    item.appendChild(el("span", "lib-name", e.name));
+    const chans = e.layers.map(l => CHANNELS[l.channel].label.replace("Pulse ", "P")).join("+");
+    item.appendChild(el("span", "lib-chan", chans));
+    item.addEventListener("click", () => { state.selectedEffectId = e.id; render(); });
+    list.appendChild(item);
+  });
+  card.appendChild(list);
+
+  const row = el("div", "row");
+  row.style.marginTop = "10px";
+  const dup = el("button", "tiny", "Duplicate");
+  dup.disabled = !selectedEffect();
+  dup.addEventListener("click", () => {
+    const e = selectedEffect(); if (!e) return;
+    const copy = JSON.parse(JSON.stringify(e));
+    copy.id = state.project.nextId++;
+    copy.name = e.name + "_copy";
+    copy.layers.forEach(l => l.id = state.project.nextId++);
+    state.project.effects.push(copy);
+    state.selectedEffectId = copy.id; render();
+  });
+  const del = el("button", "tiny danger", "Delete");
+  del.disabled = state.project.effects.length <= 1;
+  del.addEventListener("click", () => {
+    const idx = state.project.effects.findIndex(x => x.id === state.selectedEffectId);
+    if (idx < 0) return;
+    state.project.effects.splice(idx, 1);
+    state.selectedEffectId = state.project.effects[Math.max(0, idx - 1)].id;
+    render();
+  });
+  row.append(dup, del);
+  card.appendChild(row);
+  return card;
+}
+
+function renderRight() {
+  rightCol.innerHTML = "";
+  const e = selectedEffect();
+  if (!e) { rightCol.appendChild(el("div", "note-empty", "No effect selected. Pick a preset to start.")); return; }
+
+  const card = el("div", "card");
+
+  // Name + advanced toggle.
+  const head = el("div", "row");
+  const nameField = el("div", "field");
+  nameField.style.flex = "1";
+  nameField.appendChild(label("Effect name"));
+  const nameIn = inputText(e.name);
+  nameIn.style.width = "100%";
+  nameIn.addEventListener("change", () => { e.name = nameIn.value.trim() || e.name; render(); });
+  nameField.appendChild(nameIn);
+  head.appendChild(nameField);
+  head.appendChild(toggle("Advanced", state.advanced, v => { state.advanced = v; renderRight(); }));
+  card.appendChild(head);
+  card.appendChild(spacer(12));
+
+  e.layers.forEach(layer => card.appendChild(layerCard(e, layer)));
+
+  // Add-layer control (multi-channel effects).
+  const addRow = el("div", "row");
+  const addSel = selectFrom(CHANNEL_ORDER.map(c => ({ value: c, label: CHANNELS[c].label })), "noise", () => {});
+  const addBtn = el("button", "tiny", "Add layer");
+  addBtn.addEventListener("click", () => {
+    const l = makeLayer(state.project, "custom");
+    l.channel = addSel.value;
+    l.macro = categoryMacro(l.channel === "noise" ? "hit" : "blip");
+    e.layers.push(l); renderRight();
+  });
+  addRow.append(el("span", "hint", "Layer a channel:"), addSel, addBtn);
+  card.appendChild(addRow);
+
+  rightCol.appendChild(card);
+}
+
+/* ---- one layer's card: visualization + macro sliders + advanced ---- */
+
+function layerCard(effect, layer) {
+  const ch = CHANNELS[layer.channel];
+  const card = el("div", "layer-card");
+
+  const head = el("div", "layer-head");
+  const dot = el("span", "dot"); dot.style.background = ch.dot;
+  head.appendChild(dot);
+  head.appendChild(el("span", "layer-title", ch.label + "  (" + ch.role + ")"));
+  if (effect.layers.length > 1) {
+    const rm = el("button", "tiny danger", "remove");
+    rm.addEventListener("click", () => {
+      effect.layers = effect.layers.filter(l => l.id !== layer.id);
+      renderRight();
+    });
+    head.appendChild(rm);
+  }
+  card.appendChild(head);
+
+  // Visualization of the compiled program.
+  const prog = compileLayer(effect, layer);
+  const vizWrap = el("div", "viz-wrap");
+  const canvas = document.createElement("canvas");
+  canvas.width = 520; canvas.height = 160;
+  vizWrap.appendChild(canvas);
+  card.appendChild(vizWrap);
+  drawViz(canvas, prog, layer);
+  if (layer.mode === "manual") attachPaint(canvas, effect, layer);
+
+  const legend = el("div", "viz-legend");
+  legend.innerHTML = '<span><span class="sw" style="background:var(--gb-1)"></span>Pitch</span>' +
+                     '<span><span class="sw" style="background:var(--accent)"></span>Volume</span>' +
+                     (layer.mode === "manual" ? '<span style="color:var(--accent)">drag to edit frames</span>' : '');
+  card.appendChild(legend);
+
+  // Core macro sliders (guided view).
+  const m = layer.macro;
+  const disabled = layer.mode === "manual";
+  const box = el("div");
+  if (disabled) {
+    const note = el("p", "hint", "This layer is in manual (hand-edited) mode. Sliders are paused.");
+    box.appendChild(note);
+    const back = el("button", "tiny", "Back to macro");
+    back.addEventListener("click", () => { if (confirm("Discard hand-edited frames and return to sliders?")) { layer.mode = "macro"; layer.steps = null; renderRight(); } });
+    box.appendChild(back);
+  } else {
+    box.appendChild(sliderRow("Length", m.lengthMs, 40, 2000, 10, v => m.lengthMs = v, effect, v => Math.round(v) + " ms"));
+    if (layer.channel === "noise") {
+      box.appendChild(sliderRow("Pitch", m.noiseTone, 0, 15, 0.1, v => m.noiseTone = v, effect, v => v.toFixed(1)));
+    } else {
+      box.appendChild(sliderRow("Pitch", m.baseNote, 36, 108, 1, v => m.baseNote = v, effect, v => noteName(v)));
+    }
+    box.appendChild(sliderRow("Bend", m.bend, -1, 1, 0.02, v => m.bend = v, effect, v => (v > 0 ? "up " : v < 0 ? "down " : "") + Math.abs(v).toFixed(2)));
+    box.appendChild(sliderRow("Punch", m.punch, 0, 1, 0.02, v => m.punch = v, effect, v => v.toFixed(2)));
+    box.appendChild(sliderRow("Decay", m.decay, 0, 1, 0.02, v => m.decay = v, effect, v => v.toFixed(2)));
+    if (layer.channel === "wave") {
+      box.appendChild(fieldRow("Tone", selectFrom(WAVE_PRESET_NAMES, layer.wavePreset, v => { layer.wavePreset = v; renderRight(); })));
+    } else if (layer.channel === "noise") {
+      box.appendChild(fieldRow("Tone", selectFrom([{ value: 1, label: "15-bit hiss" }, { value: 0, label: "7-bit metallic" }], m.width, v => { m.width = Number(v); renderRight(); })));
+    } else {
+      box.appendChild(sliderRow("Tone", m.duty, 0, 3, 1, v => m.duty = Math.round(v), effect, v => DUTY_LABELS[Math.round(v)]));
+    }
+  }
+  card.appendChild(box);
+
+  if (state.advanced) card.appendChild(advancedPanel(effect, layer, prog));
+  return card;
+}
+
+// A labeled slider that re-synths + redraws on input. `fmt` renders the readout.
+function sliderRow(name, value, min, max, step, setter, effect, fmt) {
+  const row = el("div", "slider-row");
+  row.appendChild(label(name));
+  const input = document.createElement("input");
+  input.type = "range"; input.min = min; input.max = max; input.step = step; input.value = value;
+  const val = el("span", "val", fmt ? fmt(value) : String(value));
+  input.addEventListener("input", () => {
+    const v = Number(input.value);
+    setter(v);
+    val.textContent = fmt ? fmt(v) : String(v);
+    // Redraw just this layer's canvas without a full rebuild (keeps drag smooth).
+    redrawLayerCanvas(effect, row.closest(".layer-card"));
+  });
+  input.addEventListener("change", () => { const e = effect; audio.play(e); });
+  row.append(input, val);
+  return row;
+}
+
+function fieldRow(name, control) {
+  const row = el("div", "slider-row");
+  row.appendChild(label(name));
+  const wrap = el("div"); wrap.style.gridColumn = "2 / 4";
+  control.style.width = "100%";
+  wrap.appendChild(control);
+  row.appendChild(wrap);
+  return row;
+}
+
+// Find the layer that owns a card element and redraw its canvas from scratch.
+function redrawLayerCanvas(effect, cardEl) {
+  const canvas = cardEl.querySelector("canvas");
+  if (!canvas) return;
+  // Recover the layer by matching the canvas position among cards.
+  const cards = Array.from(rightCol.querySelectorAll(".layer-card"));
+  const idx = cards.indexOf(cardEl);
+  const layer = effect.layers[idx];
+  if (!layer) return;
+  drawViz(canvas, compileLayer(effect, layer), layer);
+}
+
+/* ---- advanced drawer: extra macros, register inspector, manual editing ---- */
+
+function advancedPanel(effect, layer, prog) {
+  const m = layer.macro;
+  const adv = el("div", "adv");
+  adv.appendChild(el("h2", null, "Advanced"));
+
+  if (layer.mode !== "manual") {
+    const grid = el("div", "adv-grid");
+    grid.appendChild(sliderRow("Sustain", m.sustain, 0, 1, 0.02, v => m.sustain = v, effect, v => v.toFixed(2)));
+    grid.appendChild(sliderRow("Bend amt", m.bendAmount, 0, 1, 0.02, v => m.bendAmount = v, effect, v => v.toFixed(2)));
+    grid.appendChild(sliderRow("Jump", m.jump, -24, 24, 1, v => m.jump = Math.round(v), effect, v => (v > 0 ? "+" : "") + Math.round(v) + " st"));
+    grid.appendChild(sliderRow("Jump at", m.jumpAt, 0, 1, 0.02, v => m.jumpAt = v, effect, v => v.toFixed(2)));
+    grid.appendChild(sliderRow("Vib rate", m.vibratoRate, 0, 1, 0.02, v => m.vibratoRate = v, effect, v => v.toFixed(2)));
+    grid.appendChild(sliderRow("Vib depth", m.vibratoDepth, 0, 1, 0.02, v => m.vibratoDepth = v, effect, v => v.toFixed(2)));
+    adv.appendChild(grid);
+
+    const tickRow = el("div", "row");
+    tickRow.appendChild(el("span", "hint", "Tick rate (Hz)"));
+    const tickIn = numberInput(effect.tickHz, 15, 120);
+    tickIn.addEventListener("change", () => { effect.tickHz = clampInt(tickIn.value, 15, 120); renderRight(); });
+    tickRow.append(tickIn, el("span", "hint", "frames per second the effect steps at"));
+    adv.appendChild(tickRow);
+    adv.appendChild(spacer(8));
+
+    const edit = el("button", "tiny", "Edit frames by hand");
+    edit.addEventListener("click", () => { freezeToManual(effect, layer); renderRight(); });
+    adv.appendChild(edit);
+  }
+
+  // Sweep-channel caveat: falling/rising pitch is only truly hardware-swept on
+  // Pulse 1. Everything here drives pitch in software per frame, so it works on
+  // any channel, but flag when a strong bend sits off Pulse 1.
+  if (layer.channel !== "pulse1" && layer.channel !== "noise" && Math.abs(m.bend) > 0.4) {
+    adv.appendChild(el("p", "warn", "Note: strong pitch bends are cheapest on Pulse 1 (the only channel with a hardware sweep). This tool drives the bend in software, which is fine but uses a register write each frame."));
+  }
+
+  // Register inspector: first + middle + last frame.
+  adv.appendChild(el("h2", null, "Registers (NRx0-NRx4)"));
+  const regs = layerToRegisters(effect, layer);
+  const scroll = el("div", "reg-scroll");
+  const table = el("table", "reg-table");
+  const thead = el("tr");
+  ["frame", "NRx0", "NRx1", "NRx2", "NRx3", "NRx4"].forEach(h => thead.appendChild(el("th", null, h)));
+  table.appendChild(thead);
+  const show = pickFrameIndices(regs.frames.length);
+  show.forEach(i => {
+    const tr = el("tr");
+    tr.appendChild(el("td", null, String(i)));
+    regs.frames[i].forEach(b => tr.appendChild(el("td", null, "$" + b.toString(16).padStart(2, "0").toUpperCase())));
+    table.appendChild(tr);
+  });
+  scroll.appendChild(table);
+  adv.appendChild(scroll);
+  return adv;
+}
+
+function pickFrameIndices(n) {
+  if (n <= 8) return Array.from({ length: n }, (_, i) => i);
+  const set = new Set([0, 1, Math.floor(n / 4), Math.floor(n / 2), Math.floor(3 * n / 4), n - 2, n - 1]);
+  return Array.from(set).sort((a, b) => a - b);
+}
+
+/* ---- visualization ---- */
+
+function drawViz(canvas, prog, layer) {
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = "#081820"; ctx.fillRect(0, 0, W, H);
+
+  const frames = prog.frames;
+  if (!frames.length) return;
+  const pitchLane = { y: 6, h: H * 0.5 - 10 };
+  const volLane = { y: H * 0.5 + 6, h: H * 0.5 - 12 };
+  const bw = W / frames.length;
+
+  // Midline separator.
+  ctx.strokeStyle = "#18301f"; ctx.beginPath();
+  ctx.moveTo(0, H * 0.5); ctx.lineTo(W, H * 0.5); ctx.stroke();
+
+  // Pitch range for scaling.
+  let pmin = Infinity, pmax = -Infinity;
+  frames.forEach(f => {
+    const p = prog.channel === "noise" ? f.noiseTone : noteFromFreq(f.freqHz);
+    if (p < pmin) pmin = p; if (p > pmax) pmax = p;
+  });
+  if (pmax - pmin < 1) { pmax += 1; pmin -= 1; }
+
+  // Pitch bars (green).
+  ctx.fillStyle = "#88c070";
+  frames.forEach((f, i) => {
+    const p = prog.channel === "noise" ? f.noiseTone : noteFromFreq(f.freqHz);
+    const norm = (p - pmin) / (pmax - pmin);
+    const y = pitchLane.y + (1 - norm) * pitchLane.h;
+    ctx.fillRect(i * bw, y, Math.max(1, bw - 0.5), 3);
+  });
+
+  // Volume bars (accent).
+  ctx.fillStyle = "#b8f25a";
+  frames.forEach((f, i) => {
+    const norm = f.vol / 15;
+    const h = norm * volLane.h;
+    ctx.fillRect(i * bw, volLane.y + volLane.h - h, Math.max(1, bw - 0.5), h);
+  });
+}
+
+/* ---- manual frame painting (Option C / draw-the-shape) ---- */
+
+function attachPaint(canvas, effect, layer) {
+  const paint = (ev) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = (ev.clientX - rect.left) / rect.width;
+    const y = (ev.clientY - rect.top) / rect.height;
+    const n = layer.steps.length;
+    const i = clampInt(Math.floor(x * n), 0, n - 1);
+    const step = layer.steps[i];
+    if (y < 0.5) {
+      // Top lane sets pitch.
+      const norm = 1 - clamp01(y / 0.5);
+      if (layer.channel === "noise") step.noiseTone = clampf(norm * 15, 0, 15);
+      else step.note = Math.round(clampf(36 + norm * 60, 24, 108));
+    } else {
+      // Bottom lane sets volume.
+      const norm = 1 - clamp01((y - 0.5) / 0.5);
+      step.vol = clampInt(Math.round(norm * 15), 0, 15);
+    }
+    drawViz(canvas, compileLayer(effect, layer), layer);
+  };
+  canvas.style.cursor = "crosshair";
+  canvas.addEventListener("pointerdown", (ev) => { canvas.setPointerCapture(ev.pointerId); state.paintLane = true; paint(ev); });
+  canvas.addEventListener("pointermove", (ev) => { if (state.paintLane) paint(ev); });
+  canvas.addEventListener("pointerup", () => { state.paintLane = null; audio.play(effect); });
+}
+
+/* ---- small music helpers for readouts ---- */
+
+const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+function noteName(midi) {
+  const n = Math.round(midi);
+  return NOTE_NAMES[((n % 12) + 12) % 12] + (Math.floor(n / 12) - 1);
+}
+function noteFromFreq(hz) { return 69 + 12 * Math.log2(hz / 440); }
+
+/* ============================================================
+   Wire up top bar + boot
+   ============================================================ */
+
+document.getElementById("btn-new").addEventListener("click", () => {
+  if (!confirm("Start a new, empty SFX bank? Unsaved effects will be lost.")) return;
+  state.project = makeDefaultProject();
+  state.selectedEffectId = state.project.effects[0].id;
+  render();
+});
+document.getElementById("btn-import").addEventListener("click", doImport);
+document.getElementById("btn-export").addEventListener("click", doExport);
+
+render();
+
+</script>
+</body>
+</html>

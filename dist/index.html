@@ -92,6 +92,14 @@
          pattern and seed; export settings as .gbmusic.json or a MIDI file.</p>
       <span class="go">Open generator &raquo;</span>
     </a>
+    <a class="tool-card" href="gb-sfx-generator.html">
+      <canvas id="preview-sfx" width="160" height="48"></canvas>
+      <h2>SFX Generator</h2>
+      <p>Design Game Boy sound effects from presets (coin, laser, jump,
+         explosion&hellip;), refine with semantic sliders, and export
+         .gbsfx.json, a WAV, or GBDK-2020 C with a tiny player.</p>
+      <span class="go">Open generator &raquo;</span>
+    </a>
     <a class="tool-card" href="gb-pixelizer.html">
       <canvas id="preview-pixelizer" width="160" height="48"></canvas>
       <h2>Pixelizer</h2>
@@ -192,6 +200,27 @@ const SHADES = ["#e0f8d0", "#88c070", "#346856", "#081820"];
   ctx.beginPath(); ctx.moveTo(86, 15); ctx.lineTo(94, 23); ctx.lineTo(86, 31); ctx.fill();
   for (let y = 0; y < 4; y++)
     for (let x = 0; x < 5; x++) cell(100 + x * 12, 2 + y * 11, (x + y) % 2 ? 1 : 2);
+})();
+
+/* SFX preview: a decaying envelope over a falling pitch sweep. */
+(() => {
+  const ctx = document.getElementById("preview-sfx").getContext("2d");
+  ctx.fillStyle = SHADES[3];
+  ctx.fillRect(0, 0, 160, 48);
+  // Falling pitch bars along the top (a "laser" sweep).
+  ctx.fillStyle = SHADES[1];
+  for (let i = 0; i < 30; i++) {
+    const x = 6 + i * 5;
+    const y = 6 + i * 0.7;
+    ctx.fillRect(x, y, 3, 2);
+  }
+  // Decaying volume bars along the bottom.
+  ctx.fillStyle = SHADES[0];
+  for (let i = 0; i < 30; i++) {
+    const x = 6 + i * 5;
+    const h = Math.max(2, 22 * Math.exp(-i * 0.12));
+    ctx.fillRect(x, 44 - h, 3, h);
+  }
 })();
 
 /* Music preview: a piano-roll-ish scatter of note bars. */
