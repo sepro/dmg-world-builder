@@ -152,7 +152,10 @@ function objHeight() { return state.project.meta.spriteMode === "8x16" ? 16 : 8;
 // Tiles per metasprite part: an 8x16 hardware sprite is two stacked 8x8 tiles.
 function tilesPerPart() { return state.project.meta.spriteMode === "8x16" ? 2 : 1; }
 
-function makeDefaultProject() {
+// seedDemo controls whether the slime placeholder is added. It's handy on first
+// page load so every panel has something to explore, but "New project" passes
+// false to start from a clean, empty project.
+function makeDefaultProject(seedDemo = true) {
   const project = {
     formatVersion: FORMAT_VERSION,
     meta: { name: "Untitled Sprites", target: "GBC, DMG-compatible", spriteMode: "8x8" },
@@ -171,7 +174,7 @@ function makeDefaultProject() {
   );
   const pal = project.palettes[0].id;
 
-  seedDemoContent(project, pal, id);
+  if (seedDemo) seedDemoContent(project, pal, id);
 
   project._displayPaletteId = pal;
   return project;
@@ -2318,7 +2321,7 @@ document.getElementById("sprite-mode").addEventListener("change", (e) => {
 });
 document.getElementById("btn-new").addEventListener("click", () => {
   if (!confirm("Start a new project? Unsaved changes are lost. Export first to keep them.")) return;
-  state.project = makeDefaultProject();
+  state.project = makeDefaultProject(false);   // empty: no demo placeholder
   syncSelectionsToProject();
   resetHistory();
   state.activePanel = "tiles";
