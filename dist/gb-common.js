@@ -149,3 +149,54 @@ async function copyText(text) {
     return ok;
   }
 }
+
+
+/* ---- Shared tool menu ---- */
+
+// One source of truth for the suite's navigation, grouped by what each tool is
+// for. Every page renders this identical menu, including a link to itself, so
+// the same markup works everywhere; the current page's link is marked active
+// for orientation rather than hidden. To add a tool, edit only this table.
+const TOOL_GROUPS = [
+  { label: "Pre-process", tools: [
+    { name: "Pixelizer", href: "gb-pixelizer.html" },
+    { name: "Reducer",   href: "gb-tile-reducer.html" },
+  ] },
+  { label: "Graphics", tools: [
+    { name: "World",   href: "gb-world-editor.html" },
+    { name: "Sprites", href: "gb-sprite-editor.html" },
+  ] },
+  { label: "Audio", tools: [
+    { name: "Music \u266a", href: "gb-music-generator.html" },
+    { name: "SFX \u266a",   href: "gb-sfx-generator.html" },
+  ] },
+];
+
+function buildToolMenu() {
+  const nav = el("nav", "tool-menu");
+  // Match on the file name so it works from any serving path (root or /dist).
+  const here = location.pathname.split("/").pop();
+  TOOL_GROUPS.forEach(group => {
+    const g = el("span", "tool-group");
+    g.appendChild(el("span", "tool-group-label", group.label));
+    group.tools.forEach(tool => {
+      const a = el("a", "nav-link", tool.name);
+      a.href = tool.href;
+      if (tool.href === here) a.classList.add("active");
+      g.appendChild(a);
+    });
+    nav.appendChild(g);
+  });
+  return nav;
+}
+
+// Swap any <nav class="tool-menu"> placeholder in the page for the real menu.
+function mountToolMenu() {
+  document.querySelectorAll("nav.tool-menu").forEach(ph => ph.replaceWith(buildToolMenu()));
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", mountToolMenu);
+} else {
+  mountToolMenu();
+}
