@@ -1,0 +1,13 @@
+{
+  "name": "gb-tools-screenshots",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Headless-browser capture of the README screenshots.",
+  "scripts": {
+    "capture": "node capture.js"
+  },
+  "dependencies": {
+    "@sparticuz/chromium": "^123.0.1",
+    "puppeteer-core": "^22.0.0"
+  }
+}

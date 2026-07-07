@@ -1,0 +1,14 @@
+# Normalize all text files to LF in the repo and working tree, so switching
+# between Linux and Windows never rewrites line endings.
+* text=auto eol=lf
+
+# Binary assets: never touch these.
+*.png binary
+*.gif binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.wav binary
+*.mid binary
+*.midi binary
+*.gb binary

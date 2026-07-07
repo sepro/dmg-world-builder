@@ -1,0 +1,14 @@
+# Node
+node_modules/
+package-lock.json
+
+# Python
+__pycache__/
+*.pyc
+
+# Build output from gbworld_to_c.py
+build/
+
+# OS cruft
+.DS_Store
+Thumbs.db

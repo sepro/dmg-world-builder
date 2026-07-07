@@ -8,17 +8,18 @@ The tools are static HTML with no build step. Serve the repo root over HTTP and 
 
 ```bash
 python3 -m http.server 8000
-# world editor:    http://localhost:8000/dist/gb-world-editor.html
-# sprite editor:   http://localhost:8000/dist/gb-sprite-editor.html
-# music generator: http://localhost:8000/dist/gb-music-generator.html
-# sfx generator:   http://localhost:8000/dist/gb-sfx-generator.html
-# tile reducer:    http://localhost:8000/dist/gb-tile-reducer.html
-# pixelizer:       http://localhost:8000/dist/gb-pixelizer.html
+# landing page:    http://localhost:8000/docs/
+# world editor:    http://localhost:8000/docs/gb-world-editor.html
+# sprite editor:   http://localhost:8000/docs/gb-sprite-editor.html
+# music generator: http://localhost:8000/docs/gb-music-generator.html
+# sfx generator:   http://localhost:8000/docs/gb-sfx-generator.html
+# tile reducer:    http://localhost:8000/docs/gb-tile-reducer.html
+# pixelizer:       http://localhost:8000/docs/gb-pixelizer.html
 ```
 
 Inside the devcontainer a static server starts automatically on port 5500 via VS Code Live Server.
 
-The pages live in `dist/` and share `dist/gb-theme.css` (the DMG design tokens + generic components: top bar, tabs, cards, controls, modal) and `dist/gb-common.js` (DOM/form helpers, the modal, and `downloadBlob`/`downloadText`/`copyText`). Each page keeps its own page-specific CSS inline and links these two shared files. Because they are linked (not inlined), the pages must be served over HTTP — opening the `.html` via `file://` will not load the shared assets.
+The pages live in `docs/` (served straight to GitHub Pages from that folder, with `docs/index.html` as the landing page) and share `docs/gb-theme.css` (the DMG design tokens + generic components: top bar, tabs, cards, controls, modal) and `docs/gb-common.js` (DOM/form helpers, the modal, and `downloadBlob`/`downloadText`/`copyText`). Each page keeps its own page-specific CSS inline and links these two shared files. Because they are linked (not inlined), the pages must be served over HTTP — opening the `.html` via `file://` will not load the shared assets.
 
 ## Tooling commands
 
@@ -32,9 +33,31 @@ python3 tools/gbworld_visualize.py project.gbworld.json -o world.png --scale 3
 
 `gbworld_to_c.py` needs only the Python standard library. `gbworld_visualize.py` needs Pillow (`pip install pillow`; preinstalled in the devcontainer).
 
+## Rebuilding the README screenshots
+
+The images in `docs/screenshots/` (embedded by `README.md`) are captured headlessly, so they can be regenerated whenever the UI changes. The capture scripts live in `tools/screenshots/`.
+
+`capture.js` drives a headless Chromium over the served pages: it screenshots the landing page and each tool at its default state, then loads the sample landscape into the pixelizer (via its file input) and clicks **Send to Reducer** to populate the reducer, so those two pages show real content instead of an empty upload panel. Chromium comes from the `@sparticuz/chromium` npm package (the binary ships inside the package tarball), so no separate browser download is needed — this is deliberate, because the Playwright/Chrome-for-Testing CDNs are blocked on restricted networks while the npm registry stays reachable. The sample image is produced deterministically (fixed seed) by `make_landscape.py`, so `docs/screenshots/landscape-sample.png` is reproducible.
+
+```bash
+# 1. Install the capture deps (Chromium + puppeteer-core). node_modules is gitignored.
+cd tools/screenshots && npm install && cd ../..
+
+# 2. Regenerate the deterministic sample landscape (needs numpy + Pillow).
+python3 tools/screenshots/make_landscape.py
+
+# 3. Serve the repo root so the pages can load their shared CSS/JS.
+python3 -m http.server 8000 &
+
+# 4. Capture every screenshot into docs/screenshots/.
+node tools/screenshots/capture.js
+```
+
+`capture.js` targets `http://localhost:8000` by default; set the `BASE` env var to point elsewhere (e.g. `BASE=http://localhost:5500`). Filenames written by the script (`landing.png`, `world-editor.png`, `sprite-editor.png`, `music-generator.png`, `sfx-generator.png`, `pixelizer.png`, `tile-reducer.png`) match what `README.md` references, so no manual renaming is needed. On a normal (unrestricted) network you can instead use Playwright directly if you prefer; the committed scripts use the bundled-Chromium approach so they work even where browser CDNs are blocked.
+
 ## Architecture
 
-### The single-file editor (`dist/gb-world-editor.html`)
+### The single-file editor (`docs/gb-world-editor.html`)
 
 The entire authoring tool lives in one ~2300-line HTML file: CSS at the top, static HTML in `<body>`, and all JavaScript in a `<script>` block starting around line 310. There is no build system, bundler, or framework — vanilla JS only.
 
@@ -58,7 +81,7 @@ The entire authoring tool lives in one ~2300-line HTML file: CSS at the top, sta
 
 Event/warp coordinates are in **metatile cells** (2× the block resolution per axis). Map size and `blockGrid` are in **blocks**.
 
-### The sprite editor (`dist/gb-sprite-editor.html`)
+### The sprite editor (`docs/gb-sprite-editor.html`)
 
 A single-file tool (same conventions as the world editor: `makeDefaultProject`, `const state`, full-rebuild `render()`, JSON-snapshot undo, stable integer ids) for authoring OBJs. Hierarchy: 8×8 tile → **metasprite** (parts = hardware sprites with pixel offsets, H/V flip, palette) → **animation** (frames = metasprite + duration in 60Hz ticks).
 
@@ -72,7 +95,7 @@ PNG export writes value 0 as transparent and 1..3 at the importer's bucket midpo
 
 Animation workflow: the composer onion-skins the neighboring animation frames (`animationNeighborsFor` + `rasterizeMetasprite`, prev orange / next cyan). "Draw on frame" (animations panel) rasterizes a frame's metasprite into a flat 64×64 bitmap for free-form painting, then `planBake` recompiles it: grid-alignment search (≤8×16 anchors) slices the drawing into part cells, matching each against existing tiles under all four flip combos (mirrored matches reuse the tile with flip flags — free on OBJs; new tiles dedupe the same way); the fewest-new-tiles alignment wins. `bakeDrawing` is copy-on-write: tiles are only ever added, and the metasprite is rebuilt in place only if no other frame references it. Orphaned tiles are swept by "Delete unused" in the Tiles tab.
 
-### The music generator (`dist/gb-music-generator.html`)
+### The music generator (`docs/gb-music-generator.html`)
 
 A deterministic chiptune improviser for the four GB channels (Pulse 1 = lead, Pulse 2 = harmony, Wave = bass, Noise = drums). Like the editor it is vanilla JS in one `<script>` block, links the two shared files, and holds all settings in a plain object (`state.settings`, `makeDefaultSettings`).
 
@@ -82,9 +105,9 @@ A deterministic chiptune improviser for the four GB channels (Pulse 1 = lead, Pu
 
 **Output**: piano-roll and simplified-staff views are drawn to `<canvas>` (`buildPianoRoll`, `buildStaff`), with a separate overlay canvas for the playhead. Export is `.gbmusic.json` (settings) and Standard MIDI File (`midiBytes`, format 1, drums on MIDI channel 10).
 
-See `docs/MUSIC_GENERATOR.md` for an end-user guide to every control.
+See `markdown/MUSIC_GENERATOR.md` for an end-user guide to every control.
 
-### The SFX generator (`dist/gb-sfx-generator.html`)
+### The SFX generator (`docs/gb-sfx-generator.html`)
 
 A single-file sound-effect designer for the four GB channels (vanilla JS, links the two shared files, full-rebuild `render()`, stable integer ids). The saved file is `.gbsfx.json` (`formatVersion 1`): a bank of `effects`, each with a `tickHz` (default 60) and a list of `layers`. A layer targets one `channel` (`pulse1`/`pulse2`/`wave`/`noise`) and is either `mode: "macro"` (generated) or `mode: "manual"` (hand-edited `steps`).
 
@@ -96,13 +119,13 @@ A single-file sound-effect designer for the four GB channels (vanilla JS, links 
 
 **C export** (`exportC` → `gbsfx.h`/`gbsfx.c`): `buildEffectProgram`/`layerToRegisters` emit a compact byte program per effect for a tiny frame-stepped VM — `0x01 ch r0..r4` (write a channel's registers), `0x02 <16 bytes>` (load wave RAM once), `0xFF` (end frame), `0x00` (end effect). Frame 0 triggers each channel with the hardware volume envelope + length counter set from the macro, so decays run on real hardware; later frames rewrite only pitch (no re-trigger), avoiding the 60 Hz buzz that per-frame volume writes would cause on a DMG. The runtime API is `gbsfx_init()` (once), `gbsfx_play(id)`, and `gbsfx_update()` (call once per frame). Playback is a close Web Audio approximation, not a cycle-accurate emulator (e.g. duty is treated as constant across an effect in the preview).
 
-### The tile reducer (`dist/gb-tile-reducer.html`)
+### The tile reducer (`docs/gb-tile-reducer.html`)
 
 A stateless single-file utility (no project file, no undo): load a PNG, quantize it to the four DMG shades (same luminance buckets as the editors' importers, alpha = lightest), slice into 8×8 tiles, and merge similar tiles so the image fits a tile budget. Mirrored tiles are deliberately NOT merged — DMG BG tiles can't be flipped, so counts stay honest for the target.
 
 Two clusterers (`greedyCluster`, `agglomerativeCluster`) share the cluster bookkeeping (per-pixel shade histogram, hybrid rep = frequency-weighted per-pixel mode, always 0..3, no gray averaging). Greedy: single pass over unique tiles ordered by frequency; a tile joins the closest cluster within the weighted-SSD threshold or seeds a new one; "target count" mode binary-searches the smallest threshold that fits. Agglomerative: merge the globally cheapest pair repeatedly via nearest-neighbor arrays; O(n²), falls back to greedy above `AGGLO_MAX` (4096) unique tiles. User options in `state`: `repMode` (hybrid synthesized / most-used member / best-fit member), `freqWeight` (Ward factor n1·n2/(n1+n2) so frequent tiles resist merging), `edgeWeight` (border pixels ×2, normalized so thresholds stay comparable), and `refinePasses` (k-means-style reassignment, never grows the cluster count). The reduced PNG downloads at 1× in either bundled palette; both quantize back to the same values, so the file re-imports losslessly into the world/sprite editors.
 
-### The pixelizer (`dist/gb-pixelizer.html`)
+### The pixelizer (`docs/gb-pixelizer.html`)
 
 A stateless single-file utility that turns arbitrary images into small 2-bit pixel art. Pipeline: tone map (optional 1–99 percentile auto-levels, then brightness/contrast/gamma) → downscale → quantize to the four shades, with the order of the last two steps selectable (`state.order`; quantize-first is the default and scales in shade space, keeping hard 2-bit edges). Downscalers (`scaleArray` reducers, all operating per output-pixel source block so they work on luminance or shades alike): k-centroid (1D k-means per block, keep the dominant cluster's centroid — the pixel-art community standard), dominant value (block mode), box average, nearest sample. Quantization uses three adjustable shade boundaries (plus a "Balance shades" button: Otsu-style weighted 1D k-means over the histogram, thresholds at midpoints between the four cluster centers — robust to a dominant background brightness) and optional dithering: ordered Bayer 2×2/4×4/8×8 or Floyd–Steinberg, with a strength slider (dithering inflates unique-tile counts; the UI warns). The result shows a live unique-8×8-tile count against the 256 budget; the PNG downloads at 1× in either bundled palette and re-imports losslessly into the editors.
 
@@ -116,7 +139,7 @@ Follows the same connection-offset convention as the converter (positive offset 
 
 ### The JSON format (`.gbworld.json`)
 
-The JSON file is the single source of truth. The C should never be hand-edited — regenerate it whenever the JSON changes. See `docs/DEVELOPER_HANDOFF.md` for the full schema, generated C structures, and GBDK runtime integration snippets.
+The JSON file is the single source of truth. The C should never be hand-edited — regenerate it whenever the JSON changes. See `markdown/DEVELOPER_HANDOFF.md` for the full schema, generated C structures, and GBDK runtime integration snippets.
 
 ## Key constraints
 
