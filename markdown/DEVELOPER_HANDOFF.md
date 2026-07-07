@@ -30,7 +30,7 @@ downstream consumes that JSON.
 ### Running the tooling (inside the devcontainer)
 
 The container starts a static server automatically. Open
-`http://localhost:8000/dist/gb-world-editor.html`. Then:
+`http://localhost:8000/docs/gb-world-editor.html`. Then:
 
 ```bash
 # Generate C from an exported project

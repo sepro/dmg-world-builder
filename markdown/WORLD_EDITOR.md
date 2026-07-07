@@ -5,7 +5,7 @@ from a fixed hierarchy and exports a single `.gbworld.json` project file that th
 tooling turns into GBDK-2020 C or a stitched overview PNG.
 
 Open it by serving the repo root over HTTP and visiting
-<http://localhost:8000/dist/gb-world-editor.html> (see the main
+<http://localhost:8000/docs/gb-world-editor.html> (see the main
 [README](../README.md) for serving instructions).
 
 ## The coordinate hierarchy
