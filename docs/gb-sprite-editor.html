@@ -1366,10 +1366,10 @@ function exportTilesToPng() {
   }, "image/png");
 }
 
-// Render one metasprite to a PNG, trimmed to its painted bounding box.
+// Render one metasprite to a PNG, cropped to its parts' bounding box.
 function exportMetaspriteToPng(ms) {
   const trimmed = trimmedMetaspriteCanvas(ms);
-  if (!trimmed) { alert("This metasprite has no visible pixels."); return; }
+  if (!trimmed) { alert("This metasprite has no parts."); return; }
   const name = (ms.name || "metasprite").replace(/[^a-z0-9_-]+/gi, "_") + ".png";
   trimmed.canvas.toBlob(blob => {
     if (blob) downloadBlob(name, blob);
@@ -1377,43 +1377,38 @@ function exportMetaspriteToPng(ms) {
   }, "image/png");
 }
 
-// Render one metasprite to a canvas trimmed to its painted bounding box.
-// Returns { canvas, w, h } or null when the metasprite has no visible pixels.
+// Render one metasprite to a canvas cropped to its parts' bounding box.
+// Cropping to part cells (not painted pixels) keeps transparent padding that
+// is part of the sprite, so e.g. four 16x16 metasprites export as 64x16.
+// Returns { canvas, w, h } or null when the metasprite has no parts.
 function trimmedMetaspriteCanvas(ms) {
-  const full = document.createElement("canvas");
-  full.width = WORKSPACE; full.height = WORKSPACE;
-  const ctx = full.getContext("2d");
-  drawMetasprite(ctx, ms, 1);
+  if (ms.parts.length === 0) return null;
 
-  const data = ctx.getImageData(0, 0, WORKSPACE, WORKSPACE).data;
-  let minX = WORKSPACE, minY = WORKSPACE, maxX = -1, maxY = -1;
-  for (let y = 0; y < WORKSPACE; y++) {
-    for (let x = 0; x < WORKSPACE; x++) {
-      if (data[(y * WORKSPACE + x) * 4 + 3] > 0) {
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-      }
-    }
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const part of ms.parts) {
+    const partH = part.tiles.length * TILE_PX;  // 8 in 8x8 mode, 16 in 8x16
+    if (part.x < minX) minX = part.x;
+    if (part.y < minY) minY = part.y;
+    if (part.x + TILE_PX > maxX) maxX = part.x + TILE_PX;
+    if (part.y + partH > maxY) maxY = part.y + partH;
   }
-  if (maxX < 0) return null;
 
   const out = document.createElement("canvas");
-  out.width = maxX - minX + 1; out.height = maxY - minY + 1;
-  out.getContext("2d").drawImage(full, -minX, -minY);
+  out.width = maxX - minX; out.height = maxY - minY;
+  drawMetasprite(out.getContext("2d"), ms, 1, -minX, -minY);
   return { canvas: out, w: out.width, h: out.height };
 }
 
 // Export every metasprite into one PNG, laid out left to right and top-aligned,
-// each trimmed to its own bounding box, placed flush so the sheet re-imports cleanly.
+// each cropped to its parts' bounding box (transparent padding inside part
+// cells is kept), placed flush so the sheet re-imports cleanly.
 function exportAllMetaspritesToPng() {
   const metasprites = state.project.metasprites;
   if (metasprites.length === 0) { alert("There are no metasprites to export."); return; }
 
   const GAP = 0;  // no gap: sprites sit flush so the sheet re-imports cleanly
   const trimmed = metasprites.map(trimmedMetaspriteCanvas).filter(Boolean);
-  if (trimmed.length === 0) { alert("No metasprite has any visible pixels."); return; }
+  if (trimmed.length === 0) { alert("No metasprite has any parts."); return; }
 
   const sheetW = trimmed.reduce((sum, t) => sum + t.w, 0) + GAP * (trimmed.length - 1);
   const sheetH = trimmed.reduce((max, t) => Math.max(max, t.h), 0);
