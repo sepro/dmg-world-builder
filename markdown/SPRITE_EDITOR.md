@@ -26,6 +26,9 @@ hardware can actually show:
   every part losslessly.
 - **Pixel value 0 is always transparent** on sprites. The editor draws it as a
   checkerboard.
+- **DMG palette registers are modeled.** OBP0/OBP1 remap pixel values 1–3 to
+  any of the four shades (so a sprite *can* show the lightest shade), and each
+  part picks its register — see the Palettes panel below.
 - **Part order = OAM priority.** The first part in the list draws on top.
   *Raise* / *Lower* reorder parts.
 - Sprites support **per-object H/V flip** (unlike DMG background tiles), so the
@@ -40,6 +43,19 @@ The tab bar switches between four panels.
 DMG sprite palettes (value 0 is fixed as transparent; values 1–3 map to
 shades). One palette is the *editing* palette used to display tiles; each
 metasprite part also picks its own palette.
+
+**DMG registers (OBP0 / OBP1).** On DMG each hardware sprite uses one of two
+palette registers, and each register remaps pixel values 1–3 to any of the
+four shades (0 = lightest … 3 = darkest). Set both mappings here; the card
+shows the exact register byte the game writes to `0xFF48`/`0xFF49` (e.g.
+`0xE4`). Because value 0 is transparent regardless, a mapping like
+`1 → shade 0` lets a sprite show the lightest shade. Editing a mapping
+switches on the top-bar **DMG preview**, which renders every part through its
+register using the part's palette as the shade ramp — note OBP0 defaults to
+the identity mapping (1,2,3), which looks identical to the preview being off.
+**Use for all parts** points every part of every metasprite at that register
+in one click. Each part's register is set with the **DMG reg** field in the
+Metasprites panel (OAM bit 4 on hardware).
 
 ### Tiles
 
@@ -63,7 +79,7 @@ importer uses, so a sheet re-imports losslessly.
 A 64×64 composer canvas with a center crosshair. Click a part to select it,
 drag to move it (optionally with **Snap to 8px grid**). Per part: tile
 assignment (top/bottom in 8×16 mode) via the tile picker, H/V flip, palette,
-Raise/Lower (OAM priority), duplicate, delete. **Mirror H** flips the whole
+DMG register (OBP0/OBP1), Raise/Lower (OAM priority), duplicate, delete. **Mirror H** flips the whole
 metasprite horizontally in one click — parts swap sides and toggle their
 `hFlip` flag, which is free on hardware. **Onion skin** ghosts the neighboring
 animation frames (previous in orange, next in cyan) so poses line up.
@@ -90,6 +106,25 @@ No browser storage. **Export** downloads (or copies) the project as a
 `.gbsprite.json` (`formatVersion 1`); **Import** loads a file or pasted JSON.
 Importing a `.gbworld.json` world file is rejected — the two formats are
 deliberately separate.
+
+The DMG register data is stored in two places in the JSON:
+
+```json
+"dmg": { "obp0": [1, 2, 3], "obp1": [0, 2, 3] }
+```
+
+at the project level — each array is the shade (0 = lightest … 3 = darkest)
+for pixel values 1, 2, 3 in that order (value 0 isn't stored; it's always
+transparent). The register byte is `(map[2] << 6) | (map[1] << 4) |
+(map[0] << 2)`, so `[1, 2, 3]` → `0xE4`. And per metasprite part:
+
+```json
+{ "tiles": [5], "x": 24, "y": 24, "hFlip": false, "vFlip": false, "paletteId": 1, "obp": 0 }
+```
+
+where `obp` is `0` or `1` (OBP0/OBP1 — OAM attribute bit 4). Files saved
+before this feature load fine: import backfills the defaults above and `obp: 0`
+on every part.
 
 ## Key constraints
 

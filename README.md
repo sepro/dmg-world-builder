@@ -31,7 +31,8 @@ Author Game Boy OBJs from the hardware up: draw or import 8×8 tiles, arrange 8�
 8×16 hardware sprites into **metasprites** (with per-object H/V flip and OAM
 priority), and sequence metasprites into **animations** timed in 60 Hz ticks. It
 models the real OBJ rules — one global sprite size, value 0 always transparent,
-mirrored tiles reused for free — and its "draw on frame" workflow recompiles a
+the OBP0/OBP1 palette registers with a per-part register choice and live DMG
+preview, mirrored tiles reused for free — and its "draw on frame" workflow recompiles a
 free-hand drawing back into deduplicated tiles. Exports `.gbsprite.json` and PNG
 that round-trips losslessly. See the
 [Sprite Editor guide](markdown/SPRITE_EDITOR.md).
