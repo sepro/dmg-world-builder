@@ -174,19 +174,23 @@ const COLLISION_OPTIONS = ["walk", "solid"];
 // Event types live on a map at metatile (16px) resolution, which is the grid the
 // player actually moves on. Each carries a letter and an editor-only marker color.
 const EVENT_TYPES = {
+  spawn:   { label: "Spawn",   letter: "P", color: "#6ade8f" },
   warp:    { label: "Warp",    letter: "W", color: "#5ad6ff" },
   sign:    { label: "Sign",    letter: "S", color: "#ffd23f" },
   item:    { label: "Item",    letter: "I", color: "#ff9f45" },
   npc:     { label: "NPC",     letter: "N", color: "#e06ad6" },
   trigger: { label: "Trigger", letter: "T", color: "#e0563f" },
 };
-const EVENT_ORDER = ["warp", "sign", "item", "npc", "trigger"];
+const EVENT_ORDER = ["spawn", "warp", "sign", "item", "npc", "trigger"];
 const NPC_MOVEMENTS = ["static", "wander", "walk_up_down", "walk_left_right"];
+// Facing direction the player starts in at a spawn point.
+const FACINGS = ["down", "up", "left", "right"];
 
 // Build a fresh event with sensible per-type defaults.
 function makeEvent(type, x, y) {
   const e = { id: 0, type, x, y };   // id is filled in by the caller via genId()
-  if (type === "warp") { e.toMap = null; e.toX = 0; e.toY = 0; }
+  if (type === "spawn") { e.facing = "down"; e.isDefault = false; }
+  else if (type === "warp") { e.toMap = null; e.toX = 0; e.toY = 0; }
   else if (type === "sign") { e.text = ""; }
   else if (type === "item") { e.item = ""; e.qty = 1; e.flag = ""; }
   else if (type === "npc") { e.sprite = ""; e.movement = "static"; e.script = ""; }
@@ -1759,7 +1763,36 @@ function renderEventInspector(map) {
     card.appendChild(spacer(8));
   };
 
-  if (ev.type === "warp") {
+  if (ev.type === "spawn") {
+    const f = el("div", "field");
+    f.appendChild(label("Facing"));
+    f.appendChild(selectFrom(FACINGS, ev.facing || "down", v => { snapshot(); ev.facing = v; }));
+    card.appendChild(f);
+    card.appendChild(spacer(8));
+
+    // The default spawn is where a new game begins. Only one may hold it, so
+    // enabling it here clears the flag on every other spawn in the world.
+    const dflt = el("div", "field");
+    const cbLabel = document.createElement("label");
+    cbLabel.className = "checkbox";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!ev.isDefault;
+    cb.addEventListener("change", () => {
+      snapshot();
+      if (cb.checked) {
+        state.project.maps.forEach(m => (m.events || []).forEach(e => {
+          if (e.type === "spawn") e.isDefault = false;
+        }));
+      }
+      ev.isDefault = cb.checked;
+      render();
+    });
+    cbLabel.append(cb, document.createTextNode(" Default spawn (new game starts here)"));
+    dflt.appendChild(cbLabel);
+    card.appendChild(dflt);
+    card.appendChild(spacer(8));
+  } else if (ev.type === "warp") {
     const f = el("div", "field");
     f.appendChild(label("Destination map"));
     const sel = document.createElement("select");

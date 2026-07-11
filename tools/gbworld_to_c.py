@@ -76,8 +76,10 @@ def ident(name, fallback):
 
 
 # Fixed enum mappings that do not come from the project.
-EVENT_TYPE_VALUES = {"warp": 0, "sign": 1, "item": 2, "npc": 3, "trigger": 4}
+EVENT_TYPE_VALUES = {"warp": 0, "sign": 1, "item": 2, "npc": 3, "trigger": 4, "spawn": 5}
 NPC_MOVE_VALUES = {"static": 0, "wander": 1, "walk_up_down": 2, "walk_left_right": 3}
+# Spawn facing maps onto the DIR_* enum emitted in the header.
+FACING_DIR_VALUES = {"north": 0, "up": 0, "south": 1, "down": 1, "east": 2, "right": 2, "west": 3, "left": 3}
 COLLISION_VALUES = {"walk": 0, "solid": 1}
 DIRS = ["north", "south", "east", "west"]
 NO_BLOCK = 0xFF      # empty cell sentinel in a block grid
@@ -205,7 +207,7 @@ def generate_header(b, name):
         L.append("")
 
     # Event type + movement enums.
-    L.append("enum { EVENT_WARP = 0, EVENT_SIGN = 1, EVENT_ITEM = 2, EVENT_NPC = 3, EVENT_TRIGGER = 4 };")
+    L.append("enum { EVENT_WARP = 0, EVENT_SIGN = 1, EVENT_ITEM = 2, EVENT_NPC = 3, EVENT_TRIGGER = 4, EVENT_SPAWN = 5 };")
     L.append("enum { MOVE_STATIC = 0, MOVE_WANDER = 1, MOVE_WALK_UP_DOWN = 2, MOVE_WALK_LEFT_RIGHT = 3 };")
     L.append("enum { COLLISION_WALK = 0, COLLISION_SOLID = 1 };")
     L.append("#define DIR_NORTH 0\n#define DIR_SOUTH 1\n#define DIR_EAST 2\n#define DIR_WEST 3")
@@ -261,7 +263,7 @@ typedef struct {
 } Warp;
 
 typedef struct {
-    UINT8 type;          /* EVENT_SIGN / EVENT_ITEM / EVENT_NPC / EVENT_TRIGGER */
+    UINT8 type;          /* EVENT_SIGN / EVENT_ITEM / EVENT_NPC / EVENT_TRIGGER / EVENT_SPAWN */
     UINT8 x, y;          /* metatile coordinates */
     UINT8 p0, p1;        /* numeric params: item qty / npc movement, etc. */
     UINT16 s0, s1;       /* string-table indices (0xFFFF = none) */
@@ -292,7 +294,8 @@ typedef struct {
     L.append("   SIGN:    s0 = text")
     L.append("   ITEM:    s0 = item id, p0 = quantity, s1 = flag id")
     L.append("   NPC:     s0 = sprite id, p0 = MOVE_*, s1 = script id")
-    L.append("   TRIGGER: s0 = script id   */")
+    L.append("   TRIGGER: s0 = script id")
+    L.append("   SPAWN:   p0 = DIR_* facing, p1 = 1 if the default (new-game) spawn   */")
     L.append("")
     L.append("#endif /* " + guard + " */")
     return "\n".join(L) + "\n"
@@ -479,6 +482,9 @@ def generate_source(b, name, header_filename):
                     s1 = b.intern_string(e.get("script", ""))
                 elif t == "trigger":
                     s0 = b.intern_string(e.get("script", ""))
+                elif t == "spawn":
+                    p0 = FACING_DIR_VALUES.get(e.get("facing", "down"), 1)
+                    p1 = 1 if e.get("isDefault") else 0
                 L.append("  { %d, %d, %d, %d, %d, 0x%04X, 0x%04X }, /* %s */"
                          % (tv, e["x"], e["y"], p0, p1, s0, s1, t))
             L.append("};")
