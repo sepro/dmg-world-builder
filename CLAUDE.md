@@ -89,6 +89,7 @@ Hardware rules the editor models — keep these invariants when editing:
 - **OBJ size is global**: `meta.spriteMode` is `"8x8"` or `"8x16"` for the whole project (LCDC bit 2 can't mix sizes). In 8×16 mode a part has `tiles: [top, bottom]`; switching modes converts parts losslessly (`convertSpriteMode`).
 - **Pixel value 0 is always transparent** for sprites (rendered as a checker). PNG import maps alpha → 0, or, for opaque sheets, a user-chosen shade → 0 with the rest remapped to 1..3.
 - **Part order = OAM priority**: `parts[0]` draws on top; drawing iterates parts last-to-first.
+- **DMG OBP registers**: `project.dmg.obp0/obp1` map pixel values 1..3 to shades 0..3 (value 0 stays transparent, so a sprite *can* show the lightest shade); each part stores its register in `part.obp` (OAM bit 4). `obpByte` builds the 0xFF48/0xFF49 register byte; the top-bar "DMG preview" toggle routes all part drawing through `colorsForPart`, which remaps values into the part's palette used as a shade ramp. Import backfills `dmg` and `part.obp` on older files.
 - Sprites *do* support per-object H/V flip (unlike DMG BG tiles); `drawPart` swaps the two 8×8 halves on vertical flip in 8×16 mode.
 
 PNG export writes value 0 as transparent and 1..3 at the importer's bucket midpoints (`#aaaaaa`/`#555555`/`#000000`) so a tile sheet round-trips losslessly. The saved file is `.gbsprite.json` (settings-free full project, `formatVersion 1`); import rejects `.gbworld.json` files by detecting `tilesets`.

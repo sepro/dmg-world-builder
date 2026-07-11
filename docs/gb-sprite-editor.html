@@ -1,5 +1,6 @@
 <!--
   GB Sprite Editor - v1
+
   A browser-based authoring tool for Game Boy sprites (OBJs).
 
   Hierarchy: 8x8 tile (2bpp) -> metasprite (parts = hardware sprites with pixel
@@ -9,6 +10,10 @@
   - OBJ size is one global LCDC flag: every sprite in a game is either 8x8 or
     8x16, never mixed. The mode is therefore a project-level setting.
   - Pixel value 0 is always transparent in OBJ rendering (shown as a checker).
+  - On DMG the OBP0/OBP1 registers remap values 1..3 to any of the four shades
+    (so a sprite CAN show the lightest shade); each hardware sprite picks one
+    register via OAM bit 4. The project stores both mappings (project.dmg) and
+    each part stores its register (part.obp); "DMG preview" renders through it.
   - Each hardware sprite supports independent H/V flip (unlike BG tiles).
   - Lower OAM index draws on top; part order in a metasprite mirrors that.
 
@@ -110,6 +115,11 @@
         <option value="8x16">8&times;16</option>
       </select>
     </div>
+    <div class="field" style="flex-direction:row;align-items:center;gap:6px;">
+      <label style="margin:0;" title="Render sprites through the OBP0/OBP1 shade mappings, as DMG hardware would">DMG preview
+        <input type="checkbox" id="dmg-preview" style="vertical-align:middle;">
+      </label>
+    </div>
     <div class="spacer"></div>
     <nav class="tool-menu"></nav>
     <button id="btn-undo" title="Undo (Ctrl/Cmd+Z)">Undo</button>
@@ -158,6 +168,11 @@ function makeDefaultProject(seedDemo = true) {
     meta: { name: "Untitled Sprites", target: "GBC, DMG-compatible", spriteMode: "8x8" },
     nextId: 1,
     palettes: [],
+    // DMG OBP0/OBP1 registers as shade mappings: for pixel values 1..3, which
+    // of the four DMG shades (0 = lightest .. 3 = darkest) the hardware shows.
+    // Value 0 is always transparent for OBJs, so bits 0-1 of the register are
+    // ignored and only three entries are needed. Each part picks one register.
+    dmg: { obp0: [1, 2, 3], obp1: [0, 2, 3] },
     tiles: [],
     metasprites: [],
     animations: [],
@@ -222,7 +237,7 @@ function seedDemoContent(project, pal, id) {
 
   // Parts are TL, TR, BL, BR of the 16x16 slime, centered in the workspace.
   const part = (tileId, x, y) =>
-    ({ tiles: [tileId], x, y, hFlip: false, vFlip: false, paletteId: pal });
+    ({ tiles: [tileId], x, y, hFlip: false, vFlip: false, paletteId: pal, obp: 0 });
   const cx = (WORKSPACE - 16) / 2;
   const msIdle = {
     id: id(), name: "slime",
@@ -258,6 +273,7 @@ const state = {
   project: makeDefaultProject(),
   activePanel: "tiles",
   displayPaletteId: null,
+  dmgPreview: false,       // render parts through their OBP mapping (DMG look)
 
   selectedTileId: null,
   ink: 3,                  // current pixel value to paint (0..3; 0 = transparent)
@@ -370,6 +386,25 @@ const colorsForPalette = (id) => {
   const pal = paletteById(id);
   return pal ? pal.colors : ["#000000", "#000000", "#000000", "#000000"];
 };
+// DMG OBP registers. A mapping is [shade for value 1, value 2, value 3];
+// value 0 is always transparent so the register's low two bits are ignored.
+const OBP_NAMES = ["OBP0", "OBP1"];
+const obpMapping = (reg) => (reg === 1 ? state.project.dmg.obp1 : state.project.dmg.obp0);
+// The actual register byte to write to 0xFF48/0xFF49 on hardware.
+const obpByte = (map) => (map[2] << 6) | (map[1] << 4) | (map[0] << 2);
+const hex2 = (b) => "0x" + b.toString(16).toUpperCase().padStart(2, "0");
+
+// Colors a part draws with. In DMG preview the part's palette acts as the
+// shade ramp (index 0 = lightest .. 3 = darkest) and the part's OBP register
+// remaps pixel values 1..3 into that ramp, exactly as OBP0/OBP1 do on
+// hardware. Value 0 stays transparent either way (drawSpritePixels skips it).
+function colorsForPart(part) {
+  const ramp = colorsForPalette(part.paletteId);
+  if (!state.dmgPreview) return ramp;
+  const map = obpMapping(part.obp ?? 0);
+  return [ramp[0], ramp[map[0]], ramp[map[1]], ramp[map[2]]];
+}
+
 const tileById = (id) => state.project.tiles.find(t => t.id === id) || null;
 const metaspriteById = (id) => state.project.metasprites.find(m => m.id === id) || null;
 const animationById = (id) => state.project.animations.find(a => a.id === id) || null;
@@ -422,7 +457,7 @@ function drawSpritePixels(ctx, pixels, colors, scale, ox = 0, oy = 0, hFlip = fa
 // Draw one metasprite part (one hardware sprite). In 8x16 mode a vertical flip
 // also swaps the two 8x8 halves, exactly as the hardware does.
 function drawPart(ctx, part, scale, ox = 0, oy = 0) {
-  const colors = colorsForPalette(part.paletteId);
+  const colors = colorsForPart(part);
   const n = part.tiles.length;
   for (let i = 0; i < n; i++) {
     const tile = part.tiles[i] != null ? tileById(part.tiles[i]) : null;
@@ -664,7 +699,7 @@ function bakeDrawing() {
     tiles: part.slots.map(s => s == null ? null : (s.existing ?? idByKey.get(s.key))),
     x: part.x, y: part.y,
     hFlip: part.hFlip, vFlip: part.vFlip,
-    paletteId: pal,
+    paletteId: pal, obp: 0,
   }));
 
   const src = metaspriteById(frame.metaspriteId);
@@ -717,8 +752,9 @@ function renderPalettesPanel(root) {
   card.appendChild(el("h2", null, "Sprite palettes"));
   card.appendChild(el("p", "hint",
     "Value 0 is always transparent for sprites, so only values 1-3 are visible. " +
-    "On DMG a sprite picks OBP0 or OBP1; on GBC each hardware sprite picks one " +
-    "of eight OBJ palettes. Here every metasprite part picks one of these."));
+    "On GBC each hardware sprite picks one of eight OBJ palettes; here every " +
+    "metasprite part picks one of these. On DMG the part instead picks OBP0 or " +
+    "OBP1 (below), which remap values 1-3 into this palette's four shades."));
 
   state.project.palettes.forEach(pal => {
     const row = el("div", "row");
@@ -787,6 +823,84 @@ function renderPalettesPanel(root) {
   card.appendChild(addBtn);
 
   root.appendChild(card);
+  root.appendChild(buildDmgRegistersCard());
+}
+
+// Card for the two DMG OBJ palette registers. Each register maps pixel
+// values 1..3 to one of the four DMG shades; the hex byte shown is exactly
+// what the game writes to 0xFF48 (OBP0) / 0xFF49 (OBP1).
+function buildDmgRegistersCard() {
+  const card = el("div", "card");
+  card.appendChild(el("h2", null, "DMG registers (OBP0 / OBP1)"));
+  card.appendChild(el("p", "hint",
+    "On DMG each hardware sprite uses one of these two registers. They remap " +
+    "pixel values 1-3 to any of the four shades, so a sprite can show the " +
+    "lightest shade even though value 0 itself is always transparent. " +
+    "Changing a value switches on “DMG preview” (top bar) so the Metasprites " +
+    "and Animations panels show the result; note OBP0 starts as the identity " +
+    "mapping, which looks the same as the preview being off. Each metasprite " +
+    "part picks its register with the “DMG reg” field (Metasprites panel, " +
+    "click a part to select it). Previews below use the “Editing with this” " +
+    "palette as the shade ramp."));
+
+  const ramp = colorsForPalette(state.displayPaletteId);
+
+  [0, 1].forEach(reg => {
+    const map = obpMapping(reg);
+    const row = el("div", "row");
+    row.style.marginTop = "12px";
+    row.appendChild(el("span", "cell-label", OBP_NAMES[reg]));
+
+    const preview = document.createElement("canvas");
+    preview.width = 4 * 18; preview.height = 18;
+    preview.style.border = "1px solid var(--border)";
+    const pctx = preview.getContext("2d");
+    const byteLabel = el("span", "cell-label", "");
+    const paintPreview = () => {
+      drawChecker(pctx, 18, 18, 0, 0, 6);  // value 0 = transparent, always
+      map.forEach((shade, i) => {
+        pctx.fillStyle = ramp[shade];
+        pctx.fillRect((i + 1) * 18, 0, 18, 18);
+      });
+      byteLabel.textContent = "= " + hex2(obpByte(map)) +
+        " → " + (reg === 0 ? "0xFF48" : "0xFF49");
+    };
+
+    const selects = map.map((shade, i) => {
+      const field = el("div", "field");
+      field.appendChild(label("Value " + (i + 1)));
+      field.appendChild(selectFrom(
+        SHADE_LABELS.map((l, s) => ({ value: s, label: s + " (" + l + ")" })),
+        shade,
+        v => {
+          snapshot(); map[i] = Number(v);
+          // Seeing the mapping in action is the whole point, so editing it
+          // switches the top-bar DMG preview on (the checkbox stays in sync).
+          state.dmgPreview = true;
+          document.getElementById("dmg-preview").checked = true;
+          paintPreview(); render();
+        }));
+      return field;
+    });
+
+    paintPreview();
+
+    // Bulk switch: point every part of every metasprite at this register.
+    const allBtn = el("button", "tiny", "Use for all parts");
+    allBtn.title = "Set every metasprite part to " + OBP_NAMES[reg];
+    allBtn.addEventListener("click", () => {
+      snapshot();
+      state.project.metasprites.forEach(ms => ms.parts.forEach(part => { part.obp = reg; }));
+      state.dmgPreview = true;
+      document.getElementById("dmg-preview").checked = true;
+      render();
+    });
+
+    row.append(preview, ...selects, byteLabel, allBtn);
+    card.appendChild(row);
+  });
+
+  return card;
 }
 
 /* ============================================================
@@ -1316,7 +1430,7 @@ function runSheetImport(imgW, imgH, data, opts) {
               tiles.push(internTile(pixels));
             }
             if (allEmpty) continue;
-            parts.push({ tiles, x: ox + cx, y: oy + cy, hFlip: false, vFlip: false, paletteId: pal });
+            parts.push({ tiles, x: ox + cx, y: oy + cy, hFlip: false, vFlip: false, paletteId: pal, obp: 0 });
           }
         }
         frameNo++;
@@ -1701,6 +1815,7 @@ function renderMetaspritesPanel(root) {
       x: (WORKSPACE - TILE_PX) / 2, y: (WORKSPACE - cellH) / 2,
       hFlip: false, vFlip: false,
       paletteId: state.displayPaletteId,
+      obp: 0,
     });
     state.selectedPartIndex = ms.parts.length - 1;
     render();
@@ -1749,7 +1864,15 @@ function renderMetaspritesPanel(root) {
       part.paletteId,
       v => { snapshot(); part.paletteId = Number(v); render(); }));
 
-    ctlRow.append(xField, yField, palField);
+    // Which DMG OBJ palette register this hardware sprite uses (OAM bit 4).
+    const obpField = el("div", "field");
+    obpField.appendChild(label("DMG reg"));
+    obpField.appendChild(selectFrom(
+      OBP_NAMES.map((n, i) => ({ value: i, label: n })),
+      part.obp ?? 0,
+      v => { snapshot(); part.obp = Number(v); render(); }));
+
+    ctlRow.append(xField, yField, palField, obpField);
     ctlRow.appendChild(toggle("H flip", part.hFlip, v => { snapshot(); part.hFlip = v; render(); }));
     ctlRow.appendChild(toggle("V flip", part.vFlip, v => { snapshot(); part.vFlip = v; render(); }));
     ed.appendChild(ctlRow);
@@ -2319,6 +2442,10 @@ function loadProjectFrom(text) {
   parsed.metasprites = parsed.metasprites || [];
   parsed.animations = parsed.animations || [];
   parsed.meta.spriteMode = parsed.meta.spriteMode === "8x16" ? "8x16" : "8x8";
+  // DMG registers were added in a later revision: default to an identity-ish
+  // OBP0 and give every part OBP0 so older files render unchanged.
+  parsed.dmg = parsed.dmg || { obp0: [1, 2, 3], obp1: [0, 2, 3] };
+  parsed.metasprites.forEach(ms => ms.parts.forEach(part => { part.obp = part.obp === 1 ? 1 : 0; }));
   state.project = parsed;
   syncSelectionsToProject();
   resetHistory();
@@ -2355,6 +2482,10 @@ function importProject() {
 
 document.getElementById("project-name").addEventListener("input", (e) => {
   state.project.meta.name = e.target.value;
+});
+document.getElementById("dmg-preview").addEventListener("change", (e) => {
+  state.dmgPreview = e.target.checked;
+  render();
 });
 document.getElementById("sprite-mode").addEventListener("change", (e) => {
   const newMode = e.target.value;
