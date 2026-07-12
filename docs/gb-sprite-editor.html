@@ -2047,6 +2047,33 @@ function renderAnimationsPanel(root) {
   });
   lib.appendChild(list);
 
+  // Character sprites are wired to facing directions by name keywords
+  // (the same word-boundary match gbsprite2c.py uses): back/up, front/down,
+  // right, left. Flag partial coverage so a walker isn't missing a facing.
+  if (p.animations.length > 0) {
+    const DIR_KEYWORDS = [
+      ["north", ["back", "up"]], ["south", ["front", "down"]],
+      ["east", ["right"]], ["west", ["left"]],
+    ];
+    const covered = new Set();
+    p.animations.forEach(anim => {
+      const words = anim.name.toLowerCase().split(/[^0-9a-z]+/);
+      DIR_KEYWORDS.forEach(([dir, keys]) => {
+        if (keys.some(k => words.includes(k))) covered.add(dir);
+      });
+    });
+    if (covered.size > 0 && covered.size < 4) {
+      const missing = DIR_KEYWORDS.filter(([d]) => !covered.has(d)).map(([d]) => d);
+      const warn = el("p", "hint", "Facing coverage incomplete: no animation named for " +
+        missing.join(", ") + ". Character sprites need all four " +
+        "(keywords: back/up, front/down, right, left).");
+      warn.style.color = "var(--danger)";
+      lib.appendChild(warn);
+    } else if (covered.size === 4) {
+      lib.appendChild(el("p", "hint", "Facing coverage: all four directions named."));
+    }
+  }
+
   const libBtns = el("div", "row");
   libBtns.style.marginTop = "12px";
   const addBtn = el("button", null, "+ New animation");

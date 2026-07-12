@@ -29,12 +29,14 @@ Event/warp coordinates are in **metatile cells** (2× the block resolution per a
 The editor's left rail switches between panels; the typical bottom-up workflow is:
 
 1. **Palettes** — define the DMG colour sets used by tiles.
-2. **Tiles** — draw or import the 8×8 tiles. Each tileset must stay ≤ 256 tiles
-   (the DMG VRAM limit); animated tiles each reserve one slot.
+2. **Tiles** — draw or import the 8×8 tiles. Each tileset has an editable VRAM
+   budget (default 128 — engines reserve slots for font/UI and sprites; the
+   absolute DMG limit is 256); animated tiles each reserve one slot.
 3. **Metatiles** — assemble 2×2 tiles into 16×16 metatiles.
 4. **Blocks** — assemble 2×2 metatiles into 32×32 blocks.
-5. **Maps** — paint blocks onto maps, set edge connections between maps, and place
-   the events layer (warps, signs, items, NPCs, triggers).
+5. **Maps** — paint blocks onto maps, set edge connections between maps, pick a
+   border block (drawn past unconnected edges), and place the events layer
+   (spawn points, warps, signs, items, NPCs, triggers).
 
 Painting tools, zoom, selection, and undo/redo (a single pointer stroke collapses
 to one undo step) operate on the active panel.
@@ -48,7 +50,8 @@ JSON changes.
 
 ## Key constraints
 
-- **Tile budget**: ≤ 256 tiles per tileset (animated tiles each cost one slot).
+- **Tile budget**: keep each tileset within its editable budget (default 128,
+  hard DMG ceiling 256; animated tiles each cost one slot).
 - **DMG compatibility**: don't rely on CGB attribute flips (H/V mirror) — mirror by
   drawing a separate tile instead.
 - **8-bit index ceiling**: tile / metatile / block / map counts each stay ≤ 255; the

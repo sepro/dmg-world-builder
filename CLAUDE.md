@@ -144,7 +144,7 @@ The JSON file is the single source of truth. The C should never be hand-edited �
 
 ## Key constraints
 
-- **Tile budget**: each tileset must stay ≤ 256 tiles (the DMG VRAM limit). Animated tiles each consume one reserved slot.
+- **Tile budget**: each tileset must stay within its editable `tileBudget` (default 128 — engines reserve VRAM slots for font/UI and sprites; the absolute DMG limit is 256). Animated tiles each consume one reserved slot.
 - **DMG compatibility**: layout must not rely on CGB attribute flips (H/V mirror). Mirror by drawing a separate tile instead.
 - **8-bit index ceiling**: tile/metatile/block/map counts must stay ≤ 255 each; the converter warns when exceeded.
 - **Cell order is always TL, TR, BL, BR** in every four-element array (metatile tiles, block metatiles, attribute arrays).

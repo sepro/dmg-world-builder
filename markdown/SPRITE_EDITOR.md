@@ -91,6 +91,11 @@ Frame strips per animation: each frame references a metasprite and a duration
 in ticks (the badge shows ticks; 60 ticks = 1 s). A live preview plays the
 animation with **Loop**, and frames can be reordered, duplicated, and deleted.
 
+Character sprites destined for an overworld engine are wired to facing
+directions by keywords in the animation name: `back`/`up`, `front`/`down`,
+`right`, `left` (word-boundary match). The panel shows the coverage and warns
+when some but not all four directions are named.
+
 **Draw on frame** is the free-form workflow: it rasterizes a frame's
 metasprite into a flat 64×64 bitmap you can paint on directly (with onion
 skinning), then **Bake to frame** recompiles the drawing back into tiles and

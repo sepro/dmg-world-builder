@@ -222,7 +222,9 @@ function makeDefaultProject() {
   const tileset = {
     id: id(),
     name: "main",
-    tileBudget: 256,                 // DMG-safe count of background tiles in VRAM
+    tileBudget: 128,                 // VRAM tiles the engine can take (BG slots 0-127
+                                     // hold the resident font/UI + OBJ tiles; adjust
+                                     // per target -- the absolute DMG BG limit is 256)
     tiles: [],
     metatiles: [],
     blocks: [],
@@ -329,6 +331,7 @@ function seedDemoContent(project, ts, pal, id) {
     width: W, height: H,
     blockGrid: grid,
     connections: { north: null, south: null, east: null, west: null },
+    borderBlock: null,
     events: [],
   });
 
@@ -503,6 +506,7 @@ function createMap(name, tilesetId, width, height) {
     height,
     blockGrid: new Array(width * height).fill(null), // row-major, null = empty
     connections: { north: null, south: null, east: null, west: null }, // {mapId, offset}
+    borderBlock: null,   // block id drawn past unconnected edges; null = repeat edge metatiles
     events: [],                                       // authored in a later pass
   };
 }
@@ -774,6 +778,19 @@ function renderTilesPanel(root) {
   const budget = el("p", used > ts.tileBudget ? "budget-over" : "budget-ok",
     used + " / " + ts.tileBudget + " tiles" + (used > ts.tileBudget ? "  (over VRAM budget)" : ""));
   lib.appendChild(budget);
+
+  // The budget is per target: engines usually reserve VRAM slots for font/UI
+  // and sprites, so the usable count is often well below the raw 256 limit.
+  const budgetRow = el("div", "row");
+  budgetRow.appendChild(el("span", "cell-label", "Budget"));
+  const budgetInput = numberInput(ts.tileBudget, 1, 256);
+  budgetInput.addEventListener("change", () => {
+    snapshot();
+    ts.tileBudget = clampInt(budgetInput.value, 1, 256);
+    render();
+  });
+  budgetRow.appendChild(budgetInput);
+  lib.appendChild(budgetRow);
 
   const grid = el("div", "lib-grid");
   ts.tiles.forEach((tile, index) => {
@@ -1379,6 +1396,8 @@ function renderBlocksPanel(root) {
     if (refs > 0) { alert("This block is used in " + refs + " map cell(s). Clear it there first."); return; }
     snapshot();
     ts.blocks = ts.blocks.filter(x => x.id !== b.id);
+    // Drop any map border-block references to the deleted block.
+    state.project.maps.forEach(m => { if (m.borderBlock === b.id) m.borderBlock = null; });
     state.selectedBlockId = ts.blocks[0] ? ts.blocks[0].id : null;
     render();
   });
@@ -1971,11 +1990,36 @@ function renderMapProperties(map) {
     }
     snapshot();
     map.tilesetId = Number(tsSelect.value);
+    map.borderBlock = null;    // the old tileset's blocks no longer apply
     state.paintBlockId = null;
     render();
   });
   tsField.appendChild(tsSelect);
   card.appendChild(tsField);
+
+  // Border block: what the engine draws past unconnected map edges (the
+  // camera sees out there because the player is screen-centered).
+  card.appendChild(spacer(10));
+  const bbField = el("div", "field");
+  bbField.appendChild(label("Border block (past map edges)"));
+  const bbSelect = document.createElement("select");
+  const bbNone = document.createElement("option");
+  bbNone.value = ""; bbNone.textContent = "(repeat edge blocks)";
+  bbSelect.appendChild(bbNone);
+  const mapTs = state.project.tilesets.find(t => t.id === map.tilesetId);
+  (mapTs ? mapTs.blocks : []).forEach((blk, i) => {
+    const opt = document.createElement("option");
+    opt.value = blk.id;
+    opt.textContent = i + ": " + (blk.name || "(unnamed)");
+    if (blk.id === map.borderBlock) opt.selected = true;
+    bbSelect.appendChild(opt);
+  });
+  bbSelect.addEventListener("change", () => {
+    snapshot();
+    map.borderBlock = bbSelect.value ? Number(bbSelect.value) : null;
+  });
+  bbField.appendChild(bbSelect);
+  card.appendChild(bbField);
 
   // Size in blocks.
   card.appendChild(spacer(10));
@@ -2158,7 +2202,11 @@ function loadProjectFrom(text) {
   }
   // Backfill fields that older exports may lack, so they open cleanly.
   parsed.maps = parsed.maps || [];
-  parsed.tilesets.forEach(ts => { ts.blocks = ts.blocks || []; ts.metatiles = ts.metatiles || []; });
+  parsed.tilesets.forEach(ts => {
+    ts.blocks = ts.blocks || []; ts.metatiles = ts.metatiles || [];
+    if (!ts.tileBudget) ts.tileBudget = 256;   // older files predate an editable budget
+  });
+  parsed.maps.forEach(m => { if (m.borderBlock === undefined) m.borderBlock = null; });
   state.project = parsed;
   syncSelectionsToProject();
   resetHistory();

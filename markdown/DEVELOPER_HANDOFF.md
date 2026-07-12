@@ -102,14 +102,16 @@ map looks identical on both, color is purely additive on GBC.
 
 ```jsonc
 {
-  "id": 10, "name": "main", "tileBudget": 256,
+  "id": 10, "name": "main", "tileBudget": 128,
   "tiles":     [ /* Tile */ ],
   "metatiles": [ /* Metatile */ ],
   "blocks":    [ /* Block */ ]
 }
 ```
 
-`tileBudget` (256) is the DMG-safe count of background tiles that fit in VRAM at once.
+`tileBudget` is the number of VRAM tile slots the target engine can give the world
+tileset (editable in the Tiles tab). The absolute DMG BG limit is 256, but engines
+usually reserve slots for font/UI and sprites, so new projects default to 128.
 Each map references exactly one tileset; a connection between maps with **different**
 tilesets implies a VRAM reload at the seam.
 
@@ -162,6 +164,8 @@ that uses it. This is why a warp's destination cannot live here (see §4.4).
     "east":  { "mapId": 91, "offset": 0 },
     "west":  null
   },
+  "borderBlock": 70,       // block id drawn past unconnected edges (Pokemon-style
+                           // repeating border); null = engine repeats edge metatiles
   "events": [ /* Event */ ]
 }
 ```
@@ -182,11 +186,17 @@ Events live on a map at **metatile coordinates** (`x` in `[0, width*2)`, `y` in
 { "id": 103, "type": "item",    "x": 5, "y": 9, "item": "potion", "qty": 1, "flag": "got_potion" }
 { "id": 104, "type": "npc",     "x": 7, "y": 4, "sprite": "oldman", "movement": "static", "script": "intro" }
 { "id": 105, "type": "trigger", "x": 2, "y": 2, "script": "on_enter" }
+{ "id": 106, "type": "spawn",   "x": 4, "y": 4, "facing": "up", "isDefault": true }
 ```
 
 `toMap` is a map id (or `null`). `movement` is one of
 `static | wander | walk_up_down | walk_left_right`. The string fields (`text`,
 `item`, `sprite`, `script`, `flag`) are free-form ids your engine resolves.
+
+Spawn events are not emitted into the runtime event table: the converter picks the
+spawn flagged `isDefault` (falling back to the first spawn found, then to the center
+of map 0 with a warning) and emits it as the `<NAME>_SPAWN_MAP/_X/_Y/_DIR` constants
+used when starting a new game. `facing` is one of `up | down | left | right`.
 
 ---
 
@@ -237,6 +247,7 @@ typedef struct {
     const UINT8 *blocks;       // width*height block indices, 0xFF = empty
     INT8  conn[4];             // neighbor map index per DIR_*, -1 if none
     INT16 conn_off[4];         // connection offset (blocks)
+    UINT8 border_block;        // block drawn past unconnected edges, 0xFF = repeat edge
     UINT8 num_warps;  const Warp *warps;
     UINT8 num_events; const Event *events;
     const char *name;
@@ -431,8 +442,9 @@ the data layer only carries the parameters.
   with each other, which is what matters for round-tripping.
 - **DMG compatibility**: don't introduce attribute-based H/V flips into layout; they
   render on GBC but not DMG. Mirror a tile by drawing it as its own tile instead.
-- **Tile budget**: keep each tileset's tiles ≤ 256 (the editor warns past it). Animated
-  tiles each consume one reserved slot.
+- **Tile budget**: keep each tileset within its `tileBudget` (the editor warns past
+  it; the budget is editable in the Tiles tab, hard ceiling 256). Animated tiles each
+  consume one reserved slot.
 - **8-bit index fields**: the C uses 8-bit indices for tiles/metatiles/blocks and map
   indices. The converter warns if a tileset exceeds 255 metatiles/blocks or the project
   exceeds 255 maps; that is a generous ceiling for GB-scale content but is a real limit.

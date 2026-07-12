@@ -14,7 +14,10 @@ What gets emitted
   table, the metatile table (4 tile indices + 4 CGB palette attributes +
   collision + behavior) and the block table (4 metatile indices).
 - Per map: width/height in blocks, the block-index grid, edge connections with
-  offsets, a warp table, and a generic event table (signs/items/npcs/triggers).
+  offsets, a border block (drawn past unconnected edges; 0xFF = repeat edge),
+  a warp table, and a generic event table (signs/items/npcs/triggers).
+- The default player spawn point (a "spawn" event with isDefault) as
+  <NAME>_SPAWN_MAP/_X/_Y/_DIR constants, used when starting a new game.
 - Enums for behaviors, event types and NPC movement, plus index enums for maps
   and tilesets, and a string table for event text fields.
 
@@ -76,10 +79,10 @@ def ident(name, fallback):
 
 
 # Fixed enum mappings that do not come from the project.
-EVENT_TYPE_VALUES = {"warp": 0, "sign": 1, "item": 2, "npc": 3, "trigger": 4, "spawn": 5}
+EVENT_TYPE_VALUES = {"warp": 0, "sign": 1, "item": 2, "npc": 3, "trigger": 4}
+SPAWN_DIR_MACROS = {"up": "DIR_NORTH", "down": "DIR_SOUTH",
+                    "left": "DIR_WEST", "right": "DIR_EAST"}
 NPC_MOVE_VALUES = {"static": 0, "wander": 1, "walk_up_down": 2, "walk_left_right": 3}
-# Spawn facing maps onto the DIR_* enum emitted in the header.
-FACING_DIR_VALUES = {"north": 0, "up": 0, "south": 1, "down": 1, "east": 2, "right": 2, "west": 3, "left": 3}
 COLLISION_VALUES = {"walk": 0, "solid": 1}
 DIRS = ["north", "south", "east", "west"]
 NO_BLOCK = 0xFF      # empty cell sentinel in a block grid
@@ -112,7 +115,9 @@ class Builder:
                                  "Cell palette attributes above 7 will be clamped.")
 
     def warn(self, msg):
-        self.warnings.append(msg)
+        # Deduplicated: the header is generated twice (string count fixup).
+        if msg not in self.warnings:
+            self.warnings.append(msg)
 
     def intern_string(self, s):
         if not s:
@@ -173,11 +178,43 @@ def c_string_literal(s):
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
 
 
+def find_default_spawn(b):
+    """Pick the world's default spawn point: (map_index, x, y, dir_macro).
+
+    Prefers the spawn event flagged isDefault; falls back to the first spawn
+    found, then (with a warning) to map 0's center facing south.
+    """
+    spawns = []
+    for mi, m in enumerate(b.p["maps"]):
+        for e in m.get("events", []):
+            if e.get("type") == "spawn":
+                spawns.append((mi, e))
+    chosen = None
+    defaults = [s for s in spawns if s[1].get("isDefault")]
+    if len(defaults) > 1:
+        b.warn("Multiple default spawn points; using the first one.")
+    if defaults:
+        chosen = defaults[0]
+    elif spawns:
+        b.warn("No spawn point flagged as default; using the first spawn found.")
+        chosen = spawns[0]
+    if chosen is None:
+        b.warn("No spawn point in the world; defaulting to the center of map 0.")
+        m0 = b.p["maps"][0]
+        # width/height are in blocks == the center cell's metatile coords.
+        return 0, m0["width"], m0["height"], "DIR_SOUTH"
+    mi, e = chosen
+    facing = e.get("facing", "down")
+    if facing not in SPAWN_DIR_MACROS:
+        b.warn("Spawn facing '%s' is unknown; using down." % facing)
+    return mi, e["x"], e["y"], SPAWN_DIR_MACROS.get(facing, "DIR_SOUTH")
+
+
 # ----------------------------------------------------------------------------
 # Header generation
 # ----------------------------------------------------------------------------
 
-def generate_header(b, name):
+def generate_header(b, name, bank=None):
     p = b.p
     guard = ident(name, "WORLD") + "_H"
     L = []
@@ -188,6 +225,9 @@ def generate_header(b, name):
     L.append("")
     L.append("#include <gbdk/platform.h>   /* UINT8, INT8, UINT16, INT16 */")
     L.append("")
+    if bank is not None:
+        L.append("BANKREF_EXTERN(%s)" % name)
+        L.append("")
 
     # Counts.
     L.append("#define %s_NUM_TILESETS %d" % (name.upper(), len(p["tilesets"])))
@@ -207,10 +247,20 @@ def generate_header(b, name):
         L.append("")
 
     # Event type + movement enums.
-    L.append("enum { EVENT_WARP = 0, EVENT_SIGN = 1, EVENT_ITEM = 2, EVENT_NPC = 3, EVENT_TRIGGER = 4, EVENT_SPAWN = 5 };")
+    L.append("enum { EVENT_WARP = 0, EVENT_SIGN = 1, EVENT_ITEM = 2, EVENT_NPC = 3, EVENT_TRIGGER = 4 };")
     L.append("enum { MOVE_STATIC = 0, MOVE_WANDER = 1, MOVE_WALK_UP_DOWN = 2, MOVE_WALK_LEFT_RIGHT = 3 };")
     L.append("enum { COLLISION_WALK = 0, COLLISION_SOLID = 1 };")
     L.append("#define DIR_NORTH 0\n#define DIR_SOUTH 1\n#define DIR_EAST 2\n#define DIR_WEST 3")
+    L.append("")
+
+    # Default spawn point (new game start).
+    sp_map, sp_x, sp_y, sp_dir = find_default_spawn(b)
+    L.append("/* Default player spawn point, used when starting a new game. */")
+    L.append("#define %s_SPAWN_MAP %d  /* %s */"
+             % (name.upper(), sp_map, p["maps"][sp_map]["name"]))
+    L.append("#define %s_SPAWN_X %d" % (name.upper(), sp_x))
+    L.append("#define %s_SPAWN_Y %d" % (name.upper(), sp_y))
+    L.append("#define %s_SPAWN_DIR %s" % (name.upper(), sp_dir))
     L.append("")
 
     # Map and tileset index enums for readable cross-references.
@@ -263,7 +313,7 @@ typedef struct {
 } Warp;
 
 typedef struct {
-    UINT8 type;          /* EVENT_SIGN / EVENT_ITEM / EVENT_NPC / EVENT_TRIGGER / EVENT_SPAWN */
+    UINT8 type;          /* EVENT_SIGN / EVENT_ITEM / EVENT_NPC / EVENT_TRIGGER */
     UINT8 x, y;          /* metatile coordinates */
     UINT8 p0, p1;        /* numeric params: item qty / npc movement, etc. */
     UINT16 s0, s1;       /* string-table indices (0xFFFF = none) */
@@ -275,6 +325,7 @@ typedef struct {
     const UINT8 *blocks;       /* width*height block indices, 0xFF = empty */
     INT8  conn[4];             /* neighbor map index per DIR_*, -1 if none */
     INT16 conn_off[4];         /* connection offset along the shared edge, in blocks */
+    UINT8 border_block;        /* block drawn past unconnected edges, 0xFF = repeat edge */
     UINT8 num_warps;
     const Warp *warps;
     UINT8 num_events;
@@ -294,8 +345,7 @@ typedef struct {
     L.append("   SIGN:    s0 = text")
     L.append("   ITEM:    s0 = item id, p0 = quantity, s1 = flag id")
     L.append("   NPC:     s0 = sprite id, p0 = MOVE_*, s1 = script id")
-    L.append("   TRIGGER: s0 = script id")
-    L.append("   SPAWN:   p0 = DIR_* facing, p1 = 1 if the default (new-game) spawn   */")
+    L.append("   TRIGGER: s0 = script id   */")
     L.append("")
     L.append("#endif /* " + guard + " */")
     return "\n".join(L) + "\n"
@@ -305,12 +355,17 @@ typedef struct {
 # Source generation
 # ----------------------------------------------------------------------------
 
-def generate_source(b, name, header_filename):
+def generate_source(b, name, header_filename, bank=None):
     p = b.p
     L = []
     L.append("/* Generated by gbworld_to_c.py. Do not edit by hand. */")
+    if bank is not None:
+        L.append("#pragma bank %d" % bank)
     L.append('#include "%s"' % header_filename)
     L.append("")
+    if bank is not None:
+        L.append("BANKREF(%s)" % name)
+        L.append("")
 
     # Palettes.
     pal_words = []
@@ -461,8 +516,10 @@ def generate_source(b, name, header_filename):
                          % (w["x"], w["y"], to_map, w.get("toX", 0), w.get("toY", 0)))
             L.append("};")
 
-        # Other events.
-        others = [e for e in m.get("events", []) if e.get("type") != "warp"]
+        # Other events. Spawn points are emitted as world-level constants,
+        # not runtime events.
+        others = [e for e in m.get("events", [])
+                  if e.get("type") not in ("warp", "spawn")]
         if others:
             L.append("const Event %s_events[] = {" % mprefix)
             for e in others:
@@ -482,9 +539,6 @@ def generate_source(b, name, header_filename):
                     s1 = b.intern_string(e.get("script", ""))
                 elif t == "trigger":
                     s0 = b.intern_string(e.get("script", ""))
-                elif t == "spawn":
-                    p0 = FACING_DIR_VALUES.get(e.get("facing", "down"), 1)
-                    p1 = 1 if e.get("isDefault") else 0
                 L.append("  { %d, %d, %d, %d, %d, 0x%04X, 0x%04X }, /* %s */"
                          % (tv, e["x"], e["y"], p0, p1, s0, s1, t))
             L.append("};")
@@ -510,10 +564,18 @@ def generate_source(b, name, header_filename):
                 off.append(0)
         warps_sym = ("%s_warps" % sym) if m["_warps"] else "0"
         events_sym = ("%s_events" % sym) if m["_events"] else "0"
-        L.append("  { %d, %d, %d, %s_blocks, {%d,%d,%d,%d}, {%d,%d,%d,%d}, %d, %s, %d, %s, %s },"
+        # Border block: rendered past unconnected map edges (Pokemon-style
+        # repeating border). NO_BLOCK means "repeat the edge metatiles".
+        bb = NO_BLOCK
+        if m.get("borderBlock") is not None:
+            bb = b.block_index.get(m["tilesetId"], {}).get(m["borderBlock"], NO_BLOCK)
+            if bb == NO_BLOCK:
+                b.warn("Map '%s' has a border block that is not in its tileset; ignored."
+                       % m["name"])
+        L.append("  { %d, %d, %d, %s_blocks, {%d,%d,%d,%d}, {%d,%d,%d,%d}, 0x%02X, %d, %s, %d, %s, %s },"
                  % (m["width"], m["height"], b.tileset_index.get(m["tilesetId"], 0), sym,
                     conn[0], conn[1], conn[2], conn[3],
-                    off[0], off[1], off[2], off[3],
+                    off[0], off[1], off[2], off[3], bb,
                     len(m["_warps"]), warps_sym, len(m["_events"]), events_sym,
                     c_string_literal(m["name"])))
     L.append("};")
@@ -539,6 +601,8 @@ def main():
     ap.add_argument("input", help="Path to the .gbworld.json project file")
     ap.add_argument("-o", "--outdir", default=".", help="Output directory (default: current)")
     ap.add_argument("--name", default="world", help="Base name for files/identifiers (default: world)")
+    ap.add_argument("--bank", type=int, default=None,
+                    help="ROM bank for the data (#pragma bank + BANKREF)")
     args = ap.parse_args()
 
     with open(args.input, "r", encoding="utf-8") as f:
@@ -552,11 +616,11 @@ def main():
 
     b = Builder(project, name)
     header_filename = name + ".h"
-    header = generate_header(b, name)
-    source = generate_source(b, name, header_filename)
+    header = generate_header(b, name, args.bank)
+    source = generate_source(b, name, header_filename, args.bank)
     # The header references the string count, which is only known after the
     # source pass interns strings, so regenerate the header now.
-    header = generate_header(b, name)
+    header = generate_header(b, name, args.bank)
 
     h_path = os.path.join(args.outdir, header_filename)
     c_path = os.path.join(args.outdir, name + ".c")
