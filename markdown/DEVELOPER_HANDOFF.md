@@ -181,7 +181,7 @@ Events live on a map at **metatile coordinates** (`x` in `[0, width*2)`, `y` in
 `[0, height*2)`). Each has a stable `id` and a `type`:
 
 ```jsonc
-{ "id": 101, "type": "warp",    "x": 8, "y": 6, "toMap": 91, "toX": 0, "toY": 6 }
+{ "id": 101, "type": "warp",    "x": 8, "y": 6, "toMap": 91, "toX": 0, "toY": 6, "warpType": "door", "facing": "up" }
 { "id": 102, "type": "sign",    "x": 3, "y": 3, "text": "Welcome!" }
 { "id": 103, "type": "item",    "x": 5, "y": 9, "item": "potion", "qty": 1, "flag": "got_potion" }
 { "id": 104, "type": "npc",     "x": 7, "y": 4, "sprite": "oldman", "movement": "static", "script": "intro" }
@@ -189,9 +189,14 @@ Events live on a map at **metatile coordinates** (`x` in `[0, width*2)`, `y` in
 { "id": 106, "type": "spawn",   "x": 4, "y": 4, "facing": "up", "isDefault": true }
 ```
 
-`toMap` is a map id (or `null`). `movement` is one of
-`static | wander | walk_up_down | walk_left_right`. The string fields (`text`,
-`item`, `sprite`, `script`, `flag`) are free-form ids your engine resolves.
+`toMap` is a map id (or `null`). A warp's `warpType` is one of
+`transport | door | stairs | fall` (how the engine presents the transition) and its
+`facing` is the direction the player looks after arriving:
+`same | up | down | left | right`, where `same` keeps the direction the player
+walked in with. Files that predate these fields import as `transport` / `same`.
+`movement` is one of `static | wander | walk_up_down | walk_left_right`. The string
+fields (`text`, `item`, `sprite`, `script`, `flag`) are free-form ids your engine
+resolves.
 
 Spawn events are not emitted into the runtime event table: the converter picks the
 spawn flagged `isDefault` (falling back to the first spawn found, then to the center
@@ -232,7 +237,11 @@ typedef struct {
     const TileAnim *anims;     UINT8  num_anims;
 } Tileset;
 
-typedef struct { UINT8 x, y, to_map, to_x, to_y; } Warp;   // to_map 0xFF = unset
+typedef struct {
+    UINT8 x, y, to_map, to_x, to_y;   // to_map 0xFF = unset
+    UINT8 type;                       // WARP_TRANSPORT / WARP_DOOR / WARP_STAIRS / WARP_FALL
+    UINT8 facing;                     // DIR_* after the warp, WARP_FACE_SAME (0xFF) keeps it
+} Warp;
 
 typedef struct {
     UINT8 type;          // EVENT_SIGN / EVENT_ITEM / EVENT_NPC / EVENT_TRIGGER
@@ -274,6 +283,7 @@ Enums are emitted for behaviors (`BEHAVIOR_*`, in project order), event types
 | empty cell in a block grid | `0xFF` |
 | absent neighbor (`conn[d]`) | `-1` |
 | unset warp destination (`to_map`) | `0xFF` |
+| keep facing after a warp (`facing`) | `WARP_FACE_SAME` (`0xFF`) |
 | no string (`s0`/`s1`) | `0xFFFF` |
 
 Empty metatile/tile cells are emitted as index `0` (the conventional blank tile); the

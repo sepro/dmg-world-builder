@@ -32,11 +32,19 @@ The editor's left rail switches between panels; the typical bottom-up workflow i
 2. **Tiles** — draw or import the 8×8 tiles. Each tileset has an editable VRAM
    budget (default 128 — engines reserve slots for font/UI and sprites; the
    absolute DMG limit is 256); animated tiles each reserve one slot.
+
+   A project can hold **multiple tilesets** (each map picks one in its
+   properties). The bar at the top of the Tiles, Metatiles, and Blocks panels
+   switches the active tileset and can create, rename, or delete tilesets;
+   deletion is blocked while any map still uses the tileset.
 3. **Metatiles** — assemble 2×2 tiles into 16×16 metatiles.
 4. **Blocks** — assemble 2×2 metatiles into 32×32 blocks.
 5. **Maps** — paint blocks onto maps, set edge connections between maps, pick a
    border block (drawn past unconnected edges), and place the events layer
-   (spawn points, warps, signs, items, NPCs, triggers).
+   (spawn points, warps, signs, items, NPCs, triggers). A warp has a type
+   (`transport | door | stairs | fall` — how the engine presents the transition),
+   a destination map/cell, and a facing after the warp
+   (`same | up | down | left | right`; `same` keeps the walking direction).
 
 Painting tools, zoom, selection, and undo/redo (a single pointer stroke collapses
 to one undo step) operate on the active panel.
@@ -47,6 +55,11 @@ There is no browser storage. **Export** saves the whole project as a
 `.gbworld.json`; **Import** loads one back. The JSON file is the single source of
 truth — the generated C should never be hand-edited; regenerate it whenever the
 JSON changes.
+
+The Maps panel also offers **Export world PNG**: every map is stitched into one
+image using the edge connections (disconnected maps stack below with a one-block
+gap), with a selectable 1–4× scale and optional map borders/name labels. It is
+the in-browser equivalent of `tools/gbworld_visualize.py`.
 
 ## Key constraints
 

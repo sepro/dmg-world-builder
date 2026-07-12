@@ -82,6 +82,8 @@ def ident(name, fallback):
 EVENT_TYPE_VALUES = {"warp": 0, "sign": 1, "item": 2, "npc": 3, "trigger": 4}
 SPAWN_DIR_MACROS = {"up": "DIR_NORTH", "down": "DIR_SOUTH",
                     "left": "DIR_WEST", "right": "DIR_EAST"}
+WARP_TYPE_MACROS = {"transport": "WARP_TRANSPORT", "door": "WARP_DOOR",
+                    "stairs": "WARP_STAIRS", "fall": "WARP_FALL"}
 NPC_MOVE_VALUES = {"static": 0, "wander": 1, "walk_up_down": 2, "walk_left_right": 3}
 COLLISION_VALUES = {"walk": 0, "solid": 1}
 DIRS = ["north", "south", "east", "west"]
@@ -252,6 +254,10 @@ def generate_header(b, name, bank=None):
     L.append("enum { COLLISION_WALK = 0, COLLISION_SOLID = 1 };")
     L.append("#define DIR_NORTH 0\n#define DIR_SOUTH 1\n#define DIR_EAST 2\n#define DIR_WEST 3")
     L.append("")
+    L.append("/* Warp presentation (Warp.type) and post-warp facing (Warp.facing). */")
+    L.append("enum { WARP_TRANSPORT = 0, WARP_DOOR = 1, WARP_STAIRS = 2, WARP_FALL = 3 };")
+    L.append("#define WARP_FACE_SAME 0xFF  /* keep the facing the player warped in with */")
+    L.append("")
 
     # Default spawn point (new game start).
     sp_map, sp_x, sp_y, sp_dir = find_default_spawn(b)
@@ -310,6 +316,8 @@ typedef struct {
     UINT8 x, y;          /* metatile coordinates of the warp tile */
     UINT8 to_map;        /* destination map index, 0xFF if unset */
     UINT8 to_x, to_y;    /* destination metatile coordinates */
+    UINT8 type;          /* WARP_* presentation (transport/door/stairs/fall) */
+    UINT8 facing;        /* DIR_* after the warp, WARP_FACE_SAME to keep it */
 } Warp;
 
 typedef struct {
@@ -512,8 +520,19 @@ def generate_source(b, name, header_filename, bank=None):
                 to_map = b.map_index.get(w.get("toMap"), 0xFF)
                 if w.get("toMap") is None:
                     to_map = 0xFF
-                L.append("  { %d, %d, %d, %d, %d },"
-                         % (w["x"], w["y"], to_map, w.get("toX", 0), w.get("toY", 0)))
+                wt = w.get("warpType", "transport")
+                if wt not in WARP_TYPE_MACROS:
+                    b.warn("Map '%s': warp at (%d,%d) has unknown type '%s'; using transport."
+                           % (m["name"], w["x"], w["y"], wt))
+                facing = w.get("facing", "same")
+                if facing != "same" and facing not in SPAWN_DIR_MACROS:
+                    b.warn("Map '%s': warp at (%d,%d) has unknown facing '%s'; keeping it."
+                           % (m["name"], w["x"], w["y"], facing))
+                    facing = "same"
+                L.append("  { %d, %d, %d, %d, %d, %s, %s },"
+                         % (w["x"], w["y"], to_map, w.get("toX", 0), w.get("toY", 0),
+                            WARP_TYPE_MACROS.get(wt, "WARP_TRANSPORT"),
+                            SPAWN_DIR_MACROS.get(facing, "WARP_FACE_SAME")))
             L.append("};")
 
         # Other events. Spawn points are emitted as world-level constants,

@@ -185,12 +185,16 @@ const EVENT_ORDER = ["spawn", "warp", "sign", "item", "npc", "trigger"];
 const NPC_MOVEMENTS = ["static", "wander", "walk_up_down", "walk_left_right"];
 // Facing direction the player starts in at a spawn point.
 const FACINGS = ["down", "up", "left", "right"];
+// How a warp is presented by the engine (door fade, stair slide, fall, plain teleport).
+const WARP_TYPES = ["transport", "door", "stairs", "fall"];
+// Facing after the warp; "same" keeps the direction the player walked in with.
+const WARP_FACINGS = ["same", "up", "down", "left", "right"];
 
 // Build a fresh event with sensible per-type defaults.
 function makeEvent(type, x, y) {
   const e = { id: 0, type, x, y };   // id is filled in by the caller via genId()
   if (type === "spawn") { e.facing = "down"; e.isDefault = false; }
-  else if (type === "warp") { e.toMap = null; e.toX = 0; e.toY = 0; }
+  else if (type === "warp") { e.toMap = null; e.toX = 0; e.toY = 0; e.warpType = "transport"; e.facing = "same"; }
   else if (type === "sign") { e.text = ""; }
   else if (type === "item") { e.item = ""; e.qty = 1; e.flag = ""; }
   else if (type === "npc") { e.sprite = ""; e.movement = "static"; e.script = ""; }
@@ -764,7 +768,101 @@ function renderPalettesPanel(root) {
 
 const EDIT_SCALE = 40;  // pixels per tile-pixel in the big editing canvas
 
+/* ---- tileset switcher ----
+   The Tiles/Metatiles/Blocks panels all edit the active tileset; this shared
+   bar switches it and manages the tileset list itself. */
+
+// Point the per-tileset selections at the newly active tileset's contents.
+function selectTileset(id) {
+  state.selectedTilesetId = id;
+  const ts = activeTileset();
+  state.selectedTileId = ts && ts.tiles[0] ? ts.tiles[0].id : null;
+  state.selectedMetatileId = ts && ts.metatiles[0] ? ts.metatiles[0].id : null;
+  state.selectedBlockId = ts && ts.blocks[0] ? ts.blocks[0].id : null;
+  state.paintBlockId = ts && ts.blocks[0] ? ts.blocks[0].id : null;
+  state.selectedCell = 0;
+  state.selectedFrame = 0;
+}
+
+function createTileset(name) {
+  return {
+    id: genId(),
+    name,
+    tileBudget: 128,
+    // Start with one blank tile so the tile editor has a selection to show.
+    tiles: [{ id: genId(), pixels: new Array(PIXELS_PER_TILE).fill(0) }],
+    metatiles: [],
+    blocks: [],
+  };
+}
+
+function renderTilesetBar(root) {
+  const bar = el("div", "card");
+  const row = el("div", "row");
+  row.appendChild(el("span", "cell-label", "Tileset"));
+
+  const select = document.createElement("select");
+  state.project.tilesets.forEach(t => {
+    const opt = document.createElement("option");
+    opt.value = t.id; opt.textContent = t.name;
+    if (t.id === state.selectedTilesetId) opt.selected = true;
+    select.appendChild(opt);
+  });
+  select.addEventListener("change", () => {
+    selectTileset(Number(select.value));
+    render();
+  });
+  row.appendChild(select);
+
+  const renameBtn = el("button", null, "Rename");
+  renameBtn.addEventListener("click", () => {
+    const ts = activeTileset();
+    if (!ts) return;
+    const name = prompt("Tileset name:", ts.name);
+    if (!name || name === ts.name) return;
+    snapshot();
+    ts.name = name;
+    render();
+  });
+  row.appendChild(renameBtn);
+
+  const addBtn = el("button", null, "+ New tileset");
+  addBtn.addEventListener("click", () => {
+    const name = prompt("Name for the new tileset:", "tileset " + (state.project.tilesets.length + 1));
+    if (!name) return;
+    snapshot();
+    const ts = createTileset(name);
+    state.project.tilesets.push(ts);
+    selectTileset(ts.id);
+    render();
+  });
+  row.appendChild(addBtn);
+
+  const delBtn = el("button", "danger", "Delete tileset");
+  delBtn.addEventListener("click", () => {
+    const ts = activeTileset();
+    if (!ts) return;
+    if (state.project.tilesets.length <= 1) { alert("Keep at least one tileset."); return; }
+    const users = state.project.maps.filter(m => m.tilesetId === ts.id);
+    if (users.length > 0) {
+      alert("This tileset is used by " + users.length + " map(s): " +
+        users.map(m => m.name).join(", ") + ". Point them at another tileset first.");
+      return;
+    }
+    if (!confirm("Delete tileset \"" + ts.name + "\" and all its tiles, metatiles and blocks?")) return;
+    snapshot();
+    state.project.tilesets = state.project.tilesets.filter(t => t.id !== ts.id);
+    selectTileset(state.project.tilesets[0].id);
+    render();
+  });
+  row.appendChild(delBtn);
+
+  bar.appendChild(row);
+  root.appendChild(bar);
+}
+
 function renderTilesPanel(root) {
+  renderTilesetBar(root);
   const ts = activeTileset();
   if (!ts) { root.appendChild(el("p", "hint", "No tileset.")); return; }
 
@@ -1168,6 +1266,7 @@ function exportTilesToPng(ts) {
    ============================================================ */
 
 function renderMetatilesPanel(root) {
+  renderTilesetBar(root);
   const ts = activeTileset();
   if (!ts) { root.appendChild(el("p", "hint", "No tileset.")); return; }
 
@@ -1341,6 +1440,7 @@ function renderMetatilesPanel(root) {
    ============================================================ */
 
 function renderBlocksPanel(root) {
+  renderTilesetBar(root);
   const ts = activeTileset();
   if (!ts) { root.appendChild(el("p", "hint", "No tileset.")); return; }
 
@@ -1502,7 +1602,7 @@ function renderMapsPanel(root) {
   const newBtn = el("button", null, "+ New map");
   newBtn.style.marginTop = "12px";
   newBtn.addEventListener("click", () => {
-    const ts = state.project.tilesets[0];
+    const ts = activeTileset() || state.project.tilesets[0];
     if (!ts) { alert("Create a tileset first."); return; }
     snapshot();
     const map = createMap("map " + (state.project.maps.length + 1), ts.id, 16, 16);
@@ -1513,6 +1613,12 @@ function renderMapsPanel(root) {
     render();
   });
   listCard.appendChild(newBtn);
+
+  const worldPngBtn = el("button", null, "Export world PNG");
+  worldPngBtn.style.marginTop = "8px";
+  worldPngBtn.addEventListener("click", exportWorldPng);
+  listCard.appendChild(worldPngBtn);
+
   side.appendChild(listCard);
 
   const map = mapById(state.selectedMapId);
@@ -1812,6 +1918,12 @@ function renderEventInspector(map) {
     card.appendChild(dflt);
     card.appendChild(spacer(8));
   } else if (ev.type === "warp") {
+    const tf = el("div", "field");
+    tf.appendChild(label("Warp type"));
+    tf.appendChild(selectFrom(WARP_TYPES, ev.warpType || "transport", v => { snapshot(); ev.warpType = v; render(); }));
+    card.appendChild(tf);
+    card.appendChild(spacer(8));
+
     const f = el("div", "field");
     f.appendChild(label("Destination map"));
     const sel = document.createElement("select");
@@ -1833,6 +1945,12 @@ function renderEventInspector(map) {
     const maxY = dest ? dest.height * 2 - 1 : 255;
     addNumber("Target X (cells)", "toX", 0, maxX);
     addNumber("Target Y (cells)", "toY", 0, maxY);
+
+    const ff = el("div", "field");
+    ff.appendChild(label("Facing after warp"));
+    ff.appendChild(selectFrom(WARP_FACINGS, ev.facing || "same", v => { snapshot(); ev.facing = v; render(); }));
+    card.appendChild(ff);
+    card.appendChild(spacer(8));
   } else if (ev.type === "sign") {
     addText("Sign text", "text");
   } else if (ev.type === "item") {
@@ -1871,7 +1989,7 @@ function renderEventList(map) {
     return card;
   }
   const summarize = (e) => {
-    if (e.type === "warp") { const d = mapById(e.toMap); return "to " + (d ? d.name : "(unset)") + " (" + e.toX + "," + e.toY + ")"; }
+    if (e.type === "warp") { const d = mapById(e.toMap); return (e.warpType || "transport") + " to " + (d ? d.name : "(unset)") + " (" + e.toX + "," + e.toY + ")"; }
     if (e.type === "sign") return e.text ? '"' + e.text.slice(0, 24) + '"' : "(no text)";
     if (e.type === "item") return (e.item || "(unset)") + (e.qty > 1 ? " x" + e.qty : "");
     if (e.type === "npc") return e.sprite || "(no sprite)";
@@ -2156,6 +2274,145 @@ function floodFillMap(map, x, y, newBlockId) {
    Import / export
    ============================================================ */
 
+/* ============================================================
+   World PNG export
+   ============================================================ */
+
+/* Assign each map a block-space origin by walking its edge connections,
+   matching the convention in tools/gbworld_visualize.py and gbworld_to_c.py:
+   positive offset shifts the neighbor right (north/south) or down (east/west).
+   Disconnected groups are stacked vertically with a one-block gap. */
+function layoutWorldMaps() {
+  const maps = {};
+  state.project.maps.forEach(m => { maps[m.id] = m; });
+  const pos = {};
+
+  function placeComponent(startId, baseY) {
+    pos[startId] = { x: 0, y: baseY };
+    const stack = [startId];
+    const component = [startId];
+    while (stack.length) {
+      const mid = stack.pop();
+      const m = maps[mid];
+      const { x: bx, y: by } = pos[mid];
+      for (const d of DIRECTIONS) {
+        const c = (m.connections || {})[d];
+        if (!c || !maps[c.mapId] || pos[c.mapId]) continue;
+        const nm = maps[c.mapId];
+        const off = c.offset || 0;
+        if (d === "north")      pos[c.mapId] = { x: bx + off, y: by - nm.height };
+        else if (d === "south") pos[c.mapId] = { x: bx + off, y: by + m.height };
+        else if (d === "east")  pos[c.mapId] = { x: bx + m.width, y: by + off };
+        else                    pos[c.mapId] = { x: bx - nm.width, y: by + off };
+        stack.push(c.mapId);
+        component.push(c.mapId);
+      }
+    }
+    return component;
+  }
+
+  let nextBase = 0;
+  for (const m of state.project.maps) {
+    if (pos[m.id]) continue;
+    const comp = placeComponent(m.id, nextBase);
+    // Shift the component so its top sits at nextBase, then start the next
+    // component one block below its bottom edge.
+    const shift = nextBase - Math.min(...comp.map(id => pos[id].y));
+    comp.forEach(id => { pos[id].y += shift; });
+    nextBase = Math.max(...comp.map(id => pos[id].y + maps[id].height)) + 1;
+  }
+  return pos;
+}
+
+// Render every map into one stitched canvas at the given per-pixel scale.
+function renderWorldCanvas(scale, withLabels) {
+  const pos = layoutWorldMaps();
+  const maps = {};
+  state.project.maps.forEach(m => { maps[m.id] = m; });
+  const ids = Object.keys(pos).map(Number);
+
+  const BLOCK_PX = 4 * TILE_PX; // 32 px
+  const minX = Math.min(...ids.map(id => pos[id].x));
+  const minY = Math.min(...ids.map(id => pos[id].y));
+  const maxX = Math.max(...ids.map(id => pos[id].x + maps[id].width));
+  const maxY = Math.max(...ids.map(id => pos[id].y + maps[id].height));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = (maxX - minX) * BLOCK_PX * scale;
+  canvas.height = (maxY - minY) * BLOCK_PX * scale;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#0c160e"; // background behind empty cells
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  for (const id of ids) {
+    const m = maps[id];
+    const ts = tilesetForMap(m);
+    const px = (pos[id].x - minX) * BLOCK_PX * scale;
+    const py = (pos[id].y - minY) * BLOCK_PX * scale;
+    if (ts) {
+      for (let y = 0; y < m.height; y++) {
+        for (let x = 0; x < m.width; x++) {
+          const blockId = m.blockGrid[y * m.width + x];
+          const block = blockId != null ? blockById(ts, blockId) : null;
+          if (block) drawBlock(ctx, ts, block, scale, px + x * BLOCK_PX * scale, py + y * BLOCK_PX * scale);
+        }
+      }
+    }
+    if (withLabels) {
+      ctx.strokeStyle = "#2c5840";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(px + 0.5, py + 0.5, m.width * BLOCK_PX * scale - 1, m.height * BLOCK_PX * scale - 1);
+      ctx.font = (5 * scale + 6) + "px monospace";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      // Dark chip behind the name so it stays readable over any tiles.
+      const tw = ctx.measureText(m.name).width;
+      ctx.fillStyle = "rgba(12,22,14,0.8)";
+      ctx.fillRect(px + 1, py + 1, tw + 6, 5 * scale + 10);
+      ctx.fillStyle = "#d8f0c8";
+      ctx.fillText(m.name, px + 4, py + 4);
+    }
+  }
+  return canvas;
+}
+
+function exportWorldPng() {
+  if (state.project.maps.length === 0) { alert("No maps to export."); return; }
+  openModal("Export world PNG", (modal) => {
+    modal.appendChild(el("p", "hint",
+      "Stitches every map into one image using the edge connections; " +
+      "disconnected maps are stacked below with a one-block gap."));
+
+    const row = el("div", "row");
+    row.style.margin = "10px 0";
+    row.appendChild(el("span", "cell-label", "Scale"));
+    const scaleSel = document.createElement("select");
+    [1, 2, 3, 4].forEach(s => {
+      const opt = document.createElement("option");
+      opt.value = s; opt.textContent = s + "×";
+      scaleSel.appendChild(opt);
+    });
+    row.appendChild(scaleSel);
+    const labelWrap = document.createElement("label");
+    const labelChk = document.createElement("input");
+    labelChk.type = "checkbox"; labelChk.checked = true;
+    labelWrap.append(labelChk, " Map borders and names");
+    row.appendChild(labelWrap);
+    modal.appendChild(row);
+
+    const dl = el("button", "primary", "Download PNG");
+    dl.addEventListener("click", () => {
+      const canvas = renderWorldCanvas(Number(scaleSel.value), labelChk.checked);
+      const name = (state.project.meta.name || "world").replace(/[^a-z0-9_-]+/gi, "_") + "-world.png";
+      canvas.toBlob(blob => {
+        if (blob) { downloadBlob(name, blob); closeModal(); }
+        else alert("Could not encode the PNG.");
+      }, "image/png");
+    });
+    modal.appendChild(dl);
+  });
+}
+
 function projectJson() {
   state.project._displayPaletteId = state.displayPaletteId;
   return JSON.stringify(state.project, null, 2);
@@ -2206,7 +2463,16 @@ function loadProjectFrom(text) {
     ts.blocks = ts.blocks || []; ts.metatiles = ts.metatiles || [];
     if (!ts.tileBudget) ts.tileBudget = 256;   // older files predate an editable budget
   });
-  parsed.maps.forEach(m => { if (m.borderBlock === undefined) m.borderBlock = null; });
+  parsed.maps.forEach(m => {
+    if (m.borderBlock === undefined) m.borderBlock = null;
+    // Older files predate warp types and post-warp facing.
+    (m.events || []).forEach(e => {
+      if (e.type === "warp") {
+        if (!e.warpType) e.warpType = "transport";
+        if (!e.facing) e.facing = "same";
+      }
+    });
+  });
   state.project = parsed;
   syncSelectionsToProject();
   resetHistory();

@@ -81,6 +81,8 @@ The entire authoring tool lives in one ~2300-line HTML file: CSS at the top, sta
 
 Event/warp coordinates are in **metatile cells** (2× the block resolution per axis). Map size and `blockGrid` are in **blocks**.
 
+**World PNG export** (Maps panel): `layoutWorldMaps` + `renderWorldCanvas` stitch all maps into one canvas by walking edge connections — a JS port of `tools/gbworld_visualize.py`'s layout, and it must keep following the same offset convention (positive = right for N/S links, down for E/W links; disconnected components stack vertically with a one-block gap).
+
 ### The sprite editor (`docs/gb-sprite-editor.html`)
 
 A single-file tool (same conventions as the world editor: `makeDefaultProject`, `const state`, full-rebuild `render()`, JSON-snapshot undo, stable integer ids) for authoring OBJs. Hierarchy: 8×8 tile → **metasprite** (parts = hardware sprites with pixel offsets, H/V flip, palette) → **animation** (frames = metasprite + duration in 60Hz ticks).
