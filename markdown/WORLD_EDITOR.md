@@ -33,6 +33,15 @@ The editor's left rail switches between panels; the typical bottom-up workflow i
    budget (default 128 — engines reserve slots for font/UI and sprites; the
    absolute DMG limit is 256); animated tiles each reserve one slot.
 
+   **Import PNG** slices any 2-bit sheet into 8×8 tiles (left-to-right,
+   top-to-bottom) and deduplicates them. If the sheet is a laid-out tilemap, the
+   import dialog can also assemble **metatiles** (each 2×2 tile block of the
+   image) and **blocks** (each 2×2 metatile block) in the same pass, so a full
+   scene comes in ready to paint. Generated metatiles use the first palette with
+   walkable collision and normal behavior; identical metatiles/blocks are reused,
+   and any that already exist in the tileset are shared rather than duplicated.
+   Leftover odd rows/columns at the right/bottom edge are ignored.
+
    A project can hold **multiple tilesets** (each map picks one in its
    properties). The bar at the top of the Tiles, Metatiles, and Blocks panels
    switches the active tileset and can create, rename, or delete tilesets;

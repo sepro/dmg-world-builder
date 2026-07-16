@@ -1176,8 +1176,7 @@ function importTilesFromPng(ts) {
     if (!file) return;
     const img = new Image();
     img.onload = () => {
-      try { addTilesFromImage(ts, img); }
-      catch (err) { alert("Could not import image: " + err.message); }
+      openImportOptions(ts, img);
       URL.revokeObjectURL(img.src);
     };
     img.onerror = () => alert("Could not read that file as an image.");
@@ -1186,7 +1185,66 @@ function importTilesFromPng(ts) {
   input.click();
 }
 
-function addTilesFromImage(ts, img) {
+// After the image loads, let the author choose whether to also assemble
+// metatiles (2x2 tiles) and blocks (2x2 metatiles) straight from the image
+// grid, so a laid-out tilemap can come in as ready-to-paint blocks in one pass.
+function openImportOptions(ts, img) {
+  const tilesAcross = Math.floor(img.width / TILE_PX);
+  const tilesDown = Math.floor(img.height / TILE_PX);
+  if (tilesAcross === 0 || tilesDown === 0) { alert("Image is smaller than one 8x8 tile."); return; }
+
+  const opts = { metatiles: true, blocks: true };
+  openModal("Import PNG", (modal) => {
+    modal.appendChild(el("p", "hint",
+      "Image is " + tilesAcross + "×" + tilesDown + " tiles (" + img.width + "×" +
+      img.height + " px). Tiles are sliced left-to-right, top-to-bottom and deduplicated."));
+
+    // Metatiles/blocks are assembled off the image's own 2x2 / 4x4 tile grid, so
+    // odd leftover rows/columns at the right/bottom edge are ignored (floored).
+    const metasAcross = Math.floor(tilesAcross / 2), metasDown = Math.floor(tilesDown / 2);
+    const blocksAcross = Math.floor(metasAcross / 2), blocksDown = Math.floor(metasDown / 2);
+
+    const metaToggle = toggle(
+      "Also create metatiles (2×2 tiles) — up to " + (metasAcross * metasDown) + " cells",
+      opts.metatiles, (v) => {
+        opts.metatiles = v;
+        if (!v) { opts.blocks = false; blockBox.checked = false; }
+        blockBox.disabled = !v;
+      });
+    const blockToggleEl = toggle(
+      "Also create blocks (2×2 metatiles) — up to " + (blocksAcross * blocksDown) + " cells",
+      opts.blocks, (v) => {
+        opts.blocks = v;
+        if (v) { opts.metatiles = true; metaBox.checked = true; blockBox.disabled = false; }
+      });
+    const metaBox = metaToggle.querySelector("input");
+    const blockBox = blockToggleEl.querySelector("input");
+
+    modal.appendChild(spacer(6));
+    modal.appendChild(metaToggle);
+    modal.appendChild(spacer(4));
+    modal.appendChild(blockToggleEl);
+    modal.appendChild(el("p", "hint",
+      "Metatiles use the first palette with walkable collision and normal behavior; "
+      + "identical metatiles and blocks are reused, and any matching existing ones are shared."));
+
+    modal.appendChild(spacer(12));
+    const actions = el("div", "row");
+    const importBtn = el("button", "primary", "Import");
+    importBtn.addEventListener("click", () => {
+      closeModal();
+      try { addTilesFromImage(ts, img, opts); }
+      catch (err) { alert("Could not import image: " + err.message); }
+    });
+    const cancelBtn = el("button", null, "Cancel");
+    cancelBtn.addEventListener("click", closeModal);
+    actions.append(importBtn, cancelBtn);
+    modal.appendChild(actions);
+  });
+}
+
+function addTilesFromImage(ts, img, opts) {
+  opts = opts || {};
   const tilesAcross = Math.floor(img.width / TILE_PX);
   const tilesDown = Math.floor(img.height / TILE_PX);
   if (tilesAcross === 0 || tilesDown === 0) { alert("Image is smaller than one 8x8 tile."); return; }
@@ -1197,12 +1255,21 @@ function addTilesFromImage(ts, img) {
   ctx.drawImage(img, 0, 0);
   const data = ctx.getImageData(0, 0, img.width, img.height).data;
 
-  // Seed the dedupe set with tiles already in the project.
-  const seen = new Set(ts.tiles.map(t => t.pixels.join("")));
+  // Map each unique pixel pattern to the tile id that will represent it, seeded
+  // with tiles already in the project so imported cells reuse existing art.
+  // Grid cells that resolve to a brand-new tile record its pending key here and
+  // get a real id at commit time (so aborting the budget prompt allocates none).
+  const tileIdByKey = new Map();
+  ts.tiles.forEach(t => { const k = t.pixels.join(""); if (!tileIdByKey.has(k)) tileIdByKey.set(k, t.id); });
 
-  const newTiles = [];
+  const newTiles = [];                 // { key, pixels } for tiles to be created
+  const newTileKeys = new Set();       // keys already queued in newTiles
+  // Per-image-cell pixel key, so metatile assembly can look up each cell's tile.
+  const keyGrid = new Array(tilesDown);
   let duplicates = 0;
+
   for (let ty = 0; ty < tilesDown; ty++) {
+    keyGrid[ty] = new Array(tilesAcross);
     for (let tx = 0; tx < tilesAcross; tx++) {
       const pixels = new Array(PIXELS_PER_TILE);
       for (let y = 0; y < TILE_PX; y++) {
@@ -1216,13 +1283,14 @@ function addTilesFromImage(ts, img) {
         }
       }
       const key = pixels.join("");
-      if (seen.has(key)) { duplicates++; continue; }
-      seen.add(key);
-      newTiles.push(pixels);
+      keyGrid[ty][tx] = key;
+      if (tileIdByKey.has(key)) { duplicates++; continue; }
+      if (!newTileKeys.has(key)) { newTileKeys.add(key); newTiles.push({ key, pixels }); }
+      else duplicates++;
     }
   }
 
-  if (newTiles.length === 0) {
+  if (newTiles.length === 0 && !opts.metatiles) {
     alert("No new tiles: all " + duplicates + " tiles in the image already exist.");
     return;
   }
@@ -1232,12 +1300,93 @@ function addTilesFromImage(ts, img) {
                ", over the budget of " + ts.tileBudget + ". Import anyway?")) return;
 
   snapshot();
-  newTiles.forEach(pixels => ts.tiles.push({ id: genId(), pixels }));
-  state.selectedTileId = ts.tiles[ts.tiles.length - 1].id;
-  state.selectedFrame = 0;
+
+  // Commit new tiles, resolving each pending key to its freshly allocated id.
+  newTiles.forEach(({ key, pixels }) => {
+    const tile = { id: genId(), pixels };
+    ts.tiles.push(tile);
+    tileIdByKey.set(key, tile.id);
+  });
+  if (ts.tiles.length) { state.selectedTileId = ts.tiles[ts.tiles.length - 1].id; state.selectedFrame = 0; }
+
+  let newMetatiles = 0, newBlocks = 0;
+  let metaGrid = null;
+
+  if (opts.metatiles) {
+    const firstPalette = state.project.palettes[0].id;
+    // Reuse existing metatiles whose four tiles match exactly (order TL,TR,BL,BR).
+    const metaIdByKey = new Map();
+    ts.metatiles.forEach(m => {
+      const k = m.tiles.join(",");
+      if (!metaIdByKey.has(k)) metaIdByKey.set(k, m.id);
+    });
+    const metasAcross = Math.floor(tilesAcross / 2), metasDown = Math.floor(tilesDown / 2);
+    metaGrid = new Array(metasDown);
+    for (let my = 0; my < metasDown; my++) {
+      metaGrid[my] = new Array(metasAcross);
+      for (let mx = 0; mx < metasAcross; mx++) {
+        const cellTiles = [
+          tileIdByKey.get(keyGrid[my * 2][mx * 2]),         // TL
+          tileIdByKey.get(keyGrid[my * 2][mx * 2 + 1]),     // TR
+          tileIdByKey.get(keyGrid[my * 2 + 1][mx * 2]),     // BL
+          tileIdByKey.get(keyGrid[my * 2 + 1][mx * 2 + 1]), // BR
+        ];
+        const key = cellTiles.join(",");
+        let id = metaIdByKey.get(key);
+        if (id == null) {
+          const m = {
+            id: genId(), name: "imported",
+            tiles: cellTiles,
+            cellPalettes: [firstPalette, firstPalette, firstPalette, firstPalette],
+            collision: "walk", behavior: "normal",
+          };
+          ts.metatiles.push(m);
+          id = m.id;
+          metaIdByKey.set(key, id);
+          newMetatiles++;
+        }
+        metaGrid[my][mx] = id;
+      }
+    }
+    if (ts.metatiles.length) { state.selectedMetatileId = ts.metatiles[ts.metatiles.length - 1].id; state.selectedCell = 0; }
+  }
+
+  if (opts.blocks && metaGrid) {
+    // Reuse existing blocks whose four metatiles match exactly.
+    const blockIdByKey = new Map();
+    ts.blocks.forEach(b => {
+      const k = b.metatiles.join(",");
+      if (!blockIdByKey.has(k)) blockIdByKey.set(k, b.id);
+    });
+    const metasAcross = metaGrid.length ? metaGrid[0].length : 0;
+    const metasDown = metaGrid.length;
+    const blocksAcross = Math.floor(metasAcross / 2), blocksDown = Math.floor(metasDown / 2);
+    for (let by = 0; by < blocksDown; by++) {
+      for (let bx = 0; bx < blocksAcross; bx++) {
+        const cellMetas = [
+          metaGrid[by * 2][bx * 2],         // TL
+          metaGrid[by * 2][bx * 2 + 1],     // TR
+          metaGrid[by * 2 + 1][bx * 2],     // BL
+          metaGrid[by * 2 + 1][bx * 2 + 1], // BR
+        ];
+        const key = cellMetas.join(",");
+        if (blockIdByKey.has(key)) continue;
+        const b = { id: genId(), name: "imported", metatiles: cellMetas };
+        ts.blocks.push(b);
+        blockIdByKey.set(key, b.id);
+        newBlocks++;
+      }
+    }
+    if (ts.blocks.length) state.selectedBlockId = ts.blocks[ts.blocks.length - 1].id;
+  }
+
   render();
-  alert("Imported " + newTiles.length + " tile(s)" +
-        (duplicates ? " (" + duplicates + " duplicate(s) skipped)" : "") + ".");
+
+  const parts = [newTiles.length + " tile(s)"];
+  if (opts.metatiles) parts.push(newMetatiles + " metatile(s)");
+  if (opts.blocks) parts.push(newBlocks + " block(s)");
+  alert("Imported " + parts.join(", ") +
+        (duplicates ? " (" + duplicates + " duplicate tile(s) skipped)" : "") + ".");
 }
 
 function exportTilesToPng(ts) {
