@@ -139,12 +139,21 @@ one extra frame. `frameRate` is how many 1/60s ticks each frame is shown.
   "tiles":        [21, 21, 21, 21],   // tile ids (TL,TR,BL,BR), or null = empty
   "cellPalettes": [1, 1, 1, 1],       // palette id per cell (GBC); DMG ignores
   "collision":    "solid",            // "walk" | "solid"
-  "behavior":     "water"             // one of project.behaviors
+  "behavior":     "water",            // one of project.behaviors
+  "overlay":      false               // optional; true = BG art draws over the player
 }
 ```
 
 Collision and behavior are properties of the metatile **type**, shared by every cell
 that uses it. This is why a warp's destination cannot live here (see §4.4).
+
+`overlay` marks metatiles whose art should cover sprites standing on them (tree
+canopy, tall grass, archways). It is independent of collision — a canopy is
+solid + overlay, tall grass is walk + overlay. The converter ORs it into the
+`collision` byte as `COLLISION_OVERLAY` (bit 1); the engine sets the OAM
+priority bit ("behind BG colors 1-3") on exactly the sprite parts overlapping
+such a tile. DMG caveat: BG color 0 (the lightest shade) always shows the
+sprite through, so overlay art should use shades 1-3. Absent = false.
 
 #### Block
 
@@ -218,7 +227,7 @@ is reconstructed at runtime, rather than baking a flat tilemap.
 typedef struct {
     UINT8 tiles[4];      // tile indices: TL, TR, BL, BR
     UINT8 attrs[4];      // CGB BG attribute per cell (palette 0-7); ignored on DMG
-    UINT8 collision;     // COLLISION_WALK / COLLISION_SOLID
+    UINT8 collision;     // bitfield: COLLISION_SOLID (bit 0) | COLLISION_OVERLAY (bit 1)
     UINT8 behavior;      // BEHAVIOR_*
 } Metatile;
 
@@ -423,7 +432,8 @@ if (m && (m->behavior == BEHAVIOR_WARP || m->behavior == BEHAVIOR_DOOR)) {
 }
 ```
 
-Use the same `metatile_at` for collision: block a move if `m->collision == COLLISION_SOLID`.
+Use the same `metatile_at` for collision: block a move if `m->collision & COLLISION_SOLID`
+(the byte is a bitfield — `COLLISION_OVERLAY` may also be set, see §2.5 "Metatile").
 
 ### 4.5 Connections (seamless scrolling)
 

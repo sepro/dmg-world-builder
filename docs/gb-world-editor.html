@@ -1468,7 +1468,7 @@ function renderMetatilesPanel(root) {
     drawMetatile(c.getContext("2d"), ts, m, 32 / (TILE_PX * 2));
     c.style.border = "1px solid var(--border)";
     const name = el("span", "mt-name", "#" + index + "  " + m.name);
-    const meta = el("span", "mt-meta", m.collision + " / " + m.behavior);
+    const meta = el("span", "mt-meta", m.collision + " / " + m.behavior + (m.overlay ? " / overlay" : ""));
     row.append(c, name, meta);
     row.addEventListener("click", () => { state.selectedMetatileId = m.id; state.selectedCell = 0; render(); });
     list.appendChild(row);
@@ -1488,6 +1488,7 @@ function renderMetatilesPanel(root) {
       cellPalettes: [firstPalette, firstPalette, firstPalette, firstPalette],
       collision: "walk",
       behavior: "normal",
+      overlay: false,
     };
     ts.metatiles.push(m);
     state.selectedMetatileId = m.id; state.selectedCell = 0; render();
@@ -1500,7 +1501,7 @@ function renderMetatilesPanel(root) {
     const m = {
       id: genId(), name: src.name + " copy",
       tiles: [...src.tiles], cellPalettes: [...src.cellPalettes],
-      collision: src.collision, behavior: src.behavior,
+      collision: src.collision, behavior: src.behavior, overlay: !!src.overlay,
     };
     ts.metatiles.push(m);
     state.selectedMetatileId = m.id; state.selectedCell = 0; render();
@@ -1592,6 +1593,22 @@ function renderMetatilesPanel(root) {
   behField.appendChild(selectFrom(state.project.behaviors, m.behavior, v => { snapshot(); m.behavior = v; render(); }));
   movRow.append(colField, behField);
   ed.appendChild(movRow);
+
+  // Overlay: the metatile's BG art draws over the player (engine sets the
+  // OAM priority bit on player parts standing on it). Independent of
+  // collision: a canopy is solid + overlay, tall grass is walk + overlay.
+  // DMG caveat: only BG colors 1-3 cover the sprite; color 0 shows it.
+  ed.appendChild(spacer(8));
+  const ovField = el("div", "field");
+  const ovLabel = document.createElement("label");
+  ovLabel.className = "checkbox";
+  const ovCb = document.createElement("input");
+  ovCb.type = "checkbox";
+  ovCb.checked = !!m.overlay;
+  ovCb.addEventListener("change", () => { snapshot(); m.overlay = ovCb.checked; render(); });
+  ovLabel.append(ovCb, document.createTextNode(" Draw over player (overlay)"));
+  ovField.appendChild(ovLabel);
+  ed.appendChild(ovField);
 
   // Tile picker for assigning into the selected cell.
   ed.appendChild(spacer(16));

@@ -46,7 +46,12 @@ The editor's left rail switches between panels; the typical bottom-up workflow i
    properties). The bar at the top of the Tiles, Metatiles, and Blocks panels
    switches the active tileset and can create, rename, or delete tilesets;
    deletion is blocked while any map still uses the tileset.
-3. **Metatiles** — assemble 2×2 tiles into 16×16 metatiles.
+3. **Metatiles** — assemble 2×2 tiles into 16×16 metatiles. Besides collision
+   (`walk | solid`) and behavior, a metatile can be flagged **Draw over player
+   (overlay)**: its background art covers sprites standing on it (tree canopy,
+   tall grass, archways). The flag is independent of collision — a canopy is
+   solid + overlay, tall grass walk + overlay. On DMG only shades 1–3 cover
+   the sprite; the lightest shade always shows it through.
 4. **Blocks** — assemble 2×2 metatiles into 32×32 blocks.
 5. **Maps** — paint blocks onto maps, set edge connections between maps, pick a
    border block (drawn past unconnected edges), and place the events layer
