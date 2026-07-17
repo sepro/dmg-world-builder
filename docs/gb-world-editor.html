@@ -496,6 +496,36 @@ function countBlockReferences(blockId) {
     (n, map) => n + (map.blockGrid ? map.blockGrid.filter(b => b === blockId).length : 0), 0);
 }
 
+// What pruning a tileset would remove: blocks no map on this tileset paints
+// (or uses as border block), then metatiles no surviving block references,
+// then tiles no surviving metatile references. Pure query -- the caller
+// filters the arrays after confirming. Usage is counted across *every* map
+// sharing the tileset, so pruning from one map can never strand a sibling.
+// Everything references by id and export order is array order, so dropping
+// entries is also the reindex.
+function pruneTilesetDeadEntries(ts) {
+  const maps = state.project.maps.filter(m => m.tilesetId === ts.id);
+  const usedBlocks = new Set();
+  maps.forEach(m => {
+    m.blockGrid.forEach(b => { if (b != null) usedBlocks.add(b); });
+    if (m.borderBlock != null) usedBlocks.add(m.borderBlock);
+  });
+  const usedMetatiles = new Set();
+  ts.blocks.forEach(b => {
+    if (usedBlocks.has(b.id)) b.metatiles.forEach(mt => { if (mt != null) usedMetatiles.add(mt); });
+  });
+  const usedTiles = new Set();
+  ts.metatiles.forEach(m => {
+    if (usedMetatiles.has(m.id)) m.tiles.forEach(t => { if (t != null) usedTiles.add(t); });
+  });
+  return {
+    numMaps: maps.length,
+    blocks: ts.blocks.filter(b => !usedBlocks.has(b.id)),
+    metatiles: ts.metatiles.filter(m => !usedMetatiles.has(m.id)),
+    tiles: ts.tiles.filter(t => !usedTiles.has(t.id)),
+  };
+}
+
 const mapById = (id) => state.project.maps.find(m => m.id === id) || null;
 const tilesetForMap = (map) => state.project.tilesets.find(t => t.id === map.tilesetId) || null;
 
@@ -2312,6 +2342,37 @@ function renderMapProperties(map) {
   card.appendChild(sizeRow);
   card.appendChild(el("p", "hint", "Pixels: " + (map.width * 32) + " x " + (map.height * 32) +
     " (" + (map.width * 4) + " x " + (map.height * 4) + " tiles)"));
+
+  // Prune: drop tileset entries nothing references. Counts usage across all
+  // maps sharing the tileset, so this is always safe for sibling maps.
+  card.appendChild(spacer(10));
+  const pruneBtn = el("button", null, "Prune unused tiles/metatiles/blocks");
+  pruneBtn.addEventListener("click", () => {
+    const ts = tilesetForMap(map);
+    if (!ts) { alert("This map has no tileset to prune."); return; }
+    const dead = pruneTilesetDeadEntries(ts);
+    const total = dead.blocks.length + dead.metatiles.length + dead.tiles.length;
+    if (!total) {
+      alert('Nothing to prune: every tile, metatile and block in "' + ts.name + '" is in use.');
+      return;
+    }
+    const mapsNote = dead.numMaps > 1
+      ? " Usage was checked across all " + dead.numMaps + " maps on this tileset."
+      : "";
+    if (!confirm('Prune tileset "' + ts.name + '": remove ' +
+        dead.blocks.length + " block(s), " + dead.metatiles.length + " metatile(s) and " +
+        dead.tiles.length + " tile(s) that nothing uses?" + mapsNote)) return;
+    snapshot();
+    const deadBlocks = new Set(dead.blocks.map(b => b.id));
+    const deadMetatiles = new Set(dead.metatiles.map(m => m.id));
+    const deadTiles = new Set(dead.tiles.map(t => t.id));
+    ts.blocks = ts.blocks.filter(b => !deadBlocks.has(b.id));
+    ts.metatiles = ts.metatiles.filter(m => !deadMetatiles.has(m.id));
+    ts.tiles = ts.tiles.filter(t => !deadTiles.has(t.id));
+    validateSelections();   // selections/brush may have pointed at pruned entries
+    render();
+  });
+  card.appendChild(pruneBtn);
 
   // Delete.
   card.appendChild(spacer(10));
