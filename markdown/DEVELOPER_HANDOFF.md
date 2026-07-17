@@ -102,7 +102,7 @@ map looks identical on both, color is purely additive on GBC.
 
 ```jsonc
 {
-  "id": 10, "name": "main", "tileBudget": 128,
+  "id": 10, "name": "main", "tileBudget": 176,
   "tiles":     [ /* Tile */ ],
   "metatiles": [ /* Metatile */ ],
   "blocks":    [ /* Block */ ]
@@ -111,7 +111,8 @@ map looks identical on both, color is purely additive on GBC.
 
 `tileBudget` is the number of VRAM tile slots the target engine can give the world
 tileset (editable in the Tiles tab). The absolute DMG BG limit is 256, but engines
-usually reserve slots for font/UI and sprites, so new projects default to 128.
+usually reserve slots for font/UI and sprites; new projects default to 176 (the
+Wispbound engine keeps BG slots 0-79 for font/UI, leaving 80-255 for the world).
 Each map references exactly one tileset; a connection between maps with **different**
 tilesets implies a VRAM reload at the seam.
 

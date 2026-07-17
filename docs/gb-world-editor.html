@@ -226,9 +226,10 @@ function makeDefaultProject() {
   const tileset = {
     id: id(),
     name: "main",
-    tileBudget: 128,                 // VRAM tiles the engine can take (BG slots 0-127
-                                     // hold the resident font/UI + OBJ tiles; adjust
-                                     // per target -- the absolute DMG BG limit is 256)
+    tileBudget: 176,                 // VRAM tiles the engine can take (the Wispbound
+                                     // engine reserves BG slots 0-79 for font/UI, so
+                                     // the world gets slots 80-255 = 176; adjust per
+                                     // target -- the absolute DMG BG limit is 256)
     tiles: [],
     metatiles: [],
     blocks: [],
@@ -788,7 +789,7 @@ function createTileset(name) {
   return {
     id: genId(),
     name,
-    tileBudget: 128,
+    tileBudget: 176,
     // Start with one blank tile so the tile editor has a selection to show.
     tiles: [{ id: genId(), pixels: new Array(PIXELS_PER_TILE).fill(0) }],
     metatiles: [],
