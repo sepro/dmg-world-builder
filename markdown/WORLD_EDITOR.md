@@ -66,7 +66,11 @@ The editor's left rail switches between panels; the typical bottom-up workflow i
    A third **Collision** mode paints `walk`/`solid` directly on the map at
    metatile (16×16) resolution with the collision overlay always visible.
    The value is written to the metatile definition under the cursor, so it
-   propagates to every block and map that reuses that metatile.
+   propagates to every block and map that reuses that metatile. Turn on
+   **Duplicate shared** to confine the paint to the cell under the brush:
+   shared metatiles (and, when needed, shared blocks) are duplicated with the
+   new collision and only the painted cell is rewired — an existing identical
+   variant is reused instead of creating another copy.
 
 Painting tools, zoom, selection, and undo/redo (a single pointer stroke collapses
 to one undo step) operate on the active panel.

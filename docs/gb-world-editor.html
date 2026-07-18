@@ -375,6 +375,7 @@ const state = {
   mapMode: "blocks",      // blocks | events | collision
   eventTool: "warp",      // which event type a click places
   collisionTool: "solid", // which collision value the collision brush paints
+  collisionDuplicate: false, // duplicate shared metatiles/blocks so the paint stays local
   selectedEventId: null,
   ink: 3,                 // current pixel value to paint (0..3)
   tool: "pencil",         // pencil | fill | eyedropper
@@ -2084,15 +2085,74 @@ function renderMapsPanel(root) {
         for (let x = 0; x < map.width; x++)
           if (blockIds.has(map.blockGrid[y * map.width + x])) paintCell(x, y);
     };
+    // Support for "Duplicate shared": how often a block appears on any map of
+    // this tileset, and how often a metatile appears in any block.
+    const mapsSharingTs = state.project.maps.filter(mp => mp.tilesetId === ts.id);
+    const blockUsageCount = (blockId) => {
+      let n = 0;
+      mapsSharingTs.forEach(mp => mp.blockGrid.forEach(id => { if (id === blockId) n++; }));
+      return n;
+    };
+    const metaUsageCount = (mtId) => {
+      let n = 0;
+      ts.blocks.forEach(b => b.metatiles.forEach(id => { if (id === mtId) n++; }));
+      return n;
+    };
+    // Reuse-or-create a metatile identical to src except for its collision, and
+    // a block identical to src except for one quadrant. Reuse keeps a drag
+    // stroke from spawning one copy per painted cell.
+    const metaKey = (m2) => [m2.tiles.join(","), m2.cellPalettes.join(","), m2.behavior,
+      m2.overlay ? (m2.overlayMode === "bottom" ? "ob" : "of") : "-", m2.collision].join("|");
+    const variantOfMetatile = (src, collision) => {
+      const wanted = metaKey({ ...src, collision });
+      const hit = ts.metatiles.find(m2 => metaKey(m2) === wanted);
+      if (hit) return hit.id;
+      const copy = {
+        id: genId(), name: src.name + " (" + collision + ")",
+        tiles: [...src.tiles], cellPalettes: [...src.cellPalettes],
+        collision, behavior: src.behavior, overlay: !!src.overlay,
+        overlayMode: src.overlayMode === "bottom" ? "bottom" : "full",
+      };
+      ts.metatiles.push(copy);
+      return copy.id;
+    };
+    const variantOfBlock = (src, q, mtId) => {
+      const cells = src.metatiles.slice();
+      cells[q] = mtId;
+      const key = cells.join(",");
+      const hit = ts.blocks.find(b => b.metatiles.join(",") === key);
+      if (hit) return hit.id;
+      const copy = { id: genId(), name: src.name + " copy", metatiles: cells };
+      ts.blocks.push(copy);
+      return copy.id;
+    };
     const applyCollisionAt = (mx, my) => {
-      const blockId = map.blockGrid[(my >> 1) * map.width + (mx >> 1)];
+      const cellIndex = (my >> 1) * map.width + (mx >> 1);
+      const blockId = map.blockGrid[cellIndex];
       const block = blockId != null ? blockById(ts, blockId) : null;
       if (!block) return;
-      const mtId = block.metatiles[(my & 1) * 2 + (mx & 1)];   // TL, TR, BL, BR
+      const q = (my & 1) * 2 + (mx & 1);                       // TL, TR, BL, BR
+      const mtId = block.metatiles[q];
       const m = mtId != null ? metatileById(ts, mtId) : null;
       if (!m || m.collision === state.collisionTool) return;
-      m.collision = state.collisionTool;
-      repaintCellsUsing(mtId);
+      if (!state.collisionDuplicate) {
+        m.collision = state.collisionTool;
+        repaintCellsUsing(mtId);
+        return;
+      }
+      // Duplicate shared: confine the change to this one map cell by copying
+      // whatever is shared on the path to the metatile. A shared block gets a
+      // variant pointed at only from this cell; an unshared block with a
+      // shared metatile just swaps its quadrant; if nothing is shared the
+      // metatile can be edited in place.
+      if (blockUsageCount(blockId) > 1) {
+        map.blockGrid[cellIndex] = variantOfBlock(block, q, variantOfMetatile(m, state.collisionTool));
+      } else if (metaUsageCount(mtId) > 1) {
+        block.metatiles[q] = variantOfMetatile(m, state.collisionTool);
+      } else {
+        m.collision = state.collisionTool;
+      }
+      paintCell(mx >> 1, my >> 1);
     };
     let painting = false;
     canvas.addEventListener("pointerdown", (ev) => {
@@ -2157,10 +2217,13 @@ function renderMapsPanel(root) {
     main.appendChild(palette);
   } else if (state.mapMode === "collision") {
     main.appendChild(spacer(12));
-    main.appendChild(el("p", "hint",
-      "Paint " + state.collisionTool + " onto 16×16 metatile cells. The edit is stored on " +
-      "the metatile itself, so every use of that metatile — in other blocks and on other " +
-      "maps — updates with it."));
+    main.appendChild(el("p", "hint", state.collisionDuplicate
+      ? "Paint " + state.collisionTool + " onto 16×16 metatile cells. Duplicate shared is on: " +
+        "shared metatiles/blocks under the brush are copied (reusing an identical variant when " +
+        "one exists), so only the painted cell changes."
+      : "Paint " + state.collisionTool + " onto 16×16 metatile cells. The edit is stored on " +
+        "the metatile itself, so every use of that metatile — in other blocks and on other " +
+        "maps — updates with it. Turn on “Duplicate shared” to change only the painted cell."));
   } else {
     main.appendChild(spacer(12));
     main.appendChild(el("p", "hint",
@@ -2467,6 +2530,10 @@ function renderMapToolbar(map, ts) {
       colGroup.appendChild(b);
     });
     bar.appendChild(colGroup);
+    // Localize the paint: duplicate shared metatiles/blocks under the brush
+    // instead of editing the shared definition.
+    bar.appendChild(toggle("Duplicate shared", state.collisionDuplicate,
+      v => { state.collisionDuplicate = v; render(); }));
   } else {
     // Event type picker: which kind of event a click drops.
     const evGroup = el("div", "group");
