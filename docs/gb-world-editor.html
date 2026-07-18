@@ -2712,8 +2712,62 @@ function layoutWorldMaps() {
   return pos;
 }
 
+/* Draw curved arrows from each warp event to its destination cell.
+   Warp coords are metatile cells (half a block per step). */
+function drawWarpArrows(ctx, pos, maps, minX, minY, scale) {
+  const CELL_PX = 2 * TILE_PX * scale; // 16 px metatile cells
+  const originOf = id => ({
+    x: (pos[id].x - minX) * 2 * CELL_PX,
+    y: (pos[id].y - minY) * 2 * CELL_PX,
+  });
+
+  ctx.save();
+  ctx.strokeStyle = EVENT_TYPES.warp.color;
+  ctx.fillStyle = EVENT_TYPES.warp.color;
+  ctx.lineWidth = Math.max(1.5, scale);
+
+  for (const m of state.project.maps) {
+    if (!pos[m.id]) continue;
+    for (const e of (m.events || [])) {
+      if (e.type !== "warp" || e.toMap == null || !pos[e.toMap] || !maps[e.toMap]) continue;
+      const so = originOf(m.id), to = originOf(e.toMap);
+      const sx = so.x + (e.x + 0.5) * CELL_PX, sy = so.y + (e.y + 0.5) * CELL_PX;
+      const tx = to.x + (e.toX + 0.5) * CELL_PX, ty = to.y + (e.toY + 0.5) * CELL_PX;
+
+      // Control point: midpoint pushed perpendicular to the line, so
+      // opposite-direction warp pairs bow apart instead of overlapping.
+      const dx = tx - sx, dy = ty - sy;
+      const dist = Math.hypot(dx, dy) || 1;
+      const bow = Math.min(dist * 0.25, 3 * CELL_PX);
+      const cx = (sx + tx) / 2 - (dy / dist) * bow;
+      const cy = (sy + ty) / 2 + (dx / dist) * bow;
+
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.quadraticCurveTo(cx, cy, tx, ty);
+      ctx.stroke();
+
+      // Dot at the source cell.
+      ctx.beginPath();
+      ctx.arc(sx, sy, Math.max(2, 1.5 * scale), 0, Math.PI * 2);
+      ctx.fill();
+
+      // Arrowhead at the destination, along the curve's end tangent.
+      const ang = Math.atan2(ty - cy, tx - cx);
+      const ah = Math.max(5, 4 * scale);
+      ctx.beginPath();
+      ctx.moveTo(tx, ty);
+      ctx.lineTo(tx - ah * Math.cos(ang - 0.45), ty - ah * Math.sin(ang - 0.45));
+      ctx.lineTo(tx - ah * Math.cos(ang + 0.45), ty - ah * Math.sin(ang + 0.45));
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
 // Render every map into one stitched canvas at the given per-pixel scale.
-function renderWorldCanvas(scale, withLabels) {
+function renderWorldCanvas(scale, withLabels, withWarps) {
   const pos = layoutWorldMaps();
   const maps = {};
   state.project.maps.forEach(m => { maps[m.id] = m; });
@@ -2761,6 +2815,7 @@ function renderWorldCanvas(scale, withLabels) {
       ctx.fillText(m.name, px + 4, py + 4);
     }
   }
+  if (withWarps) drawWarpArrows(ctx, pos, maps, minX, minY, scale);
   return canvas;
 }
 
@@ -2786,11 +2841,16 @@ function exportWorldPng() {
     labelChk.type = "checkbox"; labelChk.checked = true;
     labelWrap.append(labelChk, " Map borders and names");
     row.appendChild(labelWrap);
+    const warpWrap = document.createElement("label");
+    const warpChk = document.createElement("input");
+    warpChk.type = "checkbox"; warpChk.checked = false;
+    warpWrap.append(warpChk, " Warp connections");
+    row.appendChild(warpWrap);
     modal.appendChild(row);
 
     const dl = el("button", "primary", "Download PNG");
     dl.addEventListener("click", () => {
-      const canvas = renderWorldCanvas(Number(scaleSel.value), labelChk.checked);
+      const canvas = renderWorldCanvas(Number(scaleSel.value), labelChk.checked, warpChk.checked);
       const name = (state.project.meta.name || "world").replace(/[^a-z0-9_-]+/gi, "_") + "-world.png";
       canvas.toBlob(blob => {
         if (blob) { downloadBlob(name, blob); closeModal(); }
