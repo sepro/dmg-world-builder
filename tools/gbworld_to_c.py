@@ -87,6 +87,7 @@ WARP_TYPE_MACROS = {"transport": "WARP_TRANSPORT", "door": "WARP_DOOR",
 NPC_MOVE_VALUES = {"static": 0, "wander": 1, "walk_up_down": 2, "walk_left_right": 3}
 COLLISION_VALUES = {"walk": 0, "solid": 1}
 COLLISION_OVERLAY_BIT = 2   # "draw over player": ORed into the collision byte
+COLLISION_OVERLAY_BOTTOM_BIT = 4  # overlay covers only the sprite's lower half (tall grass)
 DIRS = ["north", "south", "east", "west"]
 NO_BLOCK = 0xFF      # empty cell sentinel in a block grid
 NO_MAP = -1          # absent neighbor
@@ -253,8 +254,11 @@ def generate_header(b, name, bank=None):
     L.append("enum { EVENT_WARP = 0, EVENT_SIGN = 1, EVENT_ITEM = 2, EVENT_NPC = 3, EVENT_TRIGGER = 4 };")
     L.append("enum { MOVE_STATIC = 0, MOVE_WANDER = 1, MOVE_WALK_UP_DOWN = 2, MOVE_WALK_LEFT_RIGHT = 3 };")
     L.append("/* Metatile.collision is a bitfield: bit 0 = solid, bit 1 = overlay")
-    L.append("   (BG art drawn over the player -- canopy, tall grass, archways). */")
-    L.append("enum { COLLISION_WALK = 0, COLLISION_SOLID = 1, COLLISION_OVERLAY = 2 };")
+    L.append("   (BG art drawn over the player -- canopy, tall grass, archways),")
+    L.append("   bit 2 = overlay covers only the sprite's lower half (tall grass;")
+    L.append("   only ever set together with bit 1). */")
+    L.append("enum { COLLISION_WALK = 0, COLLISION_SOLID = 1, COLLISION_OVERLAY = 2,")
+    L.append("       COLLISION_OVERLAY_BOTTOM = 4 };")
     L.append("#define DIR_NORTH 0\n#define DIR_SOUTH 1\n#define DIR_EAST 2\n#define DIR_WEST 3")
     L.append("")
     L.append("/* Warp presentation (Warp.type) and post-warp facing (Warp.facing). */")
@@ -293,7 +297,7 @@ def generate_header(b, name, bank=None):
 typedef struct {
     UINT8 tiles[4];      /* tile indices: top-left, top-right, bottom-left, bottom-right */
     UINT8 attrs[4];      /* CGB BG attribute per cell (palette 0-7); ignored on DMG */
-    UINT8 collision;     /* COLLISION_SOLID | COLLISION_OVERLAY bitfield */
+    UINT8 collision;     /* COLLISION_SOLID | COLLISION_OVERLAY | COLLISION_OVERLAY_BOTTOM bitfield */
     UINT8 behavior;      /* BEHAVIOR_* */
 } Metatile;
 
@@ -452,6 +456,8 @@ def generate_source(b, name, header_filename, bank=None):
             coll = COLLISION_VALUES.get(m.get("collision", "walk"), 0)
             if m.get("overlay"):
                 coll |= COLLISION_OVERLAY_BIT
+                if m.get("overlayMode") == "bottom":
+                    coll |= COLLISION_OVERLAY_BOTTOM_BIT
             beh = b.behavior_value(m.get("behavior", "normal"))
             L.append("  { {%d,%d,%d,%d}, {%d,%d,%d,%d}, %d, %d }, /* %s */"
                      % (tids[0], tids[1], tids[2], tids[3],

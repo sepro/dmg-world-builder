@@ -140,7 +140,8 @@ one extra frame. `frameRate` is how many 1/60s ticks each frame is shown.
   "cellPalettes": [1, 1, 1, 1],       // palette id per cell (GBC); DMG ignores
   "collision":    "solid",            // "walk" | "solid"
   "behavior":     "water",            // one of project.behaviors
-  "overlay":      false               // optional; true = BG art draws over the player
+  "overlay":      false,              // optional; true = BG art draws over the player
+  "overlayMode":  "full"              // optional; "full" | "bottom", absent = "full"
 }
 ```
 
@@ -152,8 +153,14 @@ canopy, tall grass, archways). It is independent of collision — a canopy is
 solid + overlay, tall grass is walk + overlay. The converter ORs it into the
 `collision` byte as `COLLISION_OVERLAY` (bit 1); the engine sets the OAM
 priority bit ("behind BG colors 1-3") on exactly the sprite parts overlapping
-such a tile. DMG caveat: BG color 0 (the lightest shade) always shows the
-sprite through, so overlay art should use shades 1-3. Absent = false.
+such a tile. `overlayMode` picks the coverage: `"full"` (default) covers every
+overlapping part, `"bottom"` covers only parts in the lower half of the sprite
+— tall grass hides the feet but not the head, which overhangs the grass tile
+because sprites draw a few pixels above their cell. The converter encodes
+`"bottom"` as `COLLISION_OVERLAY_BOTTOM` (bit 2), only ever set together with
+bit 1; the key is meaningless without `overlay: true`. DMG caveat: BG color 0
+(the lightest shade) always shows the sprite through, so overlay art should
+use shades 1-3. Absent = false / `"full"`.
 
 #### Block
 

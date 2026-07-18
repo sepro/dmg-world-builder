@@ -170,6 +170,12 @@ const DEFAULT_BEHAVIORS = [
 ];
 
 const COLLISION_OPTIONS = ["walk", "solid"];
+// Overlay coverage: "full" hides the whole sprite (canopy, archway),
+// "bottom" hides only the lower half (tall grass -- feet sink in).
+const OVERLAY_MODE_OPTIONS = [
+  { value: "full", label: "Full sprite" },
+  { value: "bottom", label: "Bottom half (tall grass)" },
+];
 
 // Event types live on a map at metatile (16px) resolution, which is the grid the
 // player actually moves on. Each carries a letter and an editor-only marker color.
@@ -1468,7 +1474,7 @@ function renderMetatilesPanel(root) {
     drawMetatile(c.getContext("2d"), ts, m, 32 / (TILE_PX * 2));
     c.style.border = "1px solid var(--border)";
     const name = el("span", "mt-name", "#" + index + "  " + m.name);
-    const meta = el("span", "mt-meta", m.collision + " / " + m.behavior + (m.overlay ? " / overlay" : ""));
+    const meta = el("span", "mt-meta", m.collision + " / " + m.behavior + (m.overlay ? (m.overlayMode === "bottom" ? " / overlay-btm" : " / overlay") : ""));
     row.append(c, name, meta);
     row.addEventListener("click", () => { state.selectedMetatileId = m.id; state.selectedCell = 0; render(); });
     list.appendChild(row);
@@ -1489,6 +1495,7 @@ function renderMetatilesPanel(root) {
       collision: "walk",
       behavior: "normal",
       overlay: false,
+      overlayMode: "full",
     };
     ts.metatiles.push(m);
     state.selectedMetatileId = m.id; state.selectedCell = 0; render();
@@ -1502,6 +1509,7 @@ function renderMetatilesPanel(root) {
       id: genId(), name: src.name + " copy",
       tiles: [...src.tiles], cellPalettes: [...src.cellPalettes],
       collision: src.collision, behavior: src.behavior, overlay: !!src.overlay,
+      overlayMode: src.overlayMode === "bottom" ? "bottom" : "full",
     };
     ts.metatiles.push(m);
     state.selectedMetatileId = m.id; state.selectedCell = 0; render();
@@ -1609,6 +1617,16 @@ function renderMetatilesPanel(root) {
   ovLabel.append(ovCb, document.createTextNode(" Draw over player (overlay)"));
   ovField.appendChild(ovLabel);
   ed.appendChild(ovField);
+  if (m.overlay) {
+    // Coverage mode only matters (and is only exported) while overlay is on.
+    ed.appendChild(spacer(6));
+    const ovModeField = el("div", "field");
+    ovModeField.appendChild(label("Overlay coverage"));
+    ovModeField.appendChild(selectFrom(OVERLAY_MODE_OPTIONS,
+      m.overlayMode === "bottom" ? "bottom" : "full",
+      v => { snapshot(); m.overlayMode = v; render(); }));
+    ed.appendChild(ovModeField);
+  }
 
   // Tile picker for assigning into the selected cell.
   ed.appendChild(spacer(16));
