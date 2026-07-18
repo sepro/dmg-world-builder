@@ -372,8 +372,9 @@ const state = {
   showMapGrid: true,
   showCollision: false,   // tint each metatile by collision/behavior on the map
   mapScroll: { left: 0, top: 0 }, // preserved across re-renders
-  mapMode: "blocks",      // blocks | events
+  mapMode: "blocks",      // blocks | events | collision
   eventTool: "warp",      // which event type a click places
+  collisionTool: "solid", // which collision value the collision brush paints
   selectedEventId: null,
   ink: 3,                 // current pixel value to paint (0..3)
   tool: "pencil",         // pencil | fill | eyedropper
@@ -1954,11 +1955,21 @@ function renderMapsPanel(root) {
     const block = blockId != null ? blockById(ts, blockId) : null;
     if (block) drawBlock(ctx, ts, block, z / (TILE_PX * 4), px, py, state.animMaps ? "live" : false);
     else drawEmptyCell(ctx, z, px, py);
-    if (state.showCollision && block) drawCollisionCell(ctx, ts, block, z, px, py);
+    // Collision mode always shows the overlay -- painting it blind is useless.
+    if ((state.showCollision || state.mapMode === "collision") && block)
+      drawCollisionCell(ctx, ts, block, z, px, py);
     if (state.showMapGrid) {
       ctx.strokeStyle = "rgba(224,248,208,0.10)";
       ctx.lineWidth = 1;
       ctx.strokeRect(px + 0.5, py + 0.5, z, z);
+      if (state.mapMode === "collision") {
+        // Fainter half-cell lines: collision is painted per metatile.
+        ctx.strokeStyle = "rgba(224,248,208,0.05)";
+        ctx.beginPath();
+        ctx.moveTo(px + z / 2 + 0.5, py); ctx.lineTo(px + z / 2 + 0.5, py + z);
+        ctx.moveTo(px, py + z / 2 + 0.5); ctx.lineTo(px + z, py + z / 2 + 0.5);
+        ctx.stroke();
+      }
     }
   };
 
@@ -2060,6 +2071,46 @@ function renderMapsPanel(root) {
     const stop = () => { painting = false; };
     canvas.addEventListener("pointerup", stop);
     canvas.addEventListener("pointerleave", stop);
+  } else if (state.mapMode === "collision") {
+    // Collision mode: paint walk/solid at metatile resolution. The edit lands
+    // on the metatile *definition* (reached through the block under the
+    // cursor), so every use of that metatile -- on this map and others --
+    // changes with it. Repaint every cell whose block contains the metatile
+    // so the whole overlay stays truthful during the stroke.
+    const repaintCellsUsing = (metatileId) => {
+      const blockIds = new Set(
+        ts.blocks.filter(b => b.metatiles.includes(metatileId)).map(b => b.id));
+      for (let y = 0; y < map.height; y++)
+        for (let x = 0; x < map.width; x++)
+          if (blockIds.has(map.blockGrid[y * map.width + x])) paintCell(x, y);
+    };
+    const applyCollisionAt = (mx, my) => {
+      const blockId = map.blockGrid[(my >> 1) * map.width + (mx >> 1)];
+      const block = blockId != null ? blockById(ts, blockId) : null;
+      if (!block) return;
+      const mtId = block.metatiles[(my & 1) * 2 + (mx & 1)];   // TL, TR, BL, BR
+      const m = mtId != null ? metatileById(ts, mtId) : null;
+      if (!m || m.collision === state.collisionTool) return;
+      m.collision = state.collisionTool;
+      repaintCellsUsing(mtId);
+    };
+    let painting = false;
+    canvas.addEventListener("pointerdown", (ev) => {
+      const pos = eventCellAt(ev);   // metatile grid, same as events
+      if (!pos) return;
+      snapshot();
+      painting = true;
+      applyCollisionAt(pos.x, pos.y);
+    });
+    canvas.addEventListener("pointermove", (ev) => {
+      if (!painting) return;
+      edgeAutoScroll(ev);
+      const pos = eventCellAt(ev);
+      if (pos) applyCollisionAt(pos.x, pos.y);
+    });
+    const stop = () => { painting = false; };
+    canvas.addEventListener("pointerup", stop);
+    canvas.addEventListener("pointerleave", stop);
   } else {
     // Events mode: click a marker to select it, or an empty cell to place one.
     canvas.addEventListener("pointerdown", (ev) => {
@@ -2104,6 +2155,12 @@ function renderMapsPanel(root) {
       palette.appendChild(cell);
     });
     main.appendChild(palette);
+  } else if (state.mapMode === "collision") {
+    main.appendChild(spacer(12));
+    main.appendChild(el("p", "hint",
+      "Paint " + state.collisionTool + " onto 16×16 metatile cells. The edit is stored on " +
+      "the metatile itself, so every use of that metatile — in other blocks and on other " +
+      "maps — updates with it."));
   } else {
     main.appendChild(spacer(12));
     main.appendChild(el("p", "hint",
@@ -2370,9 +2427,9 @@ function drawCollisionCell(ctx, ts, block, z, px, py) {
 function renderMapToolbar(map, ts) {
   const bar = el("div", "map-toolbar");
 
-  // Mode switch: paint blocks, or place events.
+  // Mode switch: paint blocks, place events, or paint collision.
   const modeGroup = el("div", "group");
-  [["blocks", "Blocks"], ["events", "Events"]].forEach(([mode, label]) => {
+  [["blocks", "Blocks"], ["events", "Events"], ["collision", "Collision"]].forEach(([mode, label]) => {
     const b = el("button", "tool-btn" + (state.mapMode === mode ? " active" : ""), label);
     b.addEventListener("click", () => { state.mapMode = mode; render(); });
     modeGroup.appendChild(b);
@@ -2399,6 +2456,17 @@ function renderMapToolbar(map, ts) {
     if (brush) drawBlock(preview.getContext("2d"), ts, brush, 34 / (TILE_PX * 4), 0, 0, state.animMaps);
     brushGroup.appendChild(preview);
     bar.appendChild(brushGroup);
+  } else if (state.mapMode === "collision") {
+    // Collision brush: which value painting writes into the metatile.
+    const colGroup = el("div", "group");
+    COLLISION_OPTIONS.forEach(name => {
+      const b = el("button", "tool-btn" + (state.collisionTool === name ? " active" : ""), name);
+      // Match the overlay's color language: solid red, walkable green.
+      b.style.borderLeft = "4px solid " + (name === "solid" ? "#e84040" : "#6ade8f");
+      b.addEventListener("click", () => { state.collisionTool = name; render(); });
+      colGroup.appendChild(b);
+    });
+    bar.appendChild(colGroup);
   } else {
     // Event type picker: which kind of event a click drops.
     const evGroup = el("div", "group");
@@ -2420,12 +2488,15 @@ function renderMapToolbar(map, ts) {
     v => { state.mapZoom = Number(v); render(); }));
   bar.appendChild(zoomGroup);
 
-  // Auto-scroll only matters while drag-painting blocks.
-  if (state.mapMode === "blocks") {
+  // Auto-scroll only matters while drag-painting (blocks or collision).
+  if (state.mapMode !== "events") {
     bar.appendChild(toggle("Auto-scroll at edges", state.autoScroll, v => { state.autoScroll = v; }));
   }
   bar.appendChild(toggle("Grid", state.showMapGrid, v => { state.showMapGrid = v; render(); }));
-  bar.appendChild(toggle("Collision", state.showCollision, v => { state.showCollision = v; render(); }));
+  // In collision mode the overlay is always on, so the toggle would be inert.
+  if (state.mapMode !== "collision") {
+    bar.appendChild(toggle("Collision", state.showCollision, v => { state.showCollision = v; render(); }));
+  }
   bar.appendChild(toggle("Animate", state.animMaps, v => { state.animMaps = v; render(); }));
 
   return bar;

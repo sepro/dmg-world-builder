@@ -63,6 +63,10 @@ The editor's left rail switches between panels; the typical bottom-up workflow i
    (`transport | door | stairs | fall` — how the engine presents the transition),
    a destination map/cell, and a facing after the warp
    (`same | up | down | left | right`; `same` keeps the walking direction).
+   A third **Collision** mode paints `walk`/`solid` directly on the map at
+   metatile (16×16) resolution with the collision overlay always visible.
+   The value is written to the metatile definition under the cursor, so it
+   propagates to every block and map that reuses that metatile.
 
 Painting tools, zoom, selection, and undo/redo (a single pointer stroke collapses
 to one undo step) operate on the active panel.
