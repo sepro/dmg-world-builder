@@ -377,7 +377,10 @@ const state = {
   ink: 3,                 // current pixel value to paint (0..3)
   tool: "pencil",         // pencil | fill | eyedropper
   selectedFrame: 0,       // which animation frame the tile editor edits (0 = base)
-  animPlay: true,         // global animation playback toggle
+  animPlay: true,         // global animation playback toggle (Tiles panel)
+  animMetatiles: true,    // play tile animations on the Metatiles panel
+  animBlocks: true,       // play tile animations on the Blocks panel
+  animMaps: true,         // play tile animations on the Maps panel
 };
 
 function syncSelectionsToProject() {
@@ -588,10 +591,16 @@ function drawPixels(ctx, pixels, colors, scale, ox = 0, oy = 0) {
   }
 }
 
-// Draw a tile's base image (frame 0). Composite previews (metatiles, blocks,
-// maps) use this, so they always show the static base frame.
-function drawTile(ctx, tile, colors, scale, ox = 0, oy = 0) {
-  drawPixels(ctx, tile.pixels, colors, scale, ox, oy);
+// Draw one tile. `anim` selects what composite previews show:
+//   false  — static base frame (frame 0),
+//   true   — current animation frame, registered so the animator keeps it moving,
+//   "live" — current animation frame only; the caller owns the repaint (used by
+//            the map canvas, whose cells carry grid/event overlays).
+function drawTile(ctx, tile, colors, scale, ox = 0, oy = 0, anim = false) {
+  const live = anim && isAnimated(tile);
+  const idx = live ? currentFrameIndex(tile) : 0;
+  drawPixels(ctx, tileFrames(tile)[idx], colors, scale, ox, oy);
+  if (live && anim !== "live") animator.targets.push({ ctx, tile, colors, scale, ox, oy, last: idx });
 }
 
 /* ---- tile animation ----
@@ -603,6 +612,18 @@ function frameCountFor(tile) { return 1 + (tile.frames ? tile.frames.length : 0)
 function tileFrames(tile) { return [tile.pixels].concat(tile.frames || []); }
 function isAnimated(tile) { return frameCountFor(tile) > 1; }
 
+// Whether any tile cell inside the block animates (map cells with such blocks
+// need repainting as frames advance).
+function blockUsesAnimatedTile(ts, block) {
+  return block.metatiles.some(mid => {
+    const m = mid != null ? metatileById(ts, mid) : null;
+    return m && m.tiles.some(tid => {
+      const t = tid != null ? tileById(ts, tid) : null;
+      return t && isAnimated(t);
+    });
+  });
+}
+
 function currentFrameIndex(tile) {
   const n = frameCountFor(tile);
   if (n <= 1) return 0;
@@ -611,35 +632,47 @@ function currentFrameIndex(tile) {
   return Math.floor(ticks / rate) % n;
 }
 
+// Targets come in two shapes, both registered during a render and rebuilt on
+// the next one:
+//   { ctx, tile, colors, scale, ox, oy, last }  — one tile cell the animator
+//     repaints in place when its frame index changes;
+//   { tiles, redraw, last }                     — a composite canvas (the map)
+//     whose `redraw` callback runs when any listed tile changes frame, so the
+//     owner can restore its own overlays (grid lines, event markers).
 const animator = { targets: [], raf: 0 };
 
 // Draw a tile into a standalone canvas, cycling frames if it is animated and
 // playback is on. Registers the canvas so the animator keeps it moving.
 function paintTileCanvas(canvas, tile, colors, scale) {
-  const ctx = canvas.getContext("2d");
-  const playing = state.animPlay && isAnimated(tile);
-  const idx = playing ? currentFrameIndex(tile) : 0;
-  drawPixels(ctx, tileFrames(tile)[idx], colors, scale);
-  if (playing) animator.targets.push({ canvas, tile, colors, scale, last: idx });
+  drawTile(canvas.getContext("2d"), tile, colors, scale, 0, 0, state.animPlay);
 }
+
+function compositeFrameSig(tiles) { return tiles.map(currentFrameIndex).join(","); }
 
 function animLoop() {
   animator.raf = 0;
   let stillAnimating = false;
   for (const t of animator.targets) {
-    if (!isAnimated(t.tile)) continue;
-    stillAnimating = true;
-    const idx = currentFrameIndex(t.tile);
-    if (idx !== t.last) {
-      t.last = idx;
-      drawPixels(t.canvas.getContext("2d"), tileFrames(t.tile)[idx], t.colors, t.scale);
+    if (t.redraw) {
+      if (!t.tiles.some(isAnimated)) continue;
+      stillAnimating = true;
+      const sig = compositeFrameSig(t.tiles);
+      if (sig !== t.last) { t.last = sig; t.redraw(); }
+    } else {
+      if (!isAnimated(t.tile)) continue;
+      stillAnimating = true;
+      const idx = currentFrameIndex(t.tile);
+      if (idx !== t.last) {
+        t.last = idx;
+        drawPixels(t.ctx, tileFrames(t.tile)[idx], t.colors, t.scale, t.ox, t.oy);
+      }
     }
   }
-  if (stillAnimating && state.animPlay) animator.raf = requestAnimationFrame(animLoop);
+  if (stillAnimating) animator.raf = requestAnimationFrame(animLoop);
 }
 function startAnimator() {
-  if (animator.raf || !state.animPlay) return;
-  if (animator.targets.some(t => isAnimated(t.tile))) animator.raf = requestAnimationFrame(animLoop);
+  if (animator.raf || animator.targets.length === 0) return;
+  animator.raf = requestAnimationFrame(animLoop);
 }
 function stopAnimator() {
   if (animator.raf) { cancelAnimationFrame(animator.raf); animator.raf = 0; }
@@ -657,7 +690,7 @@ function drawEmptyCell(ctx, size, ox = 0, oy = 0) {
 }
 
 // Render a complete metatile (its 4 tile cells, each with its own palette).
-function drawMetatile(ctx, ts, metatile, scale, ox = 0, oy = 0) {
+function drawMetatile(ctx, ts, metatile, scale, ox = 0, oy = 0, anim = false) {
   const offsets = [[0, 0], [1, 0], [0, 1], [1, 1]]; // tl, tr, bl, br
   for (let i = 0; i < 4; i++) {
     const [cx, cy] = offsets[i];
@@ -666,7 +699,7 @@ function drawMetatile(ctx, ts, metatile, scale, ox = 0, oy = 0) {
     const tileId = metatile.tiles[i];
     const tile = tileId != null ? tileById(ts, tileId) : null;
     if (tile) {
-      drawTile(ctx, tile, colorsForPalette(metatile.cellPalettes[i]), scale, px, py);
+      drawTile(ctx, tile, colorsForPalette(metatile.cellPalettes[i]), scale, px, py, anim);
     } else {
       drawEmptyCell(ctx, TILE_PX * scale, px, py);
     }
@@ -675,7 +708,7 @@ function drawMetatile(ctx, ts, metatile, scale, ox = 0, oy = 0) {
 
 // Render a complete block (its 4 metatile cells). One metatile spans 2 tiles,
 // so each cell is offset by 2 * TILE_PX at the given per-tile-pixel scale.
-function drawBlock(ctx, ts, block, scale, ox = 0, oy = 0) {
+function drawBlock(ctx, ts, block, scale, ox = 0, oy = 0, anim = false) {
   const offsets = [[0, 0], [1, 0], [0, 1], [1, 1]]; // tl, tr, bl, br
   const cellPx = 2 * TILE_PX * scale; // a metatile is 16 px wide
   for (let i = 0; i < 4; i++) {
@@ -685,7 +718,7 @@ function drawBlock(ctx, ts, block, scale, ox = 0, oy = 0) {
     const metatileId = block.metatiles[i];
     const metatile = metatileId != null ? metatileById(ts, metatileId) : null;
     if (metatile) {
-      drawMetatile(ctx, ts, metatile, scale, px, py);
+      drawMetatile(ctx, ts, metatile, scale, px, py, anim);
     } else {
       drawEmptyCell(ctx, cellPx, px, py);
     }
@@ -1461,6 +1494,7 @@ function renderMetatilesPanel(root) {
   /* ---- left: metatile list ---- */
   const lib = el("div", "card col-library");
   lib.appendChild(el("h2", null, "Metatiles in " + ts.name));
+  lib.appendChild(toggle("Animate tiles", state.animMetatiles, v => { state.animMetatiles = v; render(); }));
 
   if (ts.metatiles.length === 0) {
     lib.appendChild(el("p", "hint", "No metatiles yet. Create one to start composing 16x16 cells."));
@@ -1471,7 +1505,7 @@ function renderMetatilesPanel(root) {
     const row = el("div", "mt-row" + (m.id === state.selectedMetatileId ? " selected" : ""));
     const c = document.createElement("canvas");
     c.width = 32; c.height = 32;
-    drawMetatile(c.getContext("2d"), ts, m, 32 / (TILE_PX * 2));
+    drawMetatile(c.getContext("2d"), ts, m, 32 / (TILE_PX * 2), 0, 0, state.animMetatiles);
     c.style.border = "1px solid var(--border)";
     const name = el("span", "mt-name", "#" + index + "  " + m.name);
     const meta = el("span", "mt-meta", m.collision + " / " + m.behavior + (m.overlay ? (m.overlayMode === "bottom" ? " / overlay-btm" : " / overlay") : ""));
@@ -1558,7 +1592,7 @@ function renderMetatilesPanel(root) {
     const cctx = c.getContext("2d");
     const tileId = m.tiles[i];
     const tile = tileId != null ? tileById(ts, tileId) : null;
-    if (tile) drawTile(cctx, tile, colorsForPalette(m.cellPalettes[i]), COMP_SCALE);
+    if (tile) drawTile(cctx, tile, colorsForPalette(m.cellPalettes[i]), COMP_SCALE, 0, 0, state.animMetatiles);
     else drawEmptyCell(cctx, 96);
     cell.appendChild(c);
     cell.addEventListener("click", () => { state.selectedCell = i; render(); });
@@ -1637,7 +1671,7 @@ function renderMetatilesPanel(root) {
     const cell = el("button", "lib-cell");
     const c = document.createElement("canvas");
     c.width = 38; c.height = 38;
-    paintTileCanvas(c, tile, colorsForPalette(m.cellPalettes[state.selectedCell]), 38 / TILE_PX);
+    drawTile(c.getContext("2d"), tile, colorsForPalette(m.cellPalettes[state.selectedCell]), 38 / TILE_PX, 0, 0, state.animMetatiles);
     cell.appendChild(c);
     if (isAnimated(tile)) cell.appendChild(el("span", "anim-badge", "\u25B6"));
     cell.appendChild(el("span", "idx", String(index)));
@@ -1664,6 +1698,7 @@ function renderBlocksPanel(root) {
   /* ---- left: block library ---- */
   const lib = el("div", "card col-library");
   lib.appendChild(el("h2", null, "Blocks in " + ts.name));
+  lib.appendChild(toggle("Animate tiles", state.animBlocks, v => { state.animBlocks = v; render(); }));
 
   if (ts.metatiles.length === 0) {
     lib.appendChild(el("p", "hint", "Create some metatiles first, then compose them into 32x32 blocks here."));
@@ -1676,7 +1711,7 @@ function renderBlocksPanel(root) {
     const row = el("div", "mt-row" + (b.id === state.selectedBlockId ? " selected" : ""));
     const c = document.createElement("canvas");
     c.width = 48; c.height = 48;
-    drawBlock(c.getContext("2d"), ts, b, 48 / (TILE_PX * 4)); // a block is 32 px (4 tiles) wide
+    drawBlock(c.getContext("2d"), ts, b, 48 / (TILE_PX * 4), 0, 0, state.animBlocks); // a block is 32 px (4 tiles) wide
     c.style.border = "1px solid var(--border)";
     const name = el("span", "mt-name", "#" + index + "  " + b.name);
     row.append(c, name);
@@ -1748,7 +1783,7 @@ function renderBlocksPanel(root) {
     const cctx = c.getContext("2d");
     const metatileId = b.metatiles[i];
     const metatile = metatileId != null ? metatileById(ts, metatileId) : null;
-    if (metatile) drawMetatile(cctx, ts, metatile, COMP_SCALE);
+    if (metatile) drawMetatile(cctx, ts, metatile, COMP_SCALE, 0, 0, state.animBlocks);
     else drawEmptyCell(cctx, 96);
     cell.appendChild(c);
     cell.addEventListener("click", () => { state.selectedCell = i; render(); });
@@ -1774,7 +1809,7 @@ function renderBlocksPanel(root) {
     const cell = el("button", "lib-cell");
     const c = document.createElement("canvas");
     c.width = 38; c.height = 38;
-    drawMetatile(c.getContext("2d"), ts, m, 38 / (2 * TILE_PX));
+    drawMetatile(c.getContext("2d"), ts, m, 38 / (2 * TILE_PX), 0, 0, state.animBlocks);
     cell.appendChild(c);
     cell.appendChild(el("span", "idx", String(index)));
     cell.title = m.name;
@@ -1888,7 +1923,7 @@ function renderMapsPanel(root) {
     const px = cx * z, py = cy * z;
     const blockId = map.blockGrid[cy * map.width + cx];
     const block = blockId != null ? blockById(ts, blockId) : null;
-    if (block) drawBlock(ctx, ts, block, z / (TILE_PX * 4), px, py);
+    if (block) drawBlock(ctx, ts, block, z / (TILE_PX * 4), px, py, state.animMaps ? "live" : false);
     else drawEmptyCell(ctx, z, px, py);
     if (state.showMapGrid) {
       ctx.strokeStyle = "rgba(224,248,208,0.10)";
@@ -1904,6 +1939,34 @@ function renderMapsPanel(root) {
   repaintAll();
   if (!map.events) map.events = [];
   if (state.mapMode === "events") drawEventMarkers(ctx, map, z);
+
+  // One composite animator target repaints just the cells whose block uses an
+  // animated tile whenever any tile's frame advances. paintCell scans the live
+  // blockGrid, so cells painted or erased mid-stroke stay in sync, and the
+  // grid/event overlays are redrawn along with the art.
+  if (state.animMaps) {
+    const animBlockIds = new Set(
+      ts.blocks.filter(b => blockUsesAnimatedTile(ts, b)).map(b => b.id));
+    if (animBlockIds.size > 0) {
+      animator.targets.push({
+        tiles: ts.tiles.filter(isAnimated),
+        last: "",
+        redraw: () => {
+          const repainted = new Set();
+          for (let y = 0; y < map.height; y++)
+            for (let x = 0; x < map.width; x++)
+              if (animBlockIds.has(map.blockGrid[y * map.width + x])) {
+                paintCell(x, y);
+                repainted.add(y * map.width + x);
+              }
+          // Markers are translucent, so restore only the ones whose cell was
+          // just repainted — redrawing them all would stack the alpha.
+          if (state.mapMode === "events" && repainted.size > 0)
+            drawEventMarkers(ctx, map, z, repainted);
+        },
+      });
+    }
+  }
 
   // Translate a pointer event into a block cell, or null if outside the grid.
   const cellAt = (ev) => {
@@ -1999,7 +2062,7 @@ function renderMapsPanel(root) {
       const cell = el("button", "lib-cell" + (block.id === state.paintBlockId ? " selected" : ""));
       const c = document.createElement("canvas");
       c.width = 38; c.height = 38;
-      drawBlock(c.getContext("2d"), ts, block, 38 / (TILE_PX * 4));
+      drawBlock(c.getContext("2d"), ts, block, 38 / (TILE_PX * 4), 0, 0, state.animMaps);
       cell.appendChild(c);
       cell.appendChild(el("span", "idx", String(index)));
       cell.title = block.name;
@@ -2027,12 +2090,16 @@ function renderMapsPanel(root) {
 
 // Draw event markers over the map: a colored square with the type's letter,
 // sized to one metatile cell, highlighted when selected.
-function drawEventMarkers(ctx, map, z) {
+// `onlyBlockCells` (optional Set of blockGrid indices) limits drawing to the
+// markers sitting on those block cells — used when animation repaints a cell.
+function drawEventMarkers(ctx, map, z, onlyBlockCells) {
   const cell = z / 2;                       // a metatile is half a block per axis
   const inset = Math.max(1, cell * 0.12);
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   (map.events || []).forEach(e => {
+    if (onlyBlockCells &&
+        !onlyBlockCells.has(Math.floor(e.y / 2) * map.width + Math.floor(e.x / 2))) return;
     const meta = EVENT_TYPES[e.type] || { color: "#ffffff", letter: "?" };
     const px = e.x * cell, py = e.y * cell;
     const selected = e.id === state.selectedEventId;
@@ -2256,7 +2323,7 @@ function renderMapToolbar(map, ts) {
     preview.className = "paint-block-preview";
     preview.width = 34; preview.height = 34;
     const brush = state.paintBlockId != null ? blockById(ts, state.paintBlockId) : null;
-    if (brush) drawBlock(preview.getContext("2d"), ts, brush, 34 / (TILE_PX * 4));
+    if (brush) drawBlock(preview.getContext("2d"), ts, brush, 34 / (TILE_PX * 4), 0, 0, state.animMaps);
     brushGroup.appendChild(preview);
     bar.appendChild(brushGroup);
   } else {
@@ -2285,6 +2352,7 @@ function renderMapToolbar(map, ts) {
     bar.appendChild(toggle("Auto-scroll at edges", state.autoScroll, v => { state.autoScroll = v; }));
   }
   bar.appendChild(toggle("Grid", state.showMapGrid, v => { state.showMapGrid = v; render(); }));
+  bar.appendChild(toggle("Animate", state.animMaps, v => { state.animMaps = v; render(); }));
 
   return bar;
 }
