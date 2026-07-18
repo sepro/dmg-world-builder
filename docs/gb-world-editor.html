@@ -1124,7 +1124,7 @@ function renderTilesPanel(root) {
 
   // ---- Animation frames ----
   ed.appendChild(spacer(14));
-  ed.appendChild(el("span", "cell-label", "Animation frames (click to edit, + to add)"));
+  ed.appendChild(el("span", "cell-label", "Animation frames (click to edit, + to add, +▦ to copy a tile)"));
   ed.appendChild(spacer(6));
 
   const strip = el("div", "frame-strip");
@@ -1138,18 +1138,46 @@ function renderTilesPanel(root) {
     fc.addEventListener("click", () => { state.selectedFrame = i; render(); });
     strip.appendChild(fc);
   });
-  const addFrame = el("button", "frame-cell", "+");
-  addFrame.style.fontSize = "20px";
-  addFrame.title = "Add a frame (copies the current frame)";
-  addFrame.addEventListener("click", () => {
+  // Appends `pixels` (already copied) as a new frame and selects it.
+  const appendFrame = (pixels) => {
     snapshot();
     if (!tile.frames) tile.frames = [];
     if (!tile.frameRate) tile.frameRate = 15;
-    tile.frames.push([...editPixels()]);     // seed the new frame from the current one
+    tile.frames.push(pixels);
     state.selectedFrame = frameCountFor(tile) - 1;
     render();
-  });
+  };
+
+  const addFrame = el("button", "frame-cell", "+");
+  addFrame.style.fontSize = "20px";
+  addFrame.title = "Add a frame (copies the current frame)";
+  addFrame.addEventListener("click", () => appendFrame([...editPixels()]));
   strip.appendChild(addFrame);
+
+  // Add a frame by copying another tile's art (its base frame). Handy when the
+  // animation cycles through art that already exists as separate tiles.
+  const addFromTile = el("button", "frame-cell", "+▦");
+  addFromTile.title = "Add a frame copied from an existing tile";
+  addFromTile.addEventListener("click", () => {
+    openModal("Pick a tile to copy as frame " + frameCountFor(tile), (modal) => {
+      modal.appendChild(el("p", "hint",
+        "The tile's base art is copied into a new frame of \"" + tile.name + "\"."));
+      const grid = el("div", "lib-grid");
+      ts.tiles.forEach((t, index) => {
+        const cell = el("button", "lib-cell");
+        const c = document.createElement("canvas");
+        c.width = 38; c.height = 38;
+        drawPixels(c.getContext("2d"), t.pixels, colors, 38 / TILE_PX);
+        cell.appendChild(c);
+        cell.appendChild(el("span", "idx", String(index)));
+        cell.title = t.name;
+        cell.addEventListener("click", () => { closeModal(); appendFrame([...t.pixels]); });
+        grid.appendChild(cell);
+      });
+      modal.appendChild(grid);
+    });
+  });
+  strip.appendChild(addFromTile);
   ed.appendChild(strip);
 
   ed.appendChild(spacer(10));
