@@ -370,6 +370,7 @@ const state = {
   mapZoom: 32,            // pixels per block in the map canvas
   autoScroll: true,       // scroll the viewport when painting near its edge
   showMapGrid: true,
+  showCollision: false,   // tint each metatile by collision/behavior on the map
   mapScroll: { left: 0, top: 0 }, // preserved across re-renders
   mapMode: "blocks",      // blocks | events
   eventTool: "warp",      // which event type a click places
@@ -1953,6 +1954,7 @@ function renderMapsPanel(root) {
     const block = blockId != null ? blockById(ts, blockId) : null;
     if (block) drawBlock(ctx, ts, block, z / (TILE_PX * 4), px, py, state.animMaps ? "live" : false);
     else drawEmptyCell(ctx, z, px, py);
+    if (state.showCollision && block) drawCollisionCell(ctx, ts, block, z, px, py);
     if (state.showMapGrid) {
       ctx.strokeStyle = "rgba(224,248,208,0.10)";
       ctx.lineWidth = 1;
@@ -2322,6 +2324,49 @@ function renderEventList(map) {
   return card;
 }
 
+// Collision overlay: tint each of a block's four metatiles by what movement
+// does there. Solid = red; walkable-but-special behaviors get their own hue
+// (water blue, tall grass green, ledges orange with a direction arrow);
+// plain walk/normal stays untinted so problems stand out.
+const COLLISION_TINTS = {
+  solid: "rgba(232,64,64,0.45)",
+  water: "rgba(64,128,240,0.40)",
+  tall_grass: "rgba(64,200,96,0.35)",
+  ledge: "rgba(240,160,48,0.40)",
+};
+const LEDGE_ARROWS = {
+  ledge_up: "↑", ledge_down: "↓",
+  ledge_left: "←", ledge_right: "→",
+};
+
+function drawCollisionCell(ctx, ts, block, z, px, py) {
+  const half = z / 2;
+  for (let i = 0; i < 4; i++) {           // TL, TR, BL, BR
+    const m = block.metatiles[i] != null ? metatileById(ts, block.metatiles[i]) : null;
+    if (!m) continue;
+    const mx = px + (i % 2) * half, my = py + (i >> 1) * half;
+    let tint = null, glyph = null;
+    if (m.collision === "solid") {
+      tint = COLLISION_TINTS.solid;
+    } else if (LEDGE_ARROWS[m.behavior]) {
+      tint = COLLISION_TINTS.ledge;
+      glyph = LEDGE_ARROWS[m.behavior];
+    } else if (COLLISION_TINTS[m.behavior]) {
+      tint = COLLISION_TINTS[m.behavior];
+    }
+    if (!tint) continue;
+    ctx.fillStyle = tint;
+    ctx.fillRect(mx, my, half, half);
+    if (glyph) {
+      ctx.fillStyle = "rgba(0,0,0,0.8)";
+      ctx.font = "bold " + Math.max(8, Math.floor(half * 0.6)) + "px monospace";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(glyph, mx + half / 2, my + half / 2);
+    }
+  }
+}
+
 function renderMapToolbar(map, ts) {
   const bar = el("div", "map-toolbar");
 
@@ -2380,6 +2425,7 @@ function renderMapToolbar(map, ts) {
     bar.appendChild(toggle("Auto-scroll at edges", state.autoScroll, v => { state.autoScroll = v; }));
   }
   bar.appendChild(toggle("Grid", state.showMapGrid, v => { state.showMapGrid = v; render(); }));
+  bar.appendChild(toggle("Collision", state.showCollision, v => { state.showCollision = v; render(); }));
   bar.appendChild(toggle("Animate", state.animMaps, v => { state.animMaps = v; render(); }));
 
   return bar;
