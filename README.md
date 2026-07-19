@@ -136,11 +136,7 @@ dmg-world-builder/
 │   ├── gb-tile-reducer.html       # the tile reducer
 │   ├── gb-theme.css               # shared DMG design tokens + components
 │   ├── gb-common.js               # shared DOM/form helpers
-│   └── screenshots/               # README screenshots (see tools/screenshots)
-├── tools/
-│   ├── gbworld_to_c.py            # project JSON  ->  GBDK world.h / world.c
-│   ├── gbworld_visualize.py       # project JSON  ->  stitched world.png
-│   └── screenshots/               # headless-browser capture of the screenshots
+│   └── screenshots/               # README screenshots
 ├── markdown/
 │   ├── WORLD_EDITOR.md            # world editor guide
 │   ├── SPRITE_EDITOR.md           # sprite editor guide
@@ -188,17 +184,8 @@ Every tool runs entirely in the browser; the server only delivers the files.
 ## World tooling
 
 The World Editor's **Export** saves your project as a `.gbworld.json` (the single
-source of truth). Turn it into ROM data or a preview image from the repo root:
-
-```bash
-# Generate GBDK C from an exported project
-python3 tools/gbworld_to_c.py project.gbworld.json -o build/ --name world
-
-# Render the whole world (all connected maps) to one PNG
-python3 tools/gbworld_visualize.py project.gbworld.json -o world.png --scale 3
-```
-
-`gbworld_to_c.py` needs only the Python standard library. `gbworld_visualize.py`
-needs Pillow (`pip install pillow`; preinstalled in the devcontainer). See
+source of truth). The `.gbworld.json` → GBDK C converter (`gbworld_to_c.py`) ships
+with the game engine that consumes the data, and world PNG rendering is built into
+the editor (Maps panel → Export world PNG). See
 [markdown/DEVELOPER_HANDOFF.md](markdown/DEVELOPER_HANDOFF.md) for the JSON schema,
 the generated C structures, and a GBDK-2020 integration walkthrough.

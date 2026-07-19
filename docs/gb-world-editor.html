@@ -186,8 +186,11 @@ const EVENT_TYPES = {
   item:    { label: "Item",    letter: "I", color: "#ff9f45" },
   npc:     { label: "NPC",     letter: "N", color: "#e06ad6" },
   trigger: { label: "Trigger", letter: "T", color: "#e0563f" },
+  dialog:  { label: "Dialog",  letter: "D", color: "#b9a0ff" },
 };
-const EVENT_ORDER = ["spawn", "warp", "sign", "item", "npc", "trigger"];
+const EVENT_ORDER = ["spawn", "warp", "sign", "item", "npc", "trigger", "dialog"];
+// The in-game dialog box shows 2 rows of 18 characters.
+const DIALOG_MAX_CHARS = 18;
 const NPC_MOVEMENTS = ["static", "wander", "walk_up_down", "walk_left_right"];
 // Facing direction the player starts in at a spawn point.
 const FACINGS = ["down", "up", "left", "right"];
@@ -205,7 +208,15 @@ function makeEvent(type, x, y) {
   else if (type === "item") { e.item = ""; e.qty = 1; e.flag = ""; }
   else if (type === "npc") { e.sprite = ""; e.movement = "static"; e.script = ""; }
   else if (type === "trigger") { e.script = ""; }
+  else if (type === "dialog") { e.w = 1; e.h = 1; e.text = ""; }
   return e;
+}
+
+// Dialog zones cover a w×h rectangle of cells; every other event is one cell.
+function eventContains(e, x, y) {
+  if (e.type === "dialog")
+    return x >= e.x && x < e.x + (e.w || 1) && y >= e.y && y < e.y + (e.h || 1);
+  return e.x === x && e.y === y;
 }
 
 function makeDefaultProject() {
@@ -2002,9 +2013,20 @@ function renderMapsPanel(root) {
                 repainted.add(y * map.width + x);
               }
           // Markers are translucent, so restore only the ones whose cell was
-          // just repainted — redrawing them all would stack the alpha.
-          if (state.mapMode === "events" && repainted.size > 0)
+          // just repainted — redrawing them all would stack the alpha. A
+          // dialog zone spans many cells and redraws as a whole, so first
+          // repaint every cell of any zone the animation touched.
+          if (state.mapMode === "events" && repainted.size > 0) {
+            map.events.forEach(e => {
+              if (e.type !== "dialog" || !eventTouchesBlockCells(e, map, repainted)) return;
+              eventBlockCells(e, map).forEach(i => {
+                if (repainted.has(i)) return;
+                paintCell(i % map.width, Math.floor(i / map.width));
+                repainted.add(i);
+              });
+            });
             drawEventMarkers(ctx, map, z, repainted);
+          }
         },
       });
     }
@@ -2173,18 +2195,50 @@ function renderMapsPanel(root) {
     canvas.addEventListener("pointerleave", stop);
   } else {
     // Events mode: click a marker to select it, or an empty cell to place one.
+    // The dialog tool places by dragging: the swept rectangle becomes the zone.
+    let dragEvent = null;   // dialog event being sized by the current drag
+    let dragAnchor = null;  // cell the drag started on
     canvas.addEventListener("pointerdown", (ev) => {
       const pos = eventCellAt(ev);
       if (!pos) return;
-      const existing = map.events.find(e => e.x === pos.x && e.y === pos.y);
+      const existing = map.events.find(e => eventContains(e, pos.x, pos.y));
       if (existing) { state.selectedEventId = existing.id; render(); return; }
       snapshot();
       const e = makeEvent(state.eventTool, pos.x, pos.y);
       e.id = genId();
       map.events.push(e);
       state.selectedEventId = e.id;
-      render();
+      if (state.eventTool === "dialog") {
+        // Defer the full render to pointerup so the drag can keep sizing the
+        // zone against this canvas; repaint in place meanwhile.
+        dragEvent = e;
+        dragAnchor = pos;
+        repaintAll();
+        drawEventMarkers(ctx, map, z);
+      } else {
+        render();
+      }
     });
+    canvas.addEventListener("pointermove", (ev) => {
+      if (!dragEvent) return;
+      edgeAutoScroll(ev);
+      const pos = eventCellAt(ev);
+      if (!pos) return;
+      dragEvent.x = Math.min(dragAnchor.x, pos.x);
+      dragEvent.y = Math.min(dragAnchor.y, pos.y);
+      dragEvent.w = Math.abs(pos.x - dragAnchor.x) + 1;
+      dragEvent.h = Math.abs(pos.y - dragAnchor.y) + 1;
+      repaintAll();
+      drawEventMarkers(ctx, map, z);
+    });
+    const stopDrag = () => {
+      if (!dragEvent) return;
+      dragEvent = null;
+      dragAnchor = null;
+      render();
+    };
+    canvas.addEventListener("pointerup", stopDrag);
+    canvas.addEventListener("pointerleave", stopDrag);
   }
 
   viewport.appendChild(canvas);
@@ -2226,9 +2280,11 @@ function renderMapsPanel(root) {
         "maps — updates with it. Turn on “Duplicate shared” to change only the painted cell."));
   } else {
     main.appendChild(spacer(12));
-    main.appendChild(el("p", "hint",
-      "Click an empty cell to drop a " + EVENT_TYPES[state.eventTool].label.toLowerCase() +
-      ", or click a marker to select it."));
+    main.appendChild(el("p", "hint", state.eventTool === "dialog"
+      ? "Drag across the map to sweep out a dialog zone (click = one cell), or " +
+        "click a marker to select it. Set the zone's text in the inspector."
+      : "Click an empty cell to drop a " + EVENT_TYPES[state.eventTool].label.toLowerCase() +
+        ", or click a marker to select it."));
     main.appendChild(spacer(8));
     main.appendChild(renderEventInspector(map));
     main.appendChild(renderEventList(map));
@@ -2242,17 +2298,52 @@ function renderMapsPanel(root) {
 // sized to one metatile cell, highlighted when selected.
 // `onlyBlockCells` (optional Set of blockGrid indices) limits drawing to the
 // markers sitting on those block cells — used when animation repaints a cell.
+// Block cells (blockGrid indices) covered by an event: one for point events,
+// the whole rectangle for dialog zones.
+function eventBlockCells(e, map) {
+  const cells = [];
+  const x1 = Math.floor(e.x / 2), y1 = Math.floor(e.y / 2);
+  const x2 = e.type === "dialog" ? Math.floor((e.x + (e.w || 1) - 1) / 2) : x1;
+  const y2 = e.type === "dialog" ? Math.floor((e.y + (e.h || 1) - 1) / 2) : y1;
+  for (let y = y1; y <= y2; y++)
+    for (let x = x1; x <= x2; x++) cells.push(y * map.width + x);
+  return cells;
+}
+
+function eventTouchesBlockCells(e, map, blockCells) {
+  return eventBlockCells(e, map).some(i => blockCells.has(i));
+}
+
 function drawEventMarkers(ctx, map, z, onlyBlockCells) {
   const cell = z / 2;                       // a metatile is half a block per axis
   const inset = Math.max(1, cell * 0.12);
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   (map.events || []).forEach(e => {
-    if (onlyBlockCells &&
-        !onlyBlockCells.has(Math.floor(e.y / 2) * map.width + Math.floor(e.x / 2))) return;
+    if (onlyBlockCells && !eventTouchesBlockCells(e, map, onlyBlockCells)) return;
     const meta = EVENT_TYPES[e.type] || { color: "#ffffff", letter: "?" };
     const px = e.x * cell, py = e.y * cell;
     const selected = e.id === state.selectedEventId;
+
+    if (e.type === "dialog") {
+      // A dialog zone is a translucent rectangle over its whole w×h area,
+      // with the type letter in its first cell.
+      const w = (e.w || 1) * cell, h = (e.h || 1) * cell;
+      ctx.globalAlpha = 0.30;
+      ctx.fillStyle = meta.color;
+      ctx.fillRect(px + 1, py + 1, w - 2, h - 2);
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = selected ? "#ffffff" : meta.color;
+      ctx.lineWidth = selected ? 2 : 1;
+      ctx.strokeRect(px + 1.5, py + 1.5, w - 3, h - 3);
+      if (cell >= 12) {
+        ctx.fillStyle = selected ? "#ffffff" : meta.color;
+        ctx.font = "bold " + Math.floor(cell * 0.55) + "px " +
+          "ui-monospace, Menlo, Consolas, monospace";
+        ctx.fillText(meta.letter, px + cell / 2, py + cell / 2 + 0.5);
+      }
+      return;
+    }
 
     ctx.globalAlpha = 0.85;
     ctx.fillStyle = meta.color;
@@ -2399,6 +2490,38 @@ function renderEventInspector(map) {
     addText("Script id", "script");
   } else if (ev.type === "trigger") {
     addText("Script id", "script");
+  } else if (ev.type === "dialog") {
+    const sizeRow = el("div", "row");
+    const mkSize = (lbl, key, max) => {
+      const f = el("div", "field");
+      f.appendChild(label(lbl));
+      const i = numberInput(ev[key] || 1, 1, max);
+      i.addEventListener("change", () => { snapshot(); ev[key] = clampInt(i.value, 1, max); render(); });
+      f.appendChild(i);
+      return f;
+    };
+    sizeRow.append(mkSize("Width (cells)", "w", map.width * 2),
+                   mkSize("Height (cells)", "h", map.height * 2));
+    card.appendChild(sizeRow);
+    card.appendChild(spacer(10));
+    // The zone's text: up to two lines of DIALOG_MAX_CHARS, stored as one
+    // string with an embedded "\n" (what the converter interns).
+    const lines = (ev.text || "").split("\n");
+    const addLine = (lbl, idx) => {
+      const f = el("div", "field");
+      f.appendChild(label(lbl));
+      const i = inputText(lines[idx] || "", 220);
+      i.maxLength = DIALOG_MAX_CHARS;
+      i.addEventListener("input", () => {
+        lines[idx] = i.value;
+        ev.text = lines[1] ? (lines[0] || "") + "\n" + lines[1] : (lines[0] || "");
+      });
+      f.appendChild(i);
+      card.appendChild(f);
+      card.appendChild(spacer(8));
+    };
+    addLine("Line 1 (max " + DIALOG_MAX_CHARS + " chars)", 0);
+    addLine("Line 2 (max " + DIALOG_MAX_CHARS + " chars)", 1);
   }
 
   const delBtn = el("button", "danger", "Delete event");
@@ -2426,6 +2549,8 @@ function renderEventList(map) {
     if (e.type === "item") return (e.item || "(unset)") + (e.qty > 1 ? " x" + e.qty : "");
     if (e.type === "npc") return e.sprite || "(no sprite)";
     if (e.type === "trigger") return e.script || "(no script)";
+    if (e.type === "dialog") return (e.w || 1) + "x" + (e.h || 1) +
+      (e.text ? ' "' + e.text.replace("\n", " / ").slice(0, 24) + '"' : " (no text)");
     return "";
   };
   const list = el("div", "metatile-list");
@@ -2805,7 +2930,7 @@ function floodFillMap(map, x, y, newBlockId) {
    ============================================================ */
 
 /* Assign each map a block-space origin by walking its edge connections,
-   matching the convention in tools/gbworld_visualize.py and gbworld_to_c.py:
+   matching the engine converter's convention (gbworld_to_c.py):
    positive offset shifts the neighbor right (north/south) or down (east/west).
    Disconnected groups are stacked vertically with a one-block gap. */
 function layoutWorldMaps() {

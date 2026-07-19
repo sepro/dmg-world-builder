@@ -59,10 +59,15 @@ The editor's left rail switches between panels; the typical bottom-up workflow i
 4. **Blocks** — assemble 2×2 metatiles into 32×32 blocks.
 5. **Maps** — paint blocks onto maps, set edge connections between maps, pick a
    border block (drawn past unconnected edges), and place the events layer
-   (spawn points, warps, signs, items, NPCs, triggers). A warp has a type
+   (spawn points, warps, signs, items, NPCs, triggers, dialog zones). A warp
+   has a type
    (`transport | door | stairs | fall` — how the engine presents the transition),
    a destination map/cell, and a facing after the warp
    (`same | up | down | left | right`; `same` keeps the walking direction).
+   A **dialog zone** covers a rectangle of cells (drag with the Dialog tool to
+   sweep it out; click = one cell) and carries up to two 18-character lines of
+   text — the engine slides the text up in a box while the player stands
+   anywhere inside the zone and slides it away when they leave.
    A third **Collision** mode paints `walk`/`solid` directly on the map at
    metatile (16×16) resolution with the collision overlay always visible.
    The value is written to the metatile definition under the cursor, so it
@@ -84,8 +89,7 @@ JSON changes.
 
 The Maps panel also offers **Export world PNG**: every map is stitched into one
 image using the edge connections (disconnected maps stack below with a one-block
-gap), with a selectable 1–4× scale and optional map borders/name labels. It is
-the in-browser equivalent of `tools/gbworld_visualize.py`.
+gap), with a selectable 1–4× scale and optional map borders/name labels.
 
 ## Key constraints
 
@@ -98,18 +102,9 @@ the in-browser equivalent of `tools/gbworld_visualize.py`.
 
 ## Tooling
 
-Convert and visualize an exported project from the repo root:
-
-```bash
-# project JSON -> GBDK-2020 world.h / world.c
-python3 tools/gbworld_to_c.py project.gbworld.json -o build/ --name world
-
-# project JSON -> stitched world.png (3× upscale, with map labels)
-python3 tools/gbworld_visualize.py project.gbworld.json -o world.png --scale 3
-```
-
-`gbworld_to_c.py` needs only the Python standard library; `gbworld_visualize.py`
-needs Pillow (`pip install pillow`, preinstalled in the devcontainer).
+The `.gbworld.json` → GBDK C converter (`gbworld_to_c.py`) ships with the game
+engine that consumes the data (in the game repo under `tools/world_builder/`);
+world PNG rendering is built into the editor's Maps panel.
 
 ## Going deeper
 

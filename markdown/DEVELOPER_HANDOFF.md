@@ -8,11 +8,8 @@ the runtime engine or extending the toolchain.
 
 ```
 dist/gb-world-editor.html ──►  project.gbworld.json   ──►  gbworld_to_c.py   ──►  world.h / world.c
-   (authoring UI)            (the single source           (build-time             (ROM data,
-                              of truth, exported)          generator)              reconstructed at runtime)
-
-                            project.gbworld.json   ──►  gbworld_visualize.py  ──►  world.png
-                                                         (stitched overview)
+   (authoring UI)            (the single source           (build-time, ships       (ROM data,
+                              of truth, exported)          with the engine)         reconstructed at runtime)
 ```
 
 The editor is a single static HTML file. It holds the whole project in memory and
@@ -24,21 +21,14 @@ downstream consumes that JSON.
 | File | Role |
 |------|------|
 | `dist/gb-world-editor.html` | The authoring tool. Serve over HTTP and open in a browser. |
-| `tools/gbworld_to_c.py` | Converts a `.gbworld.json` into a GBDK header/source pair. Standard library only. |
-| `tools/gbworld_visualize.py` | Renders the whole world (all connected maps) to one PNG. Needs Pillow. |
+| `gbworld_to_c.py` (game repo, `tools/world_builder/`) | Converts a `.gbworld.json` into a GBDK header/source pair. Standard library only. |
 
-### Running the tooling (inside the devcontainer)
+World PNG rendering is built into the editor (Maps panel → Export world PNG).
+
+### Running the editor (inside the devcontainer)
 
 The container starts a static server automatically. Open
-`http://localhost:8000/docs/gb-world-editor.html`. Then:
-
-```bash
-# Generate C from an exported project
-python3 tools/gbworld_to_c.py project.gbworld.json -o build/ --name world
-
-# Render the whole world to a PNG (3x upscaled, with map labels)
-python3 tools/gbworld_visualize.py project.gbworld.json -o world.png --scale 3
-```
+`http://localhost:8000/docs/gb-world-editor.html`.
 
 ---
 
@@ -204,6 +194,7 @@ Events live on a map at **metatile coordinates** (`x` in `[0, width*2)`, `y` in
 { "id": 104, "type": "npc",     "x": 7, "y": 4, "sprite": "oldman", "movement": "static", "script": "intro" }
 { "id": 105, "type": "trigger", "x": 2, "y": 2, "script": "on_enter" }
 { "id": 106, "type": "spawn",   "x": 4, "y": 4, "facing": "up", "isDefault": true }
+{ "id": 107, "type": "dialog",  "x": 2, "y": 6, "w": 3, "h": 2, "text": "Line one\nLine two" }
 ```
 
 `toMap` is a map id (or `null`). A warp's `warpType` is one of
@@ -214,6 +205,12 @@ walked in with. Files that predate these fields import as `transport` / `same`.
 `movement` is one of `static | wander | walk_up_down | walk_left_right`. The string
 fields (`text`, `item`, `sprite`, `script`, `flag`) are free-form ids your engine
 resolves.
+
+A `dialog` event is a **zone**: `x`/`y` is its top-left cell and `w`/`h` its size in
+metatile cells (every other event type occupies a single cell). Its `text` holds up
+to two lines of at most 18 characters, separated by `\n`; the intended runtime
+behavior is a passive dialog box shown while the player stands anywhere inside the
+rectangle.
 
 Spawn events are not emitted into the runtime event table: the converter picks the
 spawn flagged `isDefault` (falling back to the first spawn found, then to the center
@@ -314,6 +311,7 @@ converter prints a warning counting them.
 | ITEM | quantity | item id | flag id |
 | NPC | `MOVE_*` | sprite id | script id |
 | TRIGGER | — | script id | — |
+| DIALOG | zone width (p1 = height, in cells) | text (`\n` splits the lines) | — |
 
 Warps are **not** in the `events` array; they are in the dedicated `warps` table per
 map, because they drive movement and connectivity.
@@ -454,7 +452,7 @@ must reload tile data, so a transition (fade or doorway) usually masks that seam
 
 Non-warp events are in `cur_map->events`. Look them up by `(x, y)` the same way as
 warps, read `type`, and resolve string ids through `world_strings[s0]` (skip if
-`0xFFFF`). What `sign`/`item`/`npc`/`trigger` actually do is your engine's domain;
+`0xFFFF`). What `sign`/`item`/`npc`/`trigger`/`dialog` actually do is your engine's domain;
 the data layer only carries the parameters.
 
 ---

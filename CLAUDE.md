@@ -21,39 +21,9 @@ Inside the devcontainer a static server starts automatically on port 5500 via VS
 
 The pages live in `docs/` (served straight to GitHub Pages from that folder, with `docs/index.html` as the landing page) and share `docs/gb-theme.css` (the DMG design tokens + generic components: top bar, tabs, cards, controls, modal) and `docs/gb-common.js` (DOM/form helpers, the modal, and `downloadBlob`/`downloadText`/`copyText`). Each page keeps its own page-specific CSS inline and links these two shared files. Because they are linked (not inlined), the pages must be served over HTTP — opening the `.html` via `file://` will not load the shared assets.
 
-## Tooling commands
+## Converting a project to C
 
-```bash
-# Convert an exported project to GBDK-2020 C
-python3 tools/gbworld_to_c.py project.gbworld.json -o build/ --name world
-
-# Render a stitched world PNG (3× upscale, with map labels)
-python3 tools/gbworld_visualize.py project.gbworld.json -o world.png --scale 3
-```
-
-`gbworld_to_c.py` needs only the Python standard library. `gbworld_visualize.py` needs Pillow (`pip install pillow`; preinstalled in the devcontainer).
-
-## Rebuilding the README screenshots
-
-The images in `docs/screenshots/` (embedded by `README.md`) are captured headlessly, so they can be regenerated whenever the UI changes. The capture scripts live in `tools/screenshots/`.
-
-`capture.js` drives a headless Chromium over the served pages: it screenshots the landing page and each tool at its default state, then loads the sample landscape into the pixelizer (via its file input) and clicks **Send to Reducer** to populate the reducer, so those two pages show real content instead of an empty upload panel. Chromium comes from the `@sparticuz/chromium` npm package (the binary ships inside the package tarball), so no separate browser download is needed — this is deliberate, because the Playwright/Chrome-for-Testing CDNs are blocked on restricted networks while the npm registry stays reachable. The sample image is produced deterministically (fixed seed) by `make_landscape.py`, so `docs/screenshots/landscape-sample.png` is reproducible.
-
-```bash
-# 1. Install the capture deps (Chromium + puppeteer-core). node_modules is gitignored.
-cd tools/screenshots && npm install && cd ../..
-
-# 2. Regenerate the deterministic sample landscape (needs numpy + Pillow).
-python3 tools/screenshots/make_landscape.py
-
-# 3. Serve the repo root so the pages can load their shared CSS/JS.
-python3 -m http.server 8000 &
-
-# 4. Capture every screenshot into docs/screenshots/.
-node tools/screenshots/capture.js
-```
-
-`capture.js` targets `http://localhost:8000` by default; set the `BASE` env var to point elsewhere (e.g. `BASE=http://localhost:5500`). Filenames written by the script (`landing.png`, `world-editor.png`, `sprite-editor.png`, `music-generator.png`, `sfx-generator.png`, `pixelizer.png`, `tile-reducer.png`) match what `README.md` references, so no manual renaming is needed. On a normal (unrestricted) network you can instead use Playwright directly if you prefer; the committed scripts use the bundled-Chromium approach so they work even where browser CDNs are blocked.
+The `.gbworld.json` → GBDK C converter (`gbworld_to_c.py`) lives with the game engine (in the game repo under `tools/world_builder/`), not here — the C format is the engine's contract, so the script is versioned alongside the code that consumes it. World PNG rendering is built into the editor itself (Maps panel → world export).
 
 ## Architecture
 
@@ -81,7 +51,7 @@ The entire authoring tool lives in one ~2300-line HTML file: CSS at the top, sta
 
 Event/warp coordinates are in **metatile cells** (2× the block resolution per axis). Map size and `blockGrid` are in **blocks**.
 
-**World PNG export** (Maps panel): `layoutWorldMaps` + `renderWorldCanvas` stitch all maps into one canvas by walking edge connections — a JS port of `tools/gbworld_visualize.py`'s layout, and it must keep following the same offset convention (positive = right for N/S links, down for E/W links; disconnected components stack vertically with a one-block gap).
+**World PNG export** (Maps panel): `layoutWorldMaps` + `renderWorldCanvas` stitch all maps into one canvas by walking edge connections; the layout must keep following the same offset convention as the engine's converter (positive = right for N/S links, down for E/W links; disconnected components stack vertically with a one-block gap).
 
 ### The sprite editor (`docs/gb-sprite-editor.html`)
 
@@ -132,13 +102,9 @@ Two clusterers (`greedyCluster`, `agglomerativeCluster`) share the cluster bookk
 
 A stateless single-file utility that turns arbitrary images into small 2-bit pixel art. Pipeline: tone map (optional 1–99 percentile auto-levels, then brightness/contrast/gamma) → downscale → quantize to the four shades, with the order of the last two steps selectable (`state.order`; quantize-first is the default and scales in shade space, keeping hard 2-bit edges). Downscalers (`scaleArray` reducers, all operating per output-pixel source block so they work on luminance or shades alike): k-centroid (1D k-means per block, keep the dominant cluster's centroid — the pixel-art community standard), dominant value (block mode), box average, nearest sample. Quantization uses three adjustable shade boundaries (plus a "Balance shades" button: Otsu-style weighted 1D k-means over the histogram, thresholds at midpoints between the four cluster centers — robust to a dominant background brightness) and optional dithering: ordered Bayer 2×2/4×4/8×8 or Floyd–Steinberg, with a strength slider (dithering inflates unique-tile counts; the UI warns). The result shows a live unique-8×8-tile count against the 256 budget; the PNG downloads at 1× in either bundled palette and re-imports losslessly into the editors.
 
-### Converter (`tools/gbworld_to_c.py`)
+### Converter (in the game repo: `tools/world_builder/gbworld_to_c.py`)
 
 Reads `project.gbworld.json`, resolves `id`→index maps, and emits `world.h` / `world.c` for GBDK-2020. Warps are separated from other events because they drive movement; they get their own `warps` table per map. Sentinels: empty cell = `0xFF`, absent connection = `-1`, no string = `0xFFFF`.
-
-### Visualizer (`tools/gbworld_visualize.py`)
-
-Follows the same connection-offset convention as the converter (positive offset = right for N/S links, down for E/W links) to stitch connected maps into one PNG.
 
 ### The JSON format (`.gbworld.json`)
 
