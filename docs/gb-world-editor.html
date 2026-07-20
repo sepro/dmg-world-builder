@@ -170,6 +170,30 @@ const DEFAULT_BEHAVIORS = [
 ];
 
 const COLLISION_OPTIONS = ["walk", "solid"];
+// Ledge behaviors, in the order their brushes appear in the collision
+// toolbar. The name is the direction the player travels when jumping it.
+const LEDGE_OPTIONS = ["ledge_up", "ledge_down", "ledge_left", "ledge_right"];
+
+// The {collision, behavior} a collision-mode brush would leave on metatile
+// `src`. A ledge brush sets the behavior and keeps the collision value (the
+// engine treats a ledge as solid from every direction but the jump anyway).
+// A walk/solid brush clears a ledge — so those double as the ledge eraser —
+// but leaves any other behavior (tall grass, water, warp) untouched.
+function brushEdit(brush, src) {
+  if (LEDGE_OPTIONS.includes(brush))
+    return { collision: src.collision, behavior: brush };
+  return {
+    collision: brush,
+    behavior: LEDGE_OPTIONS.includes(src.behavior) ? "normal" : src.behavior,
+  };
+}
+
+// True when a metatile already matches what the brush would write, so a
+// drag stroke can skip it instead of churning variants.
+function brushMatches(m, brush) {
+  const e = brushEdit(brush, m);
+  return m.collision === e.collision && m.behavior === e.behavior;
+}
 // Overlay coverage: "full" hides the whole sprite (canopy, archway),
 // "bottom" hides only the lower half (tall grass -- feet sink in).
 const OVERLAY_MODE_OPTIONS = [
@@ -2120,19 +2144,21 @@ function renderMapsPanel(root) {
       ts.blocks.forEach(b => b.metatiles.forEach(id => { if (id === mtId) n++; }));
       return n;
     };
-    // Reuse-or-create a metatile identical to src except for its collision, and
-    // a block identical to src except for one quadrant. Reuse keeps a drag
-    // stroke from spawning one copy per painted cell.
+    // Reuse-or-create a metatile identical to src except for the collision
+    // and behavior the brush writes, and a block identical to src except for
+    // one quadrant. Reuse keeps a drag stroke from spawning one copy per
+    // painted cell.
     const metaKey = (m2) => [m2.tiles.join(","), m2.cellPalettes.join(","), m2.behavior,
       m2.overlay ? (m2.overlayMode === "bottom" ? "ob" : "of") : "-", m2.collision].join("|");
-    const variantOfMetatile = (src, collision) => {
-      const wanted = metaKey({ ...src, collision });
+    const variantOfMetatile = (src, edit) => {
+      const wanted = metaKey({ ...src, ...edit });
       const hit = ts.metatiles.find(m2 => metaKey(m2) === wanted);
       if (hit) return hit.id;
       const copy = {
-        id: genId(), name: src.name + " (" + collision + ")",
+        id: genId(), name: src.name + " (" + state.collisionTool + ")",
         tiles: [...src.tiles], cellPalettes: [...src.cellPalettes],
-        collision, behavior: src.behavior, overlay: !!src.overlay,
+        collision: edit.collision, behavior: edit.behavior,
+        overlay: !!src.overlay,
         overlayMode: src.overlayMode === "bottom" ? "bottom" : "full",
       };
       ts.metatiles.push(copy);
@@ -2156,9 +2182,11 @@ function renderMapsPanel(root) {
       const q = (my & 1) * 2 + (mx & 1);                       // TL, TR, BL, BR
       const mtId = block.metatiles[q];
       const m = mtId != null ? metatileById(ts, mtId) : null;
-      if (!m || m.collision === state.collisionTool) return;
+      if (!m || brushMatches(m, state.collisionTool)) return;
+      const edit = brushEdit(state.collisionTool, m);
       if (!state.collisionDuplicate) {
-        m.collision = state.collisionTool;
+        m.collision = edit.collision;
+        m.behavior = edit.behavior;
         repaintCellsUsing(mtId);
         return;
       }
@@ -2168,11 +2196,12 @@ function renderMapsPanel(root) {
       // shared metatile just swaps its quadrant; if nothing is shared the
       // metatile can be edited in place.
       if (blockUsageCount(blockId) > 1) {
-        map.blockGrid[cellIndex] = variantOfBlock(block, q, variantOfMetatile(m, state.collisionTool));
+        map.blockGrid[cellIndex] = variantOfBlock(block, q, variantOfMetatile(m, edit));
       } else if (metaUsageCount(mtId) > 1) {
-        block.metatiles[q] = variantOfMetatile(m, state.collisionTool);
+        block.metatiles[q] = variantOfMetatile(m, edit);
       } else {
-        m.collision = state.collisionTool;
+        m.collision = edit.collision;
+        m.behavior = edit.behavior;
       }
       paintCell(mx >> 1, my >> 1);
     };
@@ -2278,6 +2307,11 @@ function renderMapsPanel(root) {
       : "Paint " + state.collisionTool + " onto 16×16 metatile cells. The edit is stored on " +
         "the metatile itself, so every use of that metatile — in other blocks and on other " +
         "maps — updates with it. Turn on “Duplicate shared” to change only the painted cell."));
+    main.appendChild(el("p", "hint",
+      "A ledge brush names the direction the player jumps: walking into a ledge → cell " +
+      "carries them over it and onto the cell beyond. Ledges are one-way — solid from every " +
+      "other side — and need the jump skill unlocked. Paint walk or solid over a ledge to " +
+      "clear it."));
   } else {
     main.appendChild(spacer(12));
     main.appendChild(el("p", "hint", state.eventTool === "dialog"
@@ -2578,6 +2612,7 @@ const COLLISION_TINTS = {
   water: "rgba(64,128,240,0.40)",
   tall_grass: "rgba(64,200,96,0.35)",
   ledge: "rgba(240,160,48,0.40)",
+  ledgeSolid: "#f0a030",   // opaque: brush-button borders, not the overlay
 };
 const LEDGE_ARROWS = {
   ledge_up: "↑", ledge_down: "↓",
@@ -2591,11 +2626,14 @@ function drawCollisionCell(ctx, ts, block, z, px, py) {
     if (!m) continue;
     const mx = px + (i % 2) * half, my = py + (i >> 1) * half;
     let tint = null, glyph = null;
-    if (m.collision === "solid") {
-      tint = COLLISION_TINTS.solid;
-    } else if (LEDGE_ARROWS[m.behavior]) {
+    // Ledges are checked before solid: the engine treats a ledge as solid
+    // from every direction but the jump, so a ledge metatile marked solid
+    // must still show its arrow rather than reading as a plain wall.
+    if (LEDGE_ARROWS[m.behavior]) {
       tint = COLLISION_TINTS.ledge;
       glyph = LEDGE_ARROWS[m.behavior];
+    } else if (m.collision === "solid") {
+      tint = COLLISION_TINTS.solid;
     } else if (COLLISION_TINTS[m.behavior]) {
       tint = COLLISION_TINTS[m.behavior];
     }
@@ -2655,6 +2693,24 @@ function renderMapToolbar(map, ts) {
       colGroup.appendChild(b);
     });
     bar.appendChild(colGroup);
+    // Ledge brushes, one per jumpable direction. Only offered for ledge
+    // behaviors this project actually defines, so a trimmed behavior list
+    // can't select a brush the converter would reject. The arrow and the
+    // orange border match how the overlay already draws ledges.
+    const ledgeNames = LEDGE_OPTIONS.filter(n => state.project.behaviors.includes(n));
+    if (ledgeNames.length) {
+      const ledgeGroup = el("div", "group");
+      ledgeGroup.appendChild(el("span", "cell-label", "Ledge"));
+      ledgeNames.forEach(name => {
+        const b = el("button", "tool-btn" + (state.collisionTool === name ? " active" : ""),
+                     LEDGE_ARROWS[name]);
+        b.title = name + " — jumped heading " + name.slice("ledge_".length);
+        b.style.borderLeft = "4px solid " + COLLISION_TINTS.ledgeSolid;
+        b.addEventListener("click", () => { state.collisionTool = name; render(); });
+        ledgeGroup.appendChild(b);
+      });
+      bar.appendChild(ledgeGroup);
+    }
     // Localize the paint: duplicate shared metatiles/blocks under the brush
     // instead of editing the shared definition.
     bar.appendChild(toggle("Duplicate shared", state.collisionDuplicate,
