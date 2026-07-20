@@ -174,15 +174,44 @@ const COLLISION_OPTIONS = ["walk", "solid"];
 // toolbar. The name is the direction the player travels when jumping it.
 const LEDGE_OPTIONS = ["ledge_up", "ledge_down", "ledge_left", "ledge_right"];
 
-// The {collision, behavior} a collision-mode brush would leave on metatile
-// `src`. A ledge brush sets the behavior and keeps the collision value (the
-// engine treats a ledge as solid from every direction but the jump anyway).
-// A walk/solid brush clears a ledge — so those double as the ledge eraser —
-// but leaves any other behavior (tall grass, water, warp) untouched.
+// Per-edge borders. A border blocks movement across that edge of the
+// metatile in both directions — you can neither leave nor enter through it —
+// while the unbordered edges stay open. They combine freely with each other
+// and with any behavior, so they live in their own array rather than in the
+// single-valued behavior field. Brush names are prefixed to keep one flat
+// brush namespace in the collision toolbar.
+const BORDER_OPTIONS = ["up", "down", "left", "right"];
+const BORDER_BRUSHES = BORDER_OPTIONS.map(s => "border_" + s);
+const BORDER_CLEAR_BRUSH = "border_none";
+const BORDER_GLYPHS = { up: "↑", down: "↓", left: "←", right: "→" };
+
+// A metatile's borders, normalized: always a fresh array, only known sides,
+// in BORDER_OPTIONS order so comparisons and keys are stable.
+function bordersOf(m) {
+  const have = Array.isArray(m.borders) ? m.borders : [];
+  return BORDER_OPTIONS.filter(s => have.includes(s));
+}
+
+// The {collision, behavior, borders} a collision-mode brush would leave on
+// metatile `src`:
+//   • a border brush adds that one edge, leaving collision/behavior alone;
+//   • "no border" clears all four edges;
+//   • a ledge brush sets the behavior and keeps the collision value (the
+//     engine blocks a ledge from every direction but the jump anyway);
+//   • walk/solid clears a ledge — so those double as the ledge eraser — but
+//     leaves any other behavior (tall grass, water, warp) untouched.
+// Borders survive every non-border brush: they are orthogonal to what the
+// rest of the collision data says.
 function brushEdit(brush, src) {
-  if (LEDGE_OPTIONS.includes(brush))
-    return { collision: src.collision, behavior: brush };
+  const base = { collision: src.collision, behavior: src.behavior, borders: bordersOf(src) };
+  if (brush === BORDER_CLEAR_BRUSH) return { ...base, borders: [] };
+  if (BORDER_BRUSHES.includes(brush)) {
+    const side = brush.slice("border_".length);
+    return { ...base, borders: BORDER_OPTIONS.filter(s => s === side || base.borders.includes(s)) };
+  }
+  if (LEDGE_OPTIONS.includes(brush)) return { ...base, behavior: brush };
   return {
+    ...base,
     collision: brush,
     behavior: LEDGE_OPTIONS.includes(src.behavior) ? "normal" : src.behavior,
   };
@@ -192,7 +221,8 @@ function brushEdit(brush, src) {
 // drag stroke can skip it instead of churning variants.
 function brushMatches(m, brush) {
   const e = brushEdit(brush, m);
-  return m.collision === e.collision && m.behavior === e.behavior;
+  return m.collision === e.collision && m.behavior === e.behavior &&
+         bordersOf(m).join(",") === e.borders.join(",");
 }
 // Overlay coverage: "full" hides the whole sprite (canopy, archway),
 // "bottom" hides only the lower half (tall grass -- feet sink in).
@@ -1474,7 +1504,7 @@ function addTilesFromImage(ts, img, opts) {
             id: genId(), name: "imported",
             tiles: cellTiles,
             cellPalettes: [firstPalette, firstPalette, firstPalette, firstPalette],
-            collision: "walk", behavior: "normal",
+            collision: "walk", behavior: "normal", borders: [],
           };
           ts.metatiles.push(m);
           id = m.id;
@@ -1574,7 +1604,10 @@ function renderMetatilesPanel(root) {
     drawMetatile(c.getContext("2d"), ts, m, 32 / (TILE_PX * 2), 0, 0, state.animMetatiles);
     c.style.border = "1px solid var(--border)";
     const name = el("span", "mt-name", "#" + index + "  " + m.name);
-    const meta = el("span", "mt-meta", m.collision + " / " + m.behavior + (m.overlay ? (m.overlayMode === "bottom" ? " / overlay-btm" : " / overlay") : ""));
+    const bord = bordersOf(m);
+    const meta = el("span", "mt-meta", m.collision + " / " + m.behavior +
+      (m.overlay ? (m.overlayMode === "bottom" ? " / overlay-btm" : " / overlay") : "") +
+      (bord.length ? " / \u2b1a" + bord.map(s2 => BORDER_GLYPHS[s2]).join("") : ""));
     row.append(c, name, meta);
     row.addEventListener("click", () => { state.selectedMetatileId = m.id; state.selectedCell = 0; render(); });
     list.appendChild(row);
@@ -1594,6 +1627,7 @@ function renderMetatilesPanel(root) {
       cellPalettes: [firstPalette, firstPalette, firstPalette, firstPalette],
       collision: "walk",
       behavior: "normal",
+      borders: [],
       overlay: false,
       overlayMode: "full",
     };
@@ -1608,7 +1642,8 @@ function renderMetatilesPanel(root) {
     const m = {
       id: genId(), name: src.name + " copy",
       tiles: [...src.tiles], cellPalettes: [...src.cellPalettes],
-      collision: src.collision, behavior: src.behavior, overlay: !!src.overlay,
+      collision: src.collision, behavior: src.behavior,
+      borders: [...bordersOf(src)], overlay: !!src.overlay,
       overlayMode: src.overlayMode === "bottom" ? "bottom" : "full",
     };
     ts.metatiles.push(m);
@@ -1701,6 +1736,38 @@ function renderMetatilesPanel(root) {
   behField.appendChild(selectFrom(state.project.behaviors, m.behavior, v => { snapshot(); m.behavior = v; render(); }));
   movRow.append(colField, behField);
   ed.appendChild(movRow);
+
+  // Per-edge borders. Independent of both collision and behavior, and freely
+  // combinable: a border closes that one edge of the 16x16 cell in both
+  // directions (you can neither step out through it nor step in through it)
+  // while the other edges stay open.
+  ed.appendChild(spacer(8));
+  const bordField = el("div", "field");
+  bordField.appendChild(label("Borders (blocked edges)"));
+  const bordRow = el("div", "row");
+  BORDER_OPTIONS.forEach(side => {
+    const lab = document.createElement("label");
+    lab.className = "checkbox";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = bordersOf(m).includes(side);
+    cb.addEventListener("change", () => {
+      snapshot();
+      const have = bordersOf(m);
+      m.borders = cb.checked
+        ? BORDER_OPTIONS.filter(s => s === side || have.includes(s))
+        : have.filter(s => s !== side);
+      render();
+    });
+    lab.append(cb, document.createTextNode(" " + BORDER_GLYPHS[side] + " " + side));
+    bordRow.appendChild(lab);
+  });
+  bordField.appendChild(bordRow);
+  ed.appendChild(bordField);
+  if (LEDGE_OPTIONS.includes(m.behavior) && bordersOf(m).length)
+    ed.appendChild(el("p", "hint",
+      "This metatile is a ledge, so its borders have no effect — a ledge is " +
+      "jumped over, never entered or exited."));
 
   // Overlay: the metatile's BG art draws over the player (engine sets the
   // OAM priority bit on player parts standing on it). Independent of
@@ -2148,8 +2215,11 @@ function renderMapsPanel(root) {
     // and behavior the brush writes, and a block identical to src except for
     // one quadrant. Reuse keeps a drag stroke from spawning one copy per
     // painted cell.
+    // Borders are part of the identity: without them a stroke would reuse a
+    // variant that differs only by which edges are closed.
     const metaKey = (m2) => [m2.tiles.join(","), m2.cellPalettes.join(","), m2.behavior,
-      m2.overlay ? (m2.overlayMode === "bottom" ? "ob" : "of") : "-", m2.collision].join("|");
+      m2.overlay ? (m2.overlayMode === "bottom" ? "ob" : "of") : "-", m2.collision,
+      bordersOf(m2).join("+")].join("|");
     const variantOfMetatile = (src, edit) => {
       const wanted = metaKey({ ...src, ...edit });
       const hit = ts.metatiles.find(m2 => metaKey(m2) === wanted);
@@ -2158,6 +2228,7 @@ function renderMapsPanel(root) {
         id: genId(), name: src.name + " (" + state.collisionTool + ")",
         tiles: [...src.tiles], cellPalettes: [...src.cellPalettes],
         collision: edit.collision, behavior: edit.behavior,
+        borders: [...edit.borders],
         overlay: !!src.overlay,
         overlayMode: src.overlayMode === "bottom" ? "bottom" : "full",
       };
@@ -2187,6 +2258,7 @@ function renderMapsPanel(root) {
       if (!state.collisionDuplicate) {
         m.collision = edit.collision;
         m.behavior = edit.behavior;
+        m.borders = [...edit.borders];
         repaintCellsUsing(mtId);
         return;
       }
@@ -2202,6 +2274,7 @@ function renderMapsPanel(root) {
       } else {
         m.collision = edit.collision;
         m.behavior = edit.behavior;
+        m.borders = [...edit.borders];
       }
       paintCell(mx >> 1, my >> 1);
     };
@@ -2312,6 +2385,12 @@ function renderMapsPanel(root) {
       "carries them over it and onto the cell beyond. Ledges are one-way — solid from every " +
       "other side — and need the jump skill unlocked. Paint walk or solid over a ledge to " +
       "clear it."));
+    main.appendChild(el("p", "hint",
+      "A border brush closes one edge of a metatile: movement across that edge is blocked " +
+      "in both directions, while the other edges stay open. Borders stack (paint ↑ then ← " +
+      "for a corner) and combine with any collision or behavior; “none” clears all four. " +
+      "Because an edge is shared, closing it on either of the two neighbouring cells has " +
+      "the same effect."));
   } else {
     main.appendChild(spacer(12));
     main.appendChild(el("p", "hint", state.eventTool === "dialog"
@@ -2613,6 +2692,8 @@ const COLLISION_TINTS = {
   tall_grass: "rgba(64,200,96,0.35)",
   ledge: "rgba(240,160,48,0.40)",
   ledgeSolid: "#f0a030",   // opaque: brush-button borders, not the overlay
+  border: "rgba(232,64,200,0.95)",  // per-edge border stroke
+  borderSolid: "#e840c8",
 };
 const LEDGE_ARROWS = {
   ledge_up: "↑", ledge_down: "↓",
@@ -2637,9 +2718,10 @@ function drawCollisionCell(ctx, ts, block, z, px, py) {
     } else if (COLLISION_TINTS[m.behavior]) {
       tint = COLLISION_TINTS[m.behavior];
     }
-    if (!tint) continue;
-    ctx.fillStyle = tint;
-    ctx.fillRect(mx, my, half, half);
+    if (tint) {
+      ctx.fillStyle = tint;
+      ctx.fillRect(mx, my, half, half);
+    }
     if (glyph) {
       ctx.fillStyle = "rgba(0,0,0,0.8)";
       ctx.font = "bold " + Math.max(8, Math.floor(half * 0.6)) + "px monospace";
@@ -2647,6 +2729,23 @@ function drawCollisionCell(ctx, ts, block, z, px, py) {
       ctx.textBaseline = "middle";
       ctx.fillText(glyph, mx + half / 2, my + half / 2);
     }
+    // Borders last, and independent of the tint: they close one edge of an
+    // otherwise ordinary metatile, so they have to show on cells that carry
+    // no tint at all. Drawn inset by half the line width so the stroke sits
+    // inside its own cell rather than straddling the neighbor's.
+    const borders = bordersOf(m);
+    if (!borders.length) continue;
+    const lw = Math.max(2, Math.round(half * 0.14));
+    ctx.strokeStyle = COLLISION_TINTS.border;
+    ctx.lineWidth = lw;
+    ctx.lineCap = "butt";
+    const o = lw / 2;
+    ctx.beginPath();
+    if (borders.includes("up"))    { ctx.moveTo(mx, my + o);            ctx.lineTo(mx + half, my + o); }
+    if (borders.includes("down"))  { ctx.moveTo(mx, my + half - o);     ctx.lineTo(mx + half, my + half - o); }
+    if (borders.includes("left"))  { ctx.moveTo(mx + o, my);            ctx.lineTo(mx + o, my + half); }
+    if (borders.includes("right")) { ctx.moveTo(mx + half - o, my);     ctx.lineTo(mx + half - o, my + half); }
+    ctx.stroke();
   }
 }
 
@@ -2711,6 +2810,29 @@ function renderMapToolbar(map, ts) {
       });
       bar.appendChild(ledgeGroup);
     }
+    // Border brushes: one per edge, plus an eraser. Each sets its own edge
+    // and leaves the others (and the collision/behavior) alone, so a tile
+    // can accumulate several; "none" clears all four. Setting rather than
+    // toggling keeps drag-painting a long cliff edge predictable — a
+    // toggle would flip cells back as the pointer re-entered them.
+    const borderGroup = el("div", "group");
+    borderGroup.appendChild(el("span", "cell-label", "Border"));
+    BORDER_OPTIONS.forEach(side => {
+      const brush = "border_" + side;
+      const b = el("button", "tool-btn" + (state.collisionTool === brush ? " active" : ""),
+                   BORDER_GLYPHS[side]);
+      b.title = "border " + side + " — closes this metatile's " + side + " edge in both directions";
+      b.style.borderLeft = "4px solid " + COLLISION_TINTS.borderSolid;
+      b.addEventListener("click", () => { state.collisionTool = brush; render(); });
+      borderGroup.appendChild(b);
+    });
+    const clearB = el("button",
+      "tool-btn" + (state.collisionTool === BORDER_CLEAR_BRUSH ? " active" : ""), "none");
+    clearB.title = "clear every border edge on the metatile";
+    clearB.style.borderLeft = "4px solid " + COLLISION_TINTS.borderSolid;
+    clearB.addEventListener("click", () => { state.collisionTool = BORDER_CLEAR_BRUSH; render(); });
+    borderGroup.appendChild(clearB);
+    bar.appendChild(borderGroup);
     // Localize the paint: duplicate shared metatiles/blocks under the brush
     // instead of editing the shared definition.
     bar.appendChild(toggle("Duplicate shared", state.collisionDuplicate,

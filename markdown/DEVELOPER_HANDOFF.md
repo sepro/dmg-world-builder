@@ -130,13 +130,29 @@ one extra frame. `frameRate` is how many 1/60s ticks each frame is shown.
   "cellPalettes": [1, 1, 1, 1],       // palette id per cell (GBC); DMG ignores
   "collision":    "solid",            // "walk" | "solid"
   "behavior":     "water",            // one of project.behaviors
+  "borders":      [],                 // optional; any of "up","down","left","right"
   "overlay":      false,              // optional; true = BG art draws over the player
   "overlayMode":  "full"              // optional; "full" | "bottom", absent = "full"
 }
 ```
 
-Collision and behavior are properties of the metatile **type**, shared by every cell
-that uses it. This is why a warp's destination cannot live here (see §4.4).
+Collision, behavior and borders are properties of the metatile **type**, shared by
+every cell that uses it. This is why a warp's destination cannot live here (see §4.4).
+
+`borders` lists the edges of the 16x16 cell that movement cannot cross. A border
+blocks that edge in **both** directions — you can neither step out of the tile
+through it nor step into the tile through it — while the unbordered edges stay
+open. Because two neighbouring cells share an edge, closing it on either of them
+has the same effect. Borders are free-form: several may be set on one metatile
+(`["up","left"]` for an inside corner) and they combine with any collision value
+and any behavior. The converter ORs them into the free upper bits of the
+`collision` byte as `COLLISION_BORDER_UP` (8), `_DOWN` (16), `_LEFT` (32) and
+`_RIGHT` (64), so adding borders costs no extra ROM. Omitting the field, as every
+pre-border file does, means "no borders".
+
+Borders on a `ledge_*` metatile have no effect and the converter warns about
+them: a ledge is jumped over rather than entered or exited, so it has no edge
+crossings to block.
 
 `overlay` marks metatiles whose art should cover sprites standing on them (tree
 canopy, tall grass, archways). It is independent of collision — a canopy is
@@ -438,6 +454,8 @@ if (m && (m->behavior == BEHAVIOR_WARP || m->behavior == BEHAVIOR_DOOR)) {
 ```
 
 Use the same `metatile_at` for collision: block a move if `m->collision & COLLISION_SOLID`
+(and, for per-edge borders, if the tile being left has the border bit for the
+direction of travel, or the tile being entered has the bit for the opposite one)
 (the byte is a bitfield — `COLLISION_OVERLAY` may also be set, see §2.5 "Metatile").
 
 ### 4.5 Connections (seamless scrolling)
