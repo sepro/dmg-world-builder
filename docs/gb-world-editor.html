@@ -185,6 +185,15 @@ const BORDER_BRUSHES = BORDER_OPTIONS.map(s => "border_" + s);
 const BORDER_CLEAR_BRUSH = "border_none";
 const BORDER_GLYPHS = { up: "↑", down: "↓", left: "←", right: "→" };
 
+// Surface: what the ground under the player is made of, as opposed to what
+// movement does there. Snow is the only one so far — the engine presses
+// footprints into it — and like borders it is orthogonal to collision and to
+// the single-valued behavior field, so a snowy ledge or snowy tall grass is
+// expressible. Stored as a plain boolean on the metatile (absent = false, so
+// older project files import unchanged).
+const SNOW_BRUSH = "snow";
+const SNOW_CLEAR_BRUSH = "snow_none";
+
 // A metatile's borders, normalized: always a fresh array, only known sides,
 // in BORDER_OPTIONS order so comparisons and keys are stable.
 function bordersOf(m) {
@@ -192,18 +201,24 @@ function bordersOf(m) {
   return BORDER_OPTIONS.filter(s => have.includes(s));
 }
 
-// The {collision, behavior, borders} a collision-mode brush would leave on
-// metatile `src`:
+// The {collision, behavior, borders, snow} a collision-mode brush would leave
+// on metatile `src`:
 //   • a border brush adds that one edge, leaving collision/behavior alone;
 //   • "no border" clears all four edges;
+//   • the snow brushes set or clear the surface flag and touch nothing else;
 //   • a ledge brush sets the behavior and keeps the collision value (the
 //     engine blocks a ledge from every direction but the jump anyway);
 //   • walk/solid clears a ledge — so those double as the ledge eraser — but
 //     leaves any other behavior (tall grass, water, warp) untouched.
-// Borders survive every non-border brush: they are orthogonal to what the
-// rest of the collision data says.
+// Borders and snow survive every brush that is not their own: they are
+// orthogonal to what the rest of the collision data says.
 function brushEdit(brush, src) {
-  const base = { collision: src.collision, behavior: src.behavior, borders: bordersOf(src) };
+  const base = {
+    collision: src.collision, behavior: src.behavior,
+    borders: bordersOf(src), snow: !!src.snow,
+  };
+  if (brush === SNOW_BRUSH) return { ...base, snow: true };
+  if (brush === SNOW_CLEAR_BRUSH) return { ...base, snow: false };
   if (brush === BORDER_CLEAR_BRUSH) return { ...base, borders: [] };
   if (BORDER_BRUSHES.includes(brush)) {
     const side = brush.slice("border_".length);
@@ -222,6 +237,7 @@ function brushEdit(brush, src) {
 function brushMatches(m, brush) {
   const e = brushEdit(brush, m);
   return m.collision === e.collision && m.behavior === e.behavior &&
+         !!m.snow === e.snow &&
          bordersOf(m).join(",") === e.borders.join(",");
 }
 // Overlay coverage: "full" hides the whole sprite (canopy, archway),
@@ -1607,6 +1623,7 @@ function renderMetatilesPanel(root) {
     const bord = bordersOf(m);
     const meta = el("span", "mt-meta", m.collision + " / " + m.behavior +
       (m.overlay ? (m.overlayMode === "bottom" ? " / overlay-btm" : " / overlay") : "") +
+      (m.snow ? " / snow" : "") +
       (bord.length ? " / \u2b1a" + bord.map(s2 => BORDER_GLYPHS[s2]).join("") : ""));
     row.append(c, name, meta);
     row.addEventListener("click", () => { state.selectedMetatileId = m.id; state.selectedCell = 0; render(); });
@@ -1630,6 +1647,7 @@ function renderMetatilesPanel(root) {
       borders: [],
       overlay: false,
       overlayMode: "full",
+      snow: false,
     };
     ts.metatiles.push(m);
     state.selectedMetatileId = m.id; state.selectedCell = 0; render();
@@ -1645,6 +1663,7 @@ function renderMetatilesPanel(root) {
       collision: src.collision, behavior: src.behavior,
       borders: [...bordersOf(src)], overlay: !!src.overlay,
       overlayMode: src.overlayMode === "bottom" ? "bottom" : "full",
+      snow: !!src.snow,
     };
     ts.metatiles.push(m);
     state.selectedMetatileId = m.id; state.selectedCell = 0; render();
@@ -1768,6 +1787,26 @@ function renderMetatilesPanel(root) {
     ed.appendChild(el("p", "hint",
       "This metatile is a ledge, so its borders have no effect — a ledge is " +
       "jumped over, never entered or exited."));
+
+  // Surface. Orthogonal to everything above: it says what the ground is made
+  // of, not what movement does there, so it combines freely with any
+  // collision value, behavior or border.
+  ed.appendChild(spacer(8));
+  const surfField = el("div", "field");
+  surfField.appendChild(label("Surface"));
+  const snowLabel = document.createElement("label");
+  snowLabel.className = "checkbox";
+  const snowCb = document.createElement("input");
+  snowCb.type = "checkbox";
+  snowCb.checked = !!m.snow;
+  snowCb.addEventListener("change", () => { snapshot(); m.snow = snowCb.checked; render(); });
+  snowLabel.append(snowCb, document.createTextNode(" Snow (player leaves footprints)"));
+  surfField.appendChild(snowLabel);
+  ed.appendChild(surfField);
+  if (m.snow && m.collision === "solid")
+    ed.appendChild(el("p", "hint",
+      "This metatile is solid, so its snow has no effect — footprints are " +
+      "pressed by the player walking, and nothing can stand here."));
 
   // Overlay: the metatile's BG art draws over the player (engine sets the
   // OAM priority bit on player parts standing on it). Independent of
@@ -2215,11 +2254,12 @@ function renderMapsPanel(root) {
     // and behavior the brush writes, and a block identical to src except for
     // one quadrant. Reuse keeps a drag stroke from spawning one copy per
     // painted cell.
-    // Borders are part of the identity: without them a stroke would reuse a
-    // variant that differs only by which edges are closed.
+    // Borders and snow are part of the identity: without them a stroke would
+    // reuse a variant that differs only by which edges are closed, or by
+    // whether the ground takes footprints.
     const metaKey = (m2) => [m2.tiles.join(","), m2.cellPalettes.join(","), m2.behavior,
       m2.overlay ? (m2.overlayMode === "bottom" ? "ob" : "of") : "-", m2.collision,
-      bordersOf(m2).join("+")].join("|");
+      m2.snow ? "snow" : "-", bordersOf(m2).join("+")].join("|");
     const variantOfMetatile = (src, edit) => {
       const wanted = metaKey({ ...src, ...edit });
       const hit = ts.metatiles.find(m2 => metaKey(m2) === wanted);
@@ -2231,6 +2271,7 @@ function renderMapsPanel(root) {
         borders: [...edit.borders],
         overlay: !!src.overlay,
         overlayMode: src.overlayMode === "bottom" ? "bottom" : "full",
+        snow: edit.snow,
       };
       ts.metatiles.push(copy);
       return copy.id;
@@ -2259,6 +2300,7 @@ function renderMapsPanel(root) {
         m.collision = edit.collision;
         m.behavior = edit.behavior;
         m.borders = [...edit.borders];
+        m.snow = edit.snow;
         repaintCellsUsing(mtId);
         return;
       }
@@ -2275,6 +2317,7 @@ function renderMapsPanel(root) {
         m.collision = edit.collision;
         m.behavior = edit.behavior;
         m.borders = [...edit.borders];
+        m.snow = edit.snow;
       }
       paintCell(mx >> 1, my >> 1);
     };
@@ -2694,6 +2737,11 @@ const COLLISION_TINTS = {
   ledgeSolid: "#f0a030",   // opaque: brush-button borders, not the overlay
   border: "rgba(232,64,200,0.95)",  // per-edge border stroke
   borderSolid: "#e840c8",
+  // Snow is a surface, not a movement rule, so it is drawn as speckles over
+  // whatever tint the cell already has rather than as a tint of its own —
+  // a snowy ledge has to stay legible as a ledge.
+  snow: "rgba(255,255,255,0.9)",
+  snowSolid: "#dff4ff",
 };
 const LEDGE_ARROWS = {
   ledge_up: "↑", ledge_down: "↓",
@@ -2729,6 +2777,22 @@ function drawCollisionCell(ctx, ts, block, z, px, py) {
       ctx.textBaseline = "middle";
       ctx.fillText(glyph, mx + half / 2, my + half / 2);
     }
+    // Snow speckles: three dots in a scatter, sized off the cell so they
+    // stay visible at every zoom. Outlined, because the lightest DMG shade
+    // is nearly white and plain white dots vanish on snow art.
+    if (m.snow) {
+      const r = Math.max(1, half * 0.055);
+      ctx.fillStyle = COLLISION_TINTS.snow;
+      ctx.strokeStyle = "rgba(0,0,0,0.55)";
+      ctx.lineWidth = Math.max(1, r * 0.6);
+      [[0.28, 0.30], [0.68, 0.46], [0.44, 0.72]].forEach(([fx, fy]) => {
+        ctx.beginPath();
+        ctx.arc(mx + half * fx, my + half * fy, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      });
+    }
+
     // Borders last, and independent of the tint: they close one edge of an
     // otherwise ordinary metatile, so they have to show on cells that carry
     // no tint at all. Drawn inset by half the line width so the stroke sits
@@ -2833,6 +2897,20 @@ function renderMapToolbar(map, ts) {
     clearB.addEventListener("click", () => { state.collisionTool = BORDER_CLEAR_BRUSH; render(); });
     borderGroup.appendChild(clearB);
     bar.appendChild(borderGroup);
+    // Surface brushes. Set/clear rather than toggle, for the same reason the
+    // border brushes do: a toggle would flip cells back as a drag re-entered
+    // them, and snow is painted in large sweeps.
+    const surfGroup = el("div", "group");
+    surfGroup.appendChild(el("span", "cell-label", "Surface"));
+    [[SNOW_BRUSH, "snow", "mark as snow — the player leaves footprints here"],
+     [SNOW_CLEAR_BRUSH, "no snow", "clear the snow flag"]].forEach(([brush, text, title]) => {
+      const b = el("button", "tool-btn" + (state.collisionTool === brush ? " active" : ""), text);
+      b.title = title;
+      b.style.borderLeft = "4px solid " + COLLISION_TINTS.snowSolid;
+      b.addEventListener("click", () => { state.collisionTool = brush; render(); });
+      surfGroup.appendChild(b);
+    });
+    bar.appendChild(surfGroup);
     // Localize the paint: duplicate shared metatiles/blocks under the brush
     // instead of editing the shared definition.
     bar.appendChild(toggle("Duplicate shared", state.collisionDuplicate,

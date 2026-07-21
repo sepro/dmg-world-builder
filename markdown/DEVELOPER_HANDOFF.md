@@ -132,12 +132,13 @@ one extra frame. `frameRate` is how many 1/60s ticks each frame is shown.
   "behavior":     "water",            // one of project.behaviors
   "borders":      [],                 // optional; any of "up","down","left","right"
   "overlay":      false,              // optional; true = BG art draws over the player
-  "overlayMode":  "full"              // optional; "full" | "bottom", absent = "full"
+  "overlayMode":  "full",             // optional; "full" | "bottom", absent = "full"
+  "snow":         false               // optional; surface flag, absent = false
 }
 ```
 
-Collision, behavior and borders are properties of the metatile **type**, shared by
-every cell that uses it. This is why a warp's destination cannot live here (see §4.4).
+Collision, behavior, borders and the surface flag are properties of the metatile
+**type**, shared by every cell that uses it. This is why a warp's destination cannot live here (see §4.4).
 
 `borders` lists the edges of the 16x16 cell that movement cannot cross. A border
 blocks that edge in **both** directions — you can neither step out of the tile
@@ -153,6 +154,18 @@ pre-border file does, means "no borders".
 Borders on a `ledge_*` metatile have no effect and the converter warns about
 them: a ledge is jumped over rather than entered or exited, so it has no edge
 crossings to block.
+
+`snow` is a **surface** flag — what the ground is made of, as opposed to what
+movement does there. Because it is not a movement rule it is not exclusive the
+way `behavior` is: a ledge, a patch of tall grass or a warp tile can each be
+snowy. Engines read it to decide where the player leaves footprints. It is
+painted with the **Surface** brushes in the collision screen and shows on the
+map overlay as three white speckles over whatever tint the cell already carries.
+The converter ORs it into bit 7 of the `collision` byte as `COLLISION_SNOW`
+(128); that was the last free bit, so a second surface type will need its own
+metatile field rather than another bit. Omitting the field means "not snow".
+Snow on a `solid` metatile has no effect (nothing can walk there) and the
+converter warns about it.
 
 `overlay` marks metatiles whose art should cover sprites standing on them (tree
 canopy, tall grass, archways). It is independent of collision — a canopy is

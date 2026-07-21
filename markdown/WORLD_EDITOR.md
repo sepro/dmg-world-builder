@@ -55,7 +55,11 @@ The editor's left rail switches between panels; the typical bottom-up workflow i
    archway), *Bottom half (tall grass)* hides only the lower half of the
    sprite, so feet sink into the grass while the head stays visible. On DMG
    only shades 1–3 cover the sprite; the lightest shade always shows it
-   through.
+   through. A metatile also carries a **Surface** flag, **Snow** — the ground
+   here takes the footprints the engine presses behind the walking player.
+   Like the borders it combines freely with any collision value and behavior,
+   so a snowy ledge is expressible; it can also be painted straight onto the
+   map from the Collision mode's toolbar (see 5).
 4. **Blocks** — assemble 2×2 metatiles into 32×32 blocks.
 5. **Maps** — paint blocks onto maps, set edge connections between maps, pick a
    border block (drawn past unconnected edges), and place the events layer
@@ -68,10 +72,16 @@ The editor's left rail switches between panels; the typical bottom-up workflow i
    sweep it out; click = one cell) and carries up to two 18-character lines of
    text — the engine slides the text up in a box while the player stands
    anywhere inside the zone and slides it away when they leave.
-   A third **Collision** mode paints `walk`/`solid` directly on the map at
-   metatile (16×16) resolution with the collision overlay always visible.
-   The value is written to the metatile definition under the cursor, so it
-   propagates to every block and map that reuses that metatile. Turn on
+   A third **Collision** mode paints movement rules directly on the map at
+   metatile (16×16) resolution with the collision overlay always visible. Its
+   toolbar holds four brush families: `walk`/`solid`, the four **Ledge**
+   directions, the four per-edge **Border** brushes plus a `none` eraser, and
+   the **Surface** brushes `snow`/`no snow` (snow is where the engine leaves
+   footprints behind the walking player). Ledges, borders and snow are
+   orthogonal, so one metatile can carry all three — the overlay draws snow as
+   three white speckles over whatever tint the cell already has. Each brush is
+   written to the metatile definition under the cursor, so it propagates to
+   every block and map that reuses that metatile. Turn on
    **Duplicate shared** to confine the paint to the cell under the brush:
    shared metatiles (and, when needed, shared blocks) are duplicated with the
    new collision and only the painted cell is rewired — an existing identical
