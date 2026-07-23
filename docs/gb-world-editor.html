@@ -262,6 +262,10 @@ const EVENT_ORDER = ["spawn", "warp", "sign", "item", "npc", "trigger", "dialog"
 // The in-game dialog box shows 2 rows of 18 characters.
 const DIALOG_MAX_CHARS = 18;
 const NPC_MOVEMENTS = ["static", "wander", "walk_up_down", "walk_left_right"];
+// Which way an NPC faces. "player" is the default: it always turns to face the
+// player. A compass direction pins the NPC to that facing until it is spoken
+// to, when it turns to meet the player, then reverts once the box closes.
+const NPC_FACINGS = ["player", "down", "up", "left", "right"];
 // Facing direction the player starts in at a spawn point.
 const FACINGS = ["down", "up", "left", "right"];
 // How a warp is presented by the engine (door fade, stair slide, fall, plain teleport).
@@ -276,7 +280,7 @@ function makeEvent(type, x, y) {
   else if (type === "warp") { e.toMap = null; e.toX = 0; e.toY = 0; e.warpType = "transport"; e.facing = "same"; }
   else if (type === "sign") { e.text = ""; }
   else if (type === "item") { e.item = ""; e.qty = 1; e.flag = ""; }
-  else if (type === "npc") { e.sprite = ""; e.movement = "static"; e.script = ""; }
+  else if (type === "npc") { e.sprite = ""; e.movement = "static"; e.facing = "player"; e.script = ""; }
   else if (type === "trigger") { e.script = ""; }
   else if (type === "dialog") { e.w = 1; e.h = 1; e.text = ""; }
   return e;
@@ -2642,6 +2646,13 @@ function renderEventInspector(map) {
     f.appendChild(label("Movement"));
     f.appendChild(selectFrom(NPC_MOVEMENTS, ev.movement, v => { snapshot(); ev.movement = v; }));
     card.appendChild(f);
+    card.appendChild(spacer(8));
+    const ff = el("div", "field");
+    ff.appendChild(label("Facing"));
+    ff.appendChild(selectFrom(NPC_FACINGS, ev.facing || "player", v => { snapshot(); ev.facing = v; }));
+    card.appendChild(ff);
+    card.appendChild(spacer(4));
+    card.appendChild(el("p", "hint", "\"player\" turns to face the player; a compass direction is held until the NPC is talked to."));
     card.appendChild(spacer(8));
     addText("Script id", "script");
   } else if (ev.type === "trigger") {
