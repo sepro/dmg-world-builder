@@ -261,10 +261,23 @@ const EVENT_TYPES = {
 const EVENT_ORDER = ["spawn", "warp", "sign", "item", "npc", "trigger", "dialog"];
 // The in-game dialog box shows 2 rows of 18 characters.
 const DIALOG_MAX_CHARS = 18;
-const NPC_MOVEMENTS = ["static", "wander", "walk_up_down", "walk_left_right"];
-// Which way an NPC faces. "player" is the default: it always turns to face the
-// player. A compass direction pins the NPC to that facing until it is spoken
-// to, when it turns to meet the player, then reverts once the box closes.
+// How an NPC moves. "static" holds its tile (facing is authored separately).
+// "walk_path" patrols a list of waypoints there-and-back (ping-pong); once at
+// the last waypoint it retraces the route to the first. "walk_path_loop"
+// closes the route into a cycle, walking last -> first straight back to the
+// start. Every path segment must be axis-aligned (a straight run of tiles).
+const NPC_MOVEMENTS = ["static", "walk_path", "walk_path_loop"];
+// What a walking NPC does when something (not the player) blocks its next tile.
+// "stop" waits and resumes when the way clears; "reverse" turns around and runs
+// the route the other way. The player blocking always forces a stop regardless.
+const NPC_ONBLOCK = ["stop", "reverse"];
+// Most waypoints a walking NPC may have, counting the spawn cell as the first.
+// Matches OW_NPC_PATH_MAX in the engine; the converter warns past it too.
+const NPC_PATH_MAX = 8;
+// Which way a static NPC faces. "player" is the default: it always turns to
+// face the player. A compass direction pins the facing until it is spoken to,
+// when it turns to meet the player, then reverts once the box closes. Only
+// meaningful for "static" -- a walking NPC faces its direction of travel.
 const NPC_FACINGS = ["player", "down", "up", "left", "right"];
 // Facing direction the player starts in at a spawn point.
 const FACINGS = ["down", "up", "left", "right"];
@@ -280,7 +293,7 @@ function makeEvent(type, x, y) {
   else if (type === "warp") { e.toMap = null; e.toX = 0; e.toY = 0; e.warpType = "transport"; e.facing = "same"; }
   else if (type === "sign") { e.text = ""; }
   else if (type === "item") { e.item = ""; e.qty = 1; e.flag = ""; }
-  else if (type === "npc") { e.sprite = ""; e.movement = "static"; e.facing = "player"; e.script = ""; }
+  else if (type === "npc") { e.sprite = ""; e.movement = "static"; e.facing = "player"; e.onBlock = "stop"; e.path = []; e.script = ""; }
   else if (type === "trigger") { e.script = ""; }
   else if (type === "dialog") { e.w = 1; e.h = 1; e.text = ""; }
   return e;
@@ -462,6 +475,8 @@ const state = {
   collisionTool: "solid", // which collision value the collision brush paints
   collisionDuplicate: false, // duplicate shared metatiles/blocks so the paint stays local
   selectedEventId: null,
+  pathEdit: null,         // id of the NPC event whose waypoint path is being
+                          // placed by clicking the map (events mode); null off
   ink: 3,                 // current pixel value to paint (0..3)
   tool: "pencil",         // pencil | fill | eyedropper
   selectedFrame: 0,       // which animation frame the tile editor edits (0 = base)
@@ -2020,7 +2035,7 @@ function renderMapsPanel(root) {
     row.append(
       el("span", "map-name", map.name),
       el("span", "map-dims", map.width + "x" + map.height));
-    row.addEventListener("click", () => { state.selectedMapId = map.id; state.selectedEventId = null; state.mapScroll = { left: 0, top: 0 }; render(); });
+    row.addEventListener("click", () => { state.selectedMapId = map.id; state.selectedEventId = null; state.pathEdit = null; state.mapScroll = { left: 0, top: 0 }; render(); });
     list.appendChild(row);
   });
   listCard.appendChild(list);
@@ -2347,9 +2362,31 @@ function renderMapsPanel(root) {
     // The dialog tool places by dragging: the swept rectangle becomes the zone.
     let dragEvent = null;   // dialog event being sized by the current drag
     let dragAnchor = null;  // cell the drag started on
+
+    // Placing an NPC's waypoint path: every click appends one axis-aligned
+    // waypoint to that NPC's route instead of selecting/placing an event.
+    const appendWaypoint = (pos) => {
+      const npc = map.events.find(e => e.id === state.pathEdit);
+      if (!npc) { state.pathEdit = null; render(); return; }
+      if (!npc.path) npc.path = [];
+      if (npc.path.length >= NPC_PATH_MAX - 1) return;   // spawn + path ≤ MAX
+      const pts = npcPathPoints(npc);
+      const prev = pts[pts.length - 1];
+      let nx = pos.x, ny = pos.y;
+      // Snap a diagonal click to a straight leg: the dominant axis wins.
+      if (nx !== prev.x && ny !== prev.y) {
+        if (Math.abs(nx - prev.x) >= Math.abs(ny - prev.y)) ny = prev.y; else nx = prev.x;
+      }
+      if (nx === prev.x && ny === prev.y) return;        // zero-length, ignore
+      snapshot();
+      npc.path.push({ x: nx, y: ny });
+      render();
+    };
+
     canvas.addEventListener("pointerdown", (ev) => {
       const pos = eventCellAt(ev);
       if (!pos) return;
+      if (state.pathEdit != null) { appendWaypoint(pos); return; }
       const existing = map.events.find(e => eventContains(e, pos.x, pos.y));
       if (existing) { state.selectedEventId = existing.id; render(); return; }
       snapshot();
@@ -2474,9 +2511,74 @@ function eventTouchesBlockCells(e, map, blockCells) {
   return eventBlockCells(e, map).some(i => blockCells.has(i));
 }
 
+// A walking NPC's full route: the spawn cell followed by its waypoints. A
+// static NPC (or one with no path) is just the spawn.
+function npcPathPoints(ev) {
+  const pts = [{ x: ev.x, y: ev.y }];
+  (ev.path || []).forEach(p => pts.push({ x: p.x, y: p.y }));
+  return pts;
+}
+
+// Problems with a walking NPC's route (empty list = clean). Every leg must be
+// a straight axis-aligned run; a loop's closing leg (last → spawn) counts too.
+function npcPathWarnings(ev) {
+  const w = [];
+  const pts = npcPathPoints(ev);
+  if (pts.length < 2) { w.push("no waypoints yet — add at least one"); return w; }
+  const legs = pts.slice();
+  if (ev.movement === "walk_path_loop") legs.push(pts[0]);   // closing leg
+  for (let i = 1; i < legs.length; i++) {
+    const a = legs[i - 1], b = legs[i];
+    if (a.x === b.x && a.y === b.y)
+      w.push("leg " + i + " has zero length");
+    else if (a.x !== b.x && a.y !== b.y)
+      w.push("leg " + i + " (" + a.x + "," + a.y + ")→(" + b.x + "," + b.y + ") is diagonal");
+  }
+  if (pts.length > NPC_PATH_MAX)
+    w.push("more than " + NPC_PATH_MAX + " waypoints (engine limit)");
+  return w;
+}
+
+// The pink patrol route overlay for every walking NPC on the map: a polyline
+// through the waypoints (closed for a loop) with a dot on each waypoint. The
+// one being placed is highlighted. Drawn under the event markers.
+function drawNpcPaths(ctx, map, z) {
+  const cell = z / 2;
+  const center = (p) => ({ x: p.x * cell + cell / 2, y: p.y * cell + cell / 2 });
+  (map.events || []).forEach(e => {
+    if (e.type !== "npc") return;
+    if (e.movement !== "walk_path" && e.movement !== "walk_path_loop") return;
+    const pts = npcPathPoints(e);
+    if (pts.length < 2) return;
+    const active = e.id === state.pathEdit;
+    const sel = e.id === state.selectedEventId;
+    ctx.save();
+    ctx.lineWidth = active ? 3 : 2;
+    ctx.strokeStyle = active ? "#ffe066" : (sel ? "#ffffff" : "rgba(224,106,214,0.9)");
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    const c0 = center(pts[0]);
+    ctx.moveTo(c0.x, c0.y);
+    for (let i = 1; i < pts.length; i++) { const c = center(pts[i]); ctx.lineTo(c.x, c.y); }
+    if (e.movement === "walk_path_loop") ctx.lineTo(c0.x, c0.y);
+    ctx.stroke();
+    ctx.fillStyle = ctx.strokeStyle;
+    for (let i = 1; i < pts.length; i++) {
+      const c = center(pts[i]);
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, Math.max(2, cell * 0.16), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  });
+}
+
 function drawEventMarkers(ctx, map, z, onlyBlockCells) {
   const cell = z / 2;                       // a metatile is half a block per axis
   const inset = Math.max(1, cell * 0.12);
+  // Patrol routes go under the markers. Skipped on the partial repaints the
+  // tile animator triggers (a thin line under an animated cell is negligible).
+  if (!onlyBlockCells) drawNpcPaths(ctx, map, z);
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   (map.events || []).forEach(e => {
@@ -2521,6 +2623,55 @@ function drawEventMarkers(ctx, map, z, onlyBlockCells) {
       ctx.fillText(meta.letter, px + cell / 2, py + cell / 2 + 0.5);
     }
   });
+}
+
+// The waypoint editor block for a walking NPC: a toggle that puts the map into
+// path-placing mode (clicks append waypoints), a readout of the route, undo/
+// clear while placing, and any alignment warnings.
+function renderNpcPathEditor(map, ev) {
+  const box = el("div", "field");
+  box.appendChild(label("Waypoints"));
+  const editing = state.pathEdit === ev.id;
+
+  const btn = el("button", editing ? "active" : null, editing ? "Done placing" : "Place on map");
+  btn.addEventListener("click", () => {
+    state.pathEdit = editing ? null : ev.id;
+    state.selectedEventId = ev.id;   // keep this NPC selected while placing
+    render();
+  });
+  box.appendChild(btn);
+
+  const pts = npcPathPoints(ev);
+  box.appendChild(spacer(6));
+  box.appendChild(el("p", "hint",
+    pts.length + " point" + (pts.length === 1 ? "" : "s") + " — start (" +
+    ev.x + "," + ev.y + ")" +
+    (ev.path && ev.path.length ? " → " + ev.path.map(p => p.x + "," + p.y).join(" → ") : "")));
+
+  if (editing) {
+    const row = el("div", "row");
+    const undo = el("button", null, "Undo point");
+    undo.addEventListener("click", () => {
+      if (ev.path && ev.path.length) { snapshot(); ev.path.pop(); render(); }
+    });
+    const clear = el("button", "danger", "Clear path");
+    clear.addEventListener("click", () => {
+      if (ev.path && ev.path.length) { snapshot(); ev.path = []; render(); }
+    });
+    row.append(undo, clear);
+    box.appendChild(spacer(6));
+    box.appendChild(row);
+    box.appendChild(spacer(6));
+    box.appendChild(el("p", "hint",
+      "Click cells on the map to append waypoints. A diagonal click snaps to a " +
+      "straight leg (its dominant axis wins). Up to " + NPC_PATH_MAX + " points."));
+  }
+
+  npcPathWarnings(ev).forEach(msg => {
+    box.appendChild(spacer(6));
+    box.appendChild(el("p", "warn", "⚠ " + msg));
+  });
+  return box;
 }
 
 // Inspector for the selected event: its coordinates plus type-specific fields.
@@ -2644,16 +2795,38 @@ function renderEventInspector(map) {
     addText("Sprite id", "sprite");
     const f = el("div", "field");
     f.appendChild(label("Movement"));
-    f.appendChild(selectFrom(NPC_MOVEMENTS, ev.movement, v => { snapshot(); ev.movement = v; }));
+    f.appendChild(selectFrom(NPC_MOVEMENTS, ev.movement, v => {
+      snapshot();
+      ev.movement = v;
+      // Leaving a walk mode ends any path-placing session for this NPC.
+      if (v === "static" && state.pathEdit === ev.id) state.pathEdit = null;
+      render();
+    }));
     card.appendChild(f);
     card.appendChild(spacer(8));
-    const ff = el("div", "field");
-    ff.appendChild(label("Facing"));
-    ff.appendChild(selectFrom(NPC_FACINGS, ev.facing || "player", v => { snapshot(); ev.facing = v; }));
-    card.appendChild(ff);
-    card.appendChild(spacer(4));
-    card.appendChild(el("p", "hint", "\"player\" turns to face the player; a compass direction is held until the NPC is talked to."));
-    card.appendChild(spacer(8));
+
+    const walking = ev.movement === "walk_path" || ev.movement === "walk_path_loop";
+    if (!walking) {
+      // Static NPCs face a fixed way (or the player).
+      const ff = el("div", "field");
+      ff.appendChild(label("Facing"));
+      ff.appendChild(selectFrom(NPC_FACINGS, ev.facing || "player", v => { snapshot(); ev.facing = v; }));
+      card.appendChild(ff);
+      card.appendChild(spacer(4));
+      card.appendChild(el("p", "hint", "\"player\" turns to face the player; a compass direction is held until the NPC is talked to."));
+      card.appendChild(spacer(8));
+    } else {
+      // Walking NPCs face their travel direction; instead they carry a
+      // waypoint path and a blocked-behaviour choice.
+      const bf = el("div", "field");
+      bf.appendChild(label("When blocked"));
+      bf.appendChild(selectFrom(NPC_ONBLOCK, ev.onBlock || "stop", v => { snapshot(); ev.onBlock = v; }));
+      card.appendChild(bf);
+      card.appendChild(spacer(8));
+      card.appendChild(renderNpcPathEditor(map, ev));
+      card.appendChild(spacer(8));
+    }
+
     addText("Script id", "script");
   } else if (ev.type === "trigger") {
     addText("Script id", "script");
