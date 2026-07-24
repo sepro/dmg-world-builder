@@ -2828,7 +2828,9 @@ function renderEventInspector(map) {
     const f = el("div", "field");
     f.appendChild(label(lbl));
     const i = numberInput(ev[key], min, max);
-    i.addEventListener("change", () => { snapshot(); ev[key] = clampInt(i.value, min, max); });
+    // render() so map overlays that read this value (e.g. a warp's landing
+    // reticle and connector line at toX/toY) move as the number changes.
+    i.addEventListener("change", () => { snapshot(); ev[key] = clampInt(i.value, min, max); render(); });
     f.appendChild(i);
     card.appendChild(f);
     card.appendChild(spacer(8));
@@ -2891,6 +2893,34 @@ function renderEventInspector(map) {
     const maxY = dest ? dest.height * 2 - 1 : 255;
     addNumber("Target X (cells)", "toX", 0, maxX);
     addNumber("Target Y (cells)", "toY", 0, maxY);
+
+    // Where the landing is shown: a same-map warp draws its reticle + connector
+    // live on this canvas as you edit the coords; a cross-map warp lands on a
+    // different map, so nothing moves here -- say so and offer a jump to that
+    // map, centred on the target, to check it lands right.
+    if (dest) {
+      if (dest.id === map.id) {
+        card.appendChild(el("p", "hint",
+          "Lands on this map — the dashed reticle and connector line show where."));
+      } else {
+        card.appendChild(el("p", "hint",
+          "Lands on “" + dest.name + "”. The reticle shows on that map, not here."));
+        const go = el("button", null, "View destination map →");
+        go.addEventListener("click", () => {
+          const cell = state.mapZoom / 2;
+          state.selectedMapId = dest.id;
+          state.selectedEventId = null;
+          state.pathEdit = null;
+          state.mapScroll = {
+            left: Math.max(0, (ev.toX || 0) * cell - 200),
+            top:  Math.max(0, (ev.toY || 0) * cell - 150),
+          };
+          render();
+        });
+        card.appendChild(go);
+      }
+      card.appendChild(spacer(8));
+    }
 
     const ff = el("div", "field");
     ff.appendChild(label("Facing after warp"));
