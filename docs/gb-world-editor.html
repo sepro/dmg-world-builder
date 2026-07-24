@@ -2391,6 +2391,19 @@ function renderMapsPanel(root) {
       if (state.pathEdit != null) { appendWaypoint(pos); return; }
       const existing = map.events.find(e => eventContains(e, pos.x, pos.y));
       if (existing) { state.selectedEventId = existing.id; render(); return; }
+      // A warp landing marker is only a reminder of where a warp sends the
+      // player -- never a place to author a new event. Swallow the click so it
+      // can't spawn one; if the warp that lands here lives on this map, select
+      // it as a convenience. (Toggle "Warp targets" off to place on the cell.)
+      if (state.showWarpTargets) {
+        const landing = warpsLandingAt(map, pos.x, pos.y);
+        if (landing.length) {
+          const here = landing.find(l => l.src.id === map.id);
+          if (here) { state.selectedEventId = here.ev.id; }
+          render();
+          return;
+        }
+      }
       snapshot();
       const e = makeEvent(state.eventTool, pos.x, pos.y);
       e.id = genId();
@@ -2484,6 +2497,13 @@ function renderMapsPanel(root) {
         "click a marker to select it. Set the zone's text in the inspector."
       : "Click an empty cell to drop a " + EVENT_TYPES[state.eventTool].label.toLowerCase() +
         ", or click a marker to select it."));
+    if (state.showWarpTargets) {
+      main.appendChild(el("p", "hint",
+        "Dashed reticles mark where warps land on this map (⇢ names the source " +
+        "map for warps arriving from elsewhere). They are just a reminder — " +
+        "clicking one won't place an event. Turn off “Warp targets” to author " +
+        "on those cells."));
+    }
     main.appendChild(spacer(8));
     main.appendChild(renderEventInspector(map));
     main.appendChild(renderEventList(map));
@@ -2625,6 +2645,21 @@ function drawEventMarkers(ctx, map, z, onlyBlockCells) {
       ctx.fillText(meta.letter, px + cell / 2, py + cell / 2 + 0.5);
     }
   });
+}
+
+// Every warp (from any map) whose destination is cell (x,y) on `map`. Used
+// both to draw the landing overlay and to keep those cells non-placing: a
+// landing marker is a visual reminder, not an event you author on, so a click
+// there must not drop a new event.
+function warpsLandingAt(map, x, y) {
+  const out = [];
+  (state.project.maps || []).forEach(src => {
+    (src.events || []).forEach(e => {
+      if (e.type === "warp" && e.toMap === map.id &&
+          (e.toX || 0) === x && (e.toY || 0) === y) out.push({ src, ev: e });
+    });
+  });
+  return out;
 }
 
 // Overlay showing where warps LAND on this map, so it is obvious where the
