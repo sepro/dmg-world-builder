@@ -469,6 +469,7 @@ const state = {
   autoScroll: true,       // scroll the viewport when painting near its edge
   showMapGrid: true,
   showCollision: false,   // tint each metatile by collision/behavior on the map
+  showWarpTargets: true,  // in events mode, mark where warps (incl. from other maps) land here
   mapScroll: { left: 0, top: 0 }, // preserved across re-renders
   mapMode: "blocks",      // blocks | events | collision
   eventTool: "warp",      // which event type a click places
@@ -2140,7 +2141,7 @@ function renderMapsPanel(root) {
   };
   repaintAll();
   if (!map.events) map.events = [];
-  if (state.mapMode === "events") drawEventMarkers(ctx, map, z);
+  if (state.mapMode === "events") { drawEventMarkers(ctx, map, z); drawWarpTargets(ctx, map, z); }
 
   // One composite animator target repaints just the cells whose block uses an
   // animated tile whenever any tile's frame advances. paintCell scans the live
@@ -2175,6 +2176,7 @@ function renderMapsPanel(root) {
               });
             });
             drawEventMarkers(ctx, map, z, repainted);
+            drawWarpTargets(ctx, map, z, repainted);
           }
         },
       });
@@ -2623,6 +2625,81 @@ function drawEventMarkers(ctx, map, z, onlyBlockCells) {
       ctx.fillText(meta.letter, px + cell / 2, py + cell / 2 + 0.5);
     }
   });
+}
+
+// Overlay showing where warps LAND on this map, so it is obvious where the
+// player ends up. A warp event is drawn at its source cell (the "W" marker),
+// but its destination can be anywhere -- including on this map from a warp
+// authored on a different map. This scans every map's warps for ones whose
+// destination is the current map and draws a reticle at (toX, toY); for a
+// warp whose source is also on this map it also draws a connector from the
+// source to the landing cell. `onlyBlockCells`, when given, restricts drawing
+// to targets whose landing cell was just repainted (the tile animator path).
+function drawWarpTargets(ctx, map, z, onlyBlockCells) {
+  if (!state.showWarpTargets) return;
+  const cell = z / 2;                       // event coords are in metatile cells
+  const color = EVENT_TYPES.warp.color;
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  (state.project.maps || []).forEach(src => {
+    (src.events || []).forEach(e => {
+      if (e.type !== "warp" || e.toMap !== map.id) return;
+      const tx = e.toX || 0, ty = e.toY || 0;
+      if (onlyBlockCells) {
+        const bi = Math.floor(ty / 2) * map.width + Math.floor(tx / 2);
+        if (!onlyBlockCells.has(bi)) return;
+      }
+      const cx = tx * cell + cell / 2, cy = ty * cell + cell / 2;
+      const sameMap = src.id === map.id;
+      const selected = e.id === state.selectedEventId;
+      const r = cell * 0.42;
+
+      // Same-map warp: a dashed connector from the source cell to where it lands.
+      if (sameMap) {
+        const sx = e.x * cell + cell / 2, sy = e.y * cell + cell / 2;
+        ctx.globalAlpha = selected ? 0.9 : 0.5;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = selected ? 2 : 1;
+        ctx.setLineDash([Math.max(3, cell * 0.2), Math.max(3, cell * 0.15)]);
+        ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(cx, cy); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      // Landing reticle: a dashed ring + crosshair reads as "destination"
+      // rather than a placed event (those are solid filled squares).
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = selected ? "#ffffff" : color;
+      ctx.lineWidth = selected ? 2 : 1.5;
+      ctx.setLineDash([Math.max(2, cell * 0.16), Math.max(2, cell * 0.12)]);
+      ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(cx - r, cy); ctx.lineTo(cx + r, cy);
+      ctx.moveTo(cx, cy - r); ctx.lineTo(cx, cy + r);
+      ctx.stroke();
+      ctx.fillStyle = selected ? "#ffffff" : color;
+      ctx.beginPath(); ctx.arc(cx, cy, Math.max(1, cell * 0.08), 0, Math.PI * 2); ctx.fill();
+
+      // Tag the source: "warp" for a same-map jump, else the origin map's name.
+      // Sits above the cell, or below it when the cell is at the very top edge.
+      if (cell >= 12) {
+        const tag = sameMap ? "↩ warp" : ("⇢ " + src.name);
+        ctx.font = "bold " + Math.floor(cell * 0.34) +
+          "px ui-monospace, Menlo, Consolas, monospace";
+        const tw = ctx.measureText(tag).width + 6, th = cell * 0.4;
+        let ly = cy - r - cell * 0.28;
+        if (ly - th / 2 < 0) ly = cy + r + cell * 0.28;   // flip below near top
+        ctx.globalAlpha = 0.9;
+        ctx.fillStyle = "rgba(6,18,12,0.85)";
+        ctx.fillRect(cx - tw / 2, ly - th / 2, tw, th);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = selected ? "#ffffff" : color;
+        ctx.fillText(tag, cx, ly + 0.5);
+      }
+    });
+  });
+  ctx.restore();
 }
 
 // The waypoint editor block for a walking NPC: a toggle that puts the map into
@@ -3128,6 +3205,10 @@ function renderMapToolbar(map, ts) {
   // In collision mode the overlay is always on, so the toggle would be inert.
   if (state.mapMode !== "collision") {
     bar.appendChild(toggle("Collision", state.showCollision, v => { state.showCollision = v; render(); }));
+  }
+  // Landing markers for warps that end on this map (only relevant while editing events).
+  if (state.mapMode === "events") {
+    bar.appendChild(toggle("Warp targets", state.showWarpTargets, v => { state.showWarpTargets = v; render(); }));
   }
   bar.appendChild(toggle("Animate", state.animMaps, v => { state.animMaps = v; render(); }));
 
