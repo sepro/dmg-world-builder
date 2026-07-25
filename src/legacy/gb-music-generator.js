@@ -2,10 +2,11 @@
 import { el, label, selectFrom, numberInput, clampInt, toggle, openModal, closeModal, downloadBlob, downloadText, copyText } from "../lib/common.js";
 import {
   barShouldPlay,
+  cleanupPitchedTrack,
   densityProfile,
-  enforceMonophony,
   gridRhythm,
   noteTiming,
+  NOTE_GATE,
   onsetTime,
 } from "../lib/music-rhythm.js";
 
@@ -282,7 +283,7 @@ function roleGrid(pattern, role, stepsPerBeat) {
 
 function makeMotif(rng, stepsPerBar, grid, densityName, mood, stepsPerBeat) {
   const profile = densityProfile(densityName);
-  const rhythm = gridRhythm(stepsPerBar, grid, profile.hit, profile.gate, rng, mood.sync);
+  const rhythm = gridRhythm(stepsPerBar, grid, profile.hit, NOTE_GATE, rng, mood.sync);
   const arch = chance(rng, 0.5) ? 1 : -1;   // rise-then-fall contour, or the reverse
   const moves = rhythm.map((r, i) => {
     if (i === 0) return "C";                // anchor each bar on the harmony
@@ -315,11 +316,6 @@ function variantOf(motif, rng, densityName) {
     if (chance(rng, 0.15)) return (m[0] === "S" ? "L" : "S") + m[1]; // step<->leap
     return m;
   });
-  // Keep the onset pattern recognizable while varying the articulation.
-  if (rhythm.length > 1) {
-    const i = 1 + Math.floor(rng() * (rhythm.length - 1));
-    rhythm[i].gate = Math.max(0.4, rhythm[i].gate * (chance(rng, 0.5) ? 0.82 : 1.08));
-  }
   return { rhythm, moves };
 }
 
@@ -387,7 +383,6 @@ function generate(settings) {
   // separate pair for chorus sections. Bars pick from these in an A A' B A'
   // shape, which gives the tune recognizable phrases.
   const leadDensity = s.channels.pulse1.density;
-  const leadProfile = densityProfile(leadDensity);
   const leadGrid = roleGrid(s.pattern, "lead", stepsPerBeat);
   const motifA  = makeMotif(rng, stepsPerBar, leadGrid, leadDensity, mood, stepsPerBeat);
   const motifA2 = variantOf(motifA, rng, leadDensity);
@@ -417,8 +412,8 @@ function generate(settings) {
       const p = Math.min(1, profile.hit * densBoost);
       const grid = roleGrid(s.pattern, "bass", stepsPerBeat);
       const rhythm = s.pattern === "waltz"
-        ? [{ step: 0, dur: stepsPerBeat, gate: profile.gate }] // waltz: short "oom" on beat 1
-        : gridRhythm(stepsPerBar, grid, p, profile.gate, rng, 0);
+        ? [{ step: 0, dur: stepsPerBeat, gate: NOTE_GATE }] // waltz: short "oom" on beat 1
+        : gridRhythm(stepsPerBar, grid, p, NOTE_GATE, rng, 0);
       rhythm.forEach((r, i) => {
         // Alternate root and fifth for motion on busier patterns; galop and
         // ostinato pump root-octave instead for that classic chiptune drive.
@@ -434,7 +429,7 @@ function generate(settings) {
         const nextRoot = triadPcs(rootPc, scale.ivals, nextDegree)[0];
         const eighth = Math.max(1, Math.round(stepsPerBeat / 2));
         addNote(tracks.wave, barStep + stepsPerBar - eighth, eighth,
-          pcNear((nextRoot + 11) % 12, mood.bass), mood.vel - 14, s, rng, stepsPerBeat, profile.gate);
+          pcNear((nextRoot + 11) % 12, mood.bass), mood.vel - 14, s, rng, stepsPerBeat, NOTE_GATE);
       }
     }
 
@@ -447,10 +442,10 @@ function generate(settings) {
       if (s.pattern === "waltz") {
         rhythm = [];                                            // waltz: chords on beats 2..n
         for (let b = 1; b < beats; b++) {
-          if (chance(rng, p)) rhythm.push({ step: b * stepsPerBeat, dur: stepsPerBeat, gate: profile.gate });
+          if (chance(rng, p)) rhythm.push({ step: b * stepsPerBeat, dur: stepsPerBeat, gate: NOTE_GATE });
         }
       } else {
-        rhythm = gridRhythm(stepsPerBar, grid, p, profile.gate, rng, mood.sync * 0.5);
+        rhythm = gridRhythm(stepsPerBar, grid, p, NOTE_GATE, rng, mood.sync * 0.5);
       }
       rhythm.forEach((r, i) => {
         const pc = chordPcs[i % chordPcs.length];               // arpeggiate the triad
@@ -483,7 +478,7 @@ function generate(settings) {
       if (isCadence) {
         mem.idx = nearestChordIndex(leadScale, mem.idx, [chordPcs[0]]);
         addNote(tracks.pulse1, barStep + Math.floor(stepsPerBar / 2), Math.ceil(stepsPerBar / 2),
-          leadScale[mem.idx], mood.vel + 6, s, rng, stepsPerBeat, leadProfile.gate);
+          leadScale[mem.idx], mood.vel + 6, s, rng, stepsPerBeat, NOTE_GATE);
       }
     }
 
@@ -496,10 +491,13 @@ function generate(settings) {
 
   /* ---- Hardware truth pass ----
      Each GB channel is monophonic, so overlapping notes are impossible on
-     real hardware: clip every note at the next onset in its channel.
+     real hardware. Merge adjacent same-pitch retriggers into paired, exact
+     double-length values, discard invalid fragments, then clip overlaps.
      (Cross-channel timing is already exact: onsets and note ends all sit on
      the same swing-adjusted grid.) */
-  [tracks.pulse1, tracks.pulse2, tracks.wave].forEach(enforceMonophony);
+  [tracks.pulse1, tracks.pulse2, tracks.wave].forEach(track => {
+    cleanupPitchedTrack(track, { swing: s.swing, stepsPerBeat, stepsPerBar, gate: NOTE_GATE });
+  });
 
   const totalSteps = totalBars * stepsPerBar;
   return {
@@ -517,7 +515,7 @@ function generate(settings) {
 // from `t`.
 function addNote(track, step, dur, midi, vel, s, rng, stepsPerBeat, gate = 1) {
   const timing = noteTiming(step, dur, gate, s.swing, stepsPerBeat);
-  track.push({ step, dur: timing.dur, midi,
+  track.push({ step, value: dur, gate, dur: timing.dur, midi,
                vel: Math.max(1, Math.min(127, Math.round(vel))), t: timing.t });
 }
 

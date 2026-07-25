@@ -1,4 +1,4 @@
-const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./gb-music-generator-DOuSL3bx.js","./common-C8PHBgJ_.js"])))=>i.map(i=>d[i]);
+const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./gb-music-generator-CZA6kadU.js","./common-C8PHBgJ_.js"])))=>i.map(i=>d[i]);
 import{m as t,L as n,_ as e}from"./theme-DaBNiN0a.js";t(n,{target:document.body,props:{beforeMenu:`<span class="brand">GB&nbsp;Music&nbsp;Generator <span class="sub">v1</span></span>
     <div class="field" style="flex-direction:row;align-items:center;gap:6px;">
       <label style="margin:0;">Tune</label>
@@ -12,4 +12,4 @@ import{m as t,L as n,_ as e}from"./theme-DaBNiN0a.js";t(n,{target:document.body,
       <section class="col-settings" id="settings-col"></section>
       <section class="col-output" id="output-col"></section>
     </div>
-  </main>`,currentPage:"gb-music-generator.html",initialize:()=>e(()=>import("./gb-music-generator-DOuSL3bx.js"),__vite__mapDeps([0,1]),import.meta.url)}});
+  </main>`,currentPage:"gb-music-generator.html",initialize:()=>e(()=>import("./gb-music-generator-CZA6kadU.js"),__vite__mapDeps([0,1]),import.meta.url)}});

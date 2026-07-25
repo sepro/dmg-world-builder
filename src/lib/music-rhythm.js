@@ -1,26 +1,27 @@
 export const DENSITY_PROFILES = {
   sparse: {
     hit: 0.42,
-    gate: 0.58,
     restBonus: 0.16,
     breathChance: 0.78,
     barRest: { lead: 0.12, harmony: 0.24, bass: 0.10 },
   },
   medium: {
     hit: 0.70,
-    gate: 0.74,
     restBonus: 0.06,
     breathChance: 0.42,
     barRest: { lead: 0.04, harmony: 0.09, bass: 0.04 },
   },
   busy: {
     hit: 0.92,
-    gate: 0.86,
     restBonus: 0,
     breathChance: 0.16,
     barRest: { lead: 0, harmony: 0.02, bass: 0 },
   },
 };
+
+// Articulation is intentionally independent of density. Density decides how
+// often notes change; it must not make sparse notes intrinsically shorter.
+export const NOTE_GATE = 0.82;
 
 export function densityProfile(name) {
   return DENSITY_PROFILES[name] || DENSITY_PROFILES.medium;
@@ -70,6 +71,33 @@ export function noteTiming(step, dur, gate, swing, stepsPerBeat) {
   const t = onsetTime(step, swing, stepsPerBeat);
   const slotEnd = onsetTime(step + dur, swing, stepsPerBeat);
   return { t, dur: Math.max(0.1, (slotEnd - t) * gate) };
+}
+
+// Final repair pass for artifacts that only become visible after all notes in a
+// channel exist. It keeps musical values discrete: an adjacent repeated note
+// becomes one note exactly twice as long, never an arbitrary stretched value.
+export function cleanupPitchedTrack(track, { swing, stepsPerBeat, stepsPerBar, gate = NOTE_GATE }) {
+  track.sort((a, b) => a.step - b.step);
+  for (let i = 0; i < track.length - 1; i++) {
+    const current = track[i];
+    const next = track[i + 1];
+    const sameBar = Math.floor(current.step / stepsPerBar) === Math.floor(next.step / stepsPerBar);
+    const adjacent = next.step === current.step + current.value;
+    const sameValue = next.value === current.value;
+    if (sameBar && adjacent && sameValue && next.midi === current.midi) {
+      current.value *= 2;
+      const timing = noteTiming(current.step, current.value, gate, swing, stepsPerBeat);
+      current.t = timing.t;
+      current.dur = timing.dur;
+      current.vel = Math.max(current.vel, next.vel);
+      track.splice(i + 1, 1);
+    }
+  }
+  for (let i = track.length - 1; i >= 0; i--) {
+    const note = track[i];
+    if (!Number.isFinite(note.t) || !Number.isFinite(note.dur) || note.dur < 0.1) track.splice(i, 1);
+  }
+  enforceMonophony(track);
 }
 
 export function enforceMonophony(track) {

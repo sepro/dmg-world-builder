@@ -147,7 +147,7 @@ channel can be toggled on/off.
 
 ### Pulse 1 — Lead (melody)
 - **Duty** — square-wave timbre: 12.5% (thin/reedy), 25% (round), 50% (full), 75% (nasal).
-- **Density** — Sparse / Medium / Busy controls attacks, articulation, melodic rests, and occasional phrase-level dropouts. Sparse leaves clearly audible breaths; Busy still leaves small gaps so the line does not become a continuous tone.
+- **Density** — Sparse / Medium / Busy controls how many notes are played, melodic rests, and occasional phrase-level dropouts. It does not shorten individual notes: rhythmic values stay consistent while Sparse leaves more slots silent.
 
 ### Pulse 2 — Harmony
 - **Duty** — same timbre options as Pulse 1.
@@ -157,7 +157,7 @@ The GB channels are monophonic, so "chords" are arpeggiated one note at a time.
 
 ### Wave — Bass
 - **Waveform** — Triangle (soft, classic GB bass), Sine (pure), Saw (bright/buzzy), Square (hard).
-- **Density** — how active and sustained the bass line is; it alternates root and fifth on busier settings. Sparse bass notes are deliberately shorter and occasionally leave a bar open.
+- **Density** — how often the bass changes note; it alternates root and fifth on busier settings. Sparse bass lines play fewer attacks and occasionally leave a bar open.
 
 ### Noise — Drums
 - **Drum style** — Auto (from mood), Rock kit (backbeat with hi-hats), Marching (military snare), Busy / 16ths (dense), Dance / 4-on-floor (kick every beat, off-beat hats), Half-time (spacious backbeat), or Silent. Every style adds a rising snare fill in the last beat of each 4-bar phrase.
