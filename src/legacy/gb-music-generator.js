@@ -1,5 +1,13 @@
 // @ts-nocheck
 import { el, label, selectFrom, numberInput, clampInt, toggle, openModal, closeModal, downloadBlob, downloadText, copyText } from "../lib/common.js";
+import {
+  barShouldPlay,
+  densityProfile,
+  enforceMonophony,
+  gridRhythm,
+  noteTiming,
+  onsetTime,
+} from "../lib/music-rhythm.js";
 
 "use strict";
 
@@ -83,8 +91,6 @@ const DENSITIES = [
   { value: "medium", label: "Medium" },
   { value: "busy",   label: "Busy" },
 ];
-const DENSITY_PROB = { sparse: 0.5, medium: 0.78, busy: 1.0 };
-
 // Pulse duty cycles -> timbre. Value is the high fraction of the period.
 const DUTIES = [
   { value: 0.125, label: "12.5% (thin)" },
@@ -246,25 +252,6 @@ function nearestChordIndex(scaleMidi, fromIdx, chordPcs) {
   return Math.max(0, Math.min(scaleMidi.length - 1, fromIdx));
 }
 
-// Onset rhythm for a bar: notes at multiples of `grid` kept with probability p.
-// Returns [{step, dur}] with durations stretched to the next onset.
-function gridRhythm(stepsPerBar, grid, p, rng, syncProb) {
-  const onsets = [];
-  for (let s = 0; s < stepsPerBar; s += grid) {
-    if (s === 0 || chance(rng, p)) {
-      let st = s;
-      if (s !== 0 && syncProb && chance(rng, syncProb) && s + 1 < stepsPerBar) st = s + 1;
-      onsets.push(st);
-    }
-  }
-  const notes = [];
-  for (let i = 0; i < onsets.length; i++) {
-    const dur = (i + 1 < onsets.length ? onsets[i + 1] : stepsPerBar) - onsets[i];
-    notes.push({ step: onsets[i], dur });
-  }
-  return notes;
-}
-
 // Per-role grid spacing (in steps) for each rhythmic archetype.
 function roleGrid(pattern, role, stepsPerBeat) {
   const eighth = Math.max(1, Math.round(stepsPerBeat / 2));
@@ -293,30 +280,47 @@ function roleGrid(pattern, role, stepsPerBeat) {
    Repeating a small set of motifs (with variation) is what makes the melody
    sound composed rather than random-walked. */
 
-function makeMotif(rng, stepsPerBar, grid, dens, mood, stepsPerBeat) {
-  const rhythm = gridRhythm(stepsPerBar, grid, dens, rng, mood.sync);
+function makeMotif(rng, stepsPerBar, grid, densityName, mood, stepsPerBeat) {
+  const profile = densityProfile(densityName);
+  const rhythm = gridRhythm(stepsPerBar, grid, profile.hit, profile.gate, rng, mood.sync);
   const arch = chance(rng, 0.5) ? 1 : -1;   // rise-then-fall contour, or the reverse
   const moves = rhythm.map((r, i) => {
     if (i === 0) return "C";                // anchor each bar on the harmony
-    if (chance(rng, mood.rest)) return "R";
+    if (chance(rng, Math.min(0.75, mood.rest + profile.restBonus))) return "R";
     const strong = r.step % stepsPerBeat === 0;
     if (strong && chance(rng, 0.6)) return "C";
     const dir = (i < rhythm.length / 2 ? arch : -arch) > 0 ? "+" : "-";
     return (chance(rng, mood.leap) ? "L" : "S") + dir;
   });
+  // A clustered breath reads as phrasing. Sparse motifs may leave two slots;
+  // this creates audible space instead of a scatter of accidental-sounding holes.
+  if (moves.length > 2 && chance(rng, profile.breathChance)) {
+    const start = 1 + Math.floor(rng() * (moves.length - 1));
+    moves[start] = "R";
+    if (densityName === "sparse" && start + 1 < moves.length && chance(rng, 0.55)) moves[start + 1] = "R";
+  }
   return { rhythm, moves };
 }
 
 // A variant keeps the rhythm and overall shape but tweaks a few moves,
 // so the repeat is recognizable without being identical.
-function variantOf(motif, rng) {
-  const moves = motif.moves.map(m => {
+function variantOf(motif, rng, densityName) {
+  const profile = densityProfile(densityName);
+  const rhythm = motif.rhythm.map(r => ({ ...r }));
+  const moves = motif.moves.map((m, i) => {
+    if (i > 0 && m === "R" && chance(rng, 0.28)) return chance(rng, 0.5) ? "S+" : "S-";
     if (m === "C" || m === "R") return m;
+    if (i > 0 && chance(rng, profile.restBonus * 0.7)) return "R";
     if (chance(rng, 0.25)) return m[0] + (m[1] === "+" ? "-" : "+"); // mirror
     if (chance(rng, 0.15)) return (m[0] === "S" ? "L" : "S") + m[1]; // step<->leap
     return m;
   });
-  return { rhythm: motif.rhythm, moves };
+  // Keep the onset pattern recognizable while varying the articulation.
+  if (rhythm.length > 1) {
+    const i = 1 + Math.floor(rng() * (rhythm.length - 1));
+    rhythm[i].gate = Math.max(0.4, rhythm[i].gate * (chance(rng, 0.5) ? 0.82 : 1.08));
+  }
+  return { rhythm, moves };
 }
 
 // Realize one bar of a motif against the current chord. `mem` carries the
@@ -340,7 +344,7 @@ function playMotifBar(track, motif, barStep, chordPcs, leadScale, mem, mood, s, 
     mem.idx = Math.max(0, Math.min(leadScale.length - 1, mem.idx));
     const strong = r.step % stepsPerBeat === 0;
     const vel = mood.vel + (strong ? 8 : -6) + (opts.velBoost || 0);
-    addNote(track, barStep + r.step, r.dur, leadScale[mem.idx], vel, s, rng, stepsPerBeat);
+    addNote(track, barStep + r.step, r.dur, leadScale[mem.idx], vel, s, rng, stepsPerBeat, r.gate);
   });
 }
 
@@ -362,7 +366,9 @@ function generate(settings) {
   const drumStyle = s.channels.noise.drums === "auto" ? mood.drums : s.channels.noise.drums;
 
   const leadScale = scaleMidiList(rootPc, scale.ivals, mood.lead - 9, mood.lead + 12);
-  const harmScale = mood.lead - 14;
+  // Keep the harmony below the lead so two pulse channels do not mask each
+  // other in the same register. Voice each chord near this stable centre.
+  const harmonyCentre = mood.lead - 10;
 
   const tracks = { pulse1: [], pulse2: [], wave: [], noise: [] };
   const chords = [];
@@ -380,13 +386,14 @@ function generate(settings) {
   // Motif bank: main idea (A), its variant, a contrasting idea (B), and a
   // separate pair for chorus sections. Bars pick from these in an A A' B A'
   // shape, which gives the tune recognizable phrases.
-  const leadDens = DENSITY_PROB[s.channels.pulse1.density];
+  const leadDensity = s.channels.pulse1.density;
+  const leadProfile = densityProfile(leadDensity);
   const leadGrid = roleGrid(s.pattern, "lead", stepsPerBeat);
-  const motifA  = makeMotif(rng, stepsPerBar, leadGrid, leadDens, mood, stepsPerBeat);
-  const motifA2 = variantOf(motifA, rng);
-  const motifB  = makeMotif(rng, stepsPerBar, leadGrid, Math.min(1, leadDens * 1.1), mood, stepsPerBeat);
-  let   motifC  = makeMotif(rng, stepsPerBar, leadGrid, Math.min(1, leadDens * 1.15), mood, stepsPerBeat);
-  let   motifC2 = variantOf(motifC, rng);
+  const motifA  = makeMotif(rng, stepsPerBar, leadGrid, leadDensity, mood, stepsPerBeat);
+  const motifA2 = variantOf(motifA, rng, leadDensity);
+  const motifB  = makeMotif(rng, stepsPerBar, leadGrid, leadDensity, mood, stepsPerBeat);
+  let   motifC  = makeMotif(rng, stepsPerBar, leadGrid, leadDensity, mood, stepsPerBeat);
+  let   motifC2 = variantOf(motifC, rng, leadDensity);
   const mem = { idx: Math.floor(leadScale.length / 2), centre: Math.floor(leadScale.length / 2) };
 
   for (let bar = 0; bar < totalBars; bar++) {
@@ -405,12 +412,13 @@ function generate(settings) {
     const leadActive = feel !== "intro";   // intro: let accompaniment breathe
 
     /* ---- Bass (Wave channel) ---- */
-    if (s.channels.wave.on) {
-      const p = Math.min(1, DENSITY_PROB[s.channels.wave.density] * densBoost);
+    if (s.channels.wave.on && barShouldPlay(s.channels.wave.density, "bass", bar, rng)) {
+      const profile = densityProfile(s.channels.wave.density);
+      const p = Math.min(1, profile.hit * densBoost);
       const grid = roleGrid(s.pattern, "bass", stepsPerBeat);
       const rhythm = s.pattern === "waltz"
-        ? [{ step: 0, dur: stepsPerBar }]                       // waltz: bass on beat 1
-        : gridRhythm(stepsPerBar, grid, p, rng, 0);
+        ? [{ step: 0, dur: stepsPerBeat, gate: profile.gate }] // waltz: short "oom" on beat 1
+        : gridRhythm(stepsPerBar, grid, p, profile.gate, rng, 0);
       rhythm.forEach((r, i) => {
         // Alternate root and fifth for motion on busier patterns; galop and
         // ostinato pump root-octave instead for that classic chiptune drive.
@@ -418,7 +426,7 @@ function generate(settings) {
         const usefifth = !pump && i % 2 === 1 && s.pattern !== "ballad" && chance(rng, 0.6);
         const pc = usefifth ? chordPcs[2] : chordPcs[0];
         const midi = pcNear(pc, mood.bass) + (pump ? 12 : 0);
-        addNote(tracks.wave, barStep + r.step, r.dur, midi, mood.vel - 6, s, rng, stepsPerBeat);
+        addNote(tracks.wave, barStep + r.step, r.dur, midi, mood.vel - 6, s, rng, stepsPerBeat, r.gate);
       });
       // Approach tone: lead into the next bar's chord from a semitone below.
       const nextDegree = degrees[(bar + 1) % degrees.length];
@@ -426,34 +434,38 @@ function generate(settings) {
         const nextRoot = triadPcs(rootPc, scale.ivals, nextDegree)[0];
         const eighth = Math.max(1, Math.round(stepsPerBeat / 2));
         addNote(tracks.wave, barStep + stepsPerBar - eighth, eighth,
-          pcNear((nextRoot + 11) % 12, mood.bass), mood.vel - 14, s, rng, stepsPerBeat);
+          pcNear((nextRoot + 11) % 12, mood.bass), mood.vel - 14, s, rng, stepsPerBeat, profile.gate);
       }
     }
 
     /* ---- Harmony (Pulse 2): monophonic broken chord ---- */
-    if (s.channels.pulse2.on) {
-      const p = Math.min(1, DENSITY_PROB[s.channels.pulse2.density] * densBoost);
+    if (s.channels.pulse2.on && barShouldPlay(s.channels.pulse2.density, "harmony", bar, rng)) {
+      const profile = densityProfile(s.channels.pulse2.density);
+      const p = Math.min(1, profile.hit * densBoost);
       const grid = roleGrid(s.pattern, "harmony", stepsPerBeat);
       let rhythm;
       if (s.pattern === "waltz") {
         rhythm = [];                                            // waltz: chords on beats 2..n
-        for (let b = 1; b < beats; b++) rhythm.push({ step: b * stepsPerBeat, dur: stepsPerBeat });
+        for (let b = 1; b < beats; b++) {
+          if (chance(rng, p)) rhythm.push({ step: b * stepsPerBeat, dur: stepsPerBeat, gate: profile.gate });
+        }
       } else {
-        rhythm = gridRhythm(stepsPerBar, grid, p, rng, mood.sync * 0.5);
+        rhythm = gridRhythm(stepsPerBar, grid, p, profile.gate, rng, mood.sync * 0.5);
       }
       rhythm.forEach((r, i) => {
         const pc = chordPcs[i % chordPcs.length];               // arpeggiate the triad
-        addNote(tracks.pulse2, barStep + r.step, r.dur, pcNear(pc, harmScale + 16), mood.vel - 24, s, rng, stepsPerBeat);
+        addNote(tracks.pulse2, barStep + r.step, r.dur, pcNear(pc, harmonyCentre), mood.vel - 24, s, rng, stepsPerBeat, r.gate);
       });
     }
 
     /* ---- Lead (Pulse 1): motif-based melody ---- */
-    if (s.channels.pulse1.on && leadActive) {
+    if (s.channels.pulse1.on && leadActive &&
+        (isLast || barShouldPlay(leadDensity, "lead", bar, rng))) {
       // Through-composed: refresh the motif bank at each 4-bar phrase so the
       // material keeps evolving instead of looping.
       if (s.structure === "through" && bar > 0 && bar % 4 === 0) {
-        motifC = makeMotif(rng, stepsPerBar, leadGrid, Math.min(1, leadDens * 1.15), mood, stepsPerBeat);
-        motifC2 = variantOf(motifC, rng);
+        motifC = makeMotif(rng, stepsPerBar, leadGrid, leadDensity, mood, stepsPerBeat);
+        motifC2 = variantOf(motifC, rng, leadDensity);
       }
       const groupPos = bar % 4;
       const isChorus = feel === "chorus" || (s.structure === "through" && Math.floor(bar / 4) % 2 === 1);
@@ -471,7 +483,7 @@ function generate(settings) {
       if (isCadence) {
         mem.idx = nearestChordIndex(leadScale, mem.idx, [chordPcs[0]]);
         addNote(tracks.pulse1, barStep + Math.floor(stepsPerBar / 2), Math.ceil(stepsPerBar / 2),
-          leadScale[mem.idx], mood.vel + 6, s, rng, stepsPerBeat);
+          leadScale[mem.idx], mood.vel + 6, s, rng, stepsPerBeat, leadProfile.gate);
       }
     }
 
@@ -497,42 +509,16 @@ function generate(settings) {
   };
 }
 
-// Make a track physically playable on one GB channel: sort by onset, drop
-// notes that land on the same instant, and cut every note off no later than
-// the next one starts.
-function enforceMonophony(track) {
-  track.sort((a, b) => a.t - b.t);              // stable: ties keep insert order
-  for (let i = track.length - 2; i >= 0; i--) {
-    const cur = track[i], next = track[i + 1];
-    // Same instant, same grid step, or a gap too short to hear: the earlier
-    // note would be cut to nothing, so drop it and keep the later one.
-    if (next.t - cur.t < 0.25 || next.step === cur.step) { track.splice(i, 1); continue; }
-    cur.dur = Math.min(cur.dur, next.t - cur.t);
-  }
-}
-
-// The time of a grid step, with swing applied. Every onset AND every note
-// end goes through this, so a note ending on a step lands exactly where any
-// channel's onset on that step begins - no rubbing transitions between
-// channels. Any per-note timing variation would break that alignment, which
-// is why there is deliberately no "humanize" here.
-function onsetTime(step, s, stepsPerBeat) {
-  let t = step;
-  // Swing: delay the off-eighth of each beat.
-  if (s.swing > 0 && stepsPerBeat >= 2 && step % stepsPerBeat === Math.round(stepsPerBeat / 2)) {
-    t += (s.swing / 100) * 0.6;
-  }
-  return Math.max(0, t);
-}
+// Monophony and the shared swing timeline live in music-rhythm.js so the
+// deterministic timing rules can be exercised independently of the browser.
 
 // Bake swing into an absolute onset time `t` (in fractional steps), so
 // playback, MIDI and the score all agree. `dur` is stored as playable length
 // from `t`.
-function addNote(track, step, dur, midi, vel, s, rng, stepsPerBeat) {
-  const t = onsetTime(step, s, stepsPerBeat);
-  const tEnd = onsetTime(step + dur, s, stepsPerBeat);
-  track.push({ step, dur: Math.max(0.1, tEnd - t), midi,
-               vel: Math.max(1, Math.min(127, Math.round(vel))), t });
+function addNote(track, step, dur, midi, vel, s, rng, stepsPerBeat, gate = 1) {
+  const timing = noteTiming(step, dur, gate, s.swing, stepsPerBeat);
+  track.push({ step, dur: timing.dur, midi,
+               vel: Math.max(1, Math.min(127, Math.round(vel))), t: timing.t });
 }
 
 function addDrums(track, barStep, stepsPerBar, stepsPerBeat, style, rng, s, fill) {
@@ -607,7 +593,14 @@ function addDrums(track, barStep, stepsPerBar, stepsPerBeat, style, rng, s, fill
 
   [...slots.keys()].sort((a, b) => a - b).forEach(step => {
     const h = slots.get(step);
-    track.push({ step: barStep + step, dur: 1, drum: h.drum, vel: h.vel, t: barStep + step });
+    const absoluteStep = barStep + step;
+    track.push({
+      step: absoluteStep,
+      dur: 1,
+      drum: h.drum,
+      vel: h.vel,
+      t: onsetTime(absoluteStep, s.swing, stepsPerBeat),
+    });
   });
 }
 
@@ -647,8 +640,10 @@ const audio = {
     const n = 32;
     const real = new Float32Array(n), imag = new Float32Array(n);
     for (let k = 1; k < n; k++) {
-      // Fourier coefficients of a pulse with the given high fraction.
-      imag[k] = (2 / (k * Math.PI)) * Math.sin(Math.PI * k * duty);
+      // Exact Fourier coefficients for a rectangular pulse. Keeping both
+      // components preserves the requested GB duty shape, not only its spectrum.
+      real[k] = Math.sin(2 * Math.PI * k * duty) / (Math.PI * k);
+      imag[k] = (1 - Math.cos(2 * Math.PI * k * duty)) / (Math.PI * k);
     }
     const w = this.ctx.createPeriodicWave(real, imag);
     this.pulseWaves[key] = w;
@@ -1039,14 +1034,14 @@ function buildPianoRoll() {
   ["wave", "pulse2", "pulse1"].forEach(id => {
     ctx.fillStyle = CHAN_COLOR[id];
     song.tracks[id].forEach(n => {
-      const x = xForStep(n.step), y = yForMidi(n.midi);
+      const x = xForStep(n.t), y = yForMidi(n.midi);
       ctx.fillRect(x + 0.5, y + 0.5, Math.max(2, n.dur * px - 1), rowPx - 1);
     });
   });
   // drums
   ctx.fillStyle = CHAN_COLOR.noise;
   song.tracks.noise.forEach(n => {
-    const x = xForStep(n.step), y = drumY[n.drum];
+    const x = xForStep(n.t), y = drumY[n.drum];
     ctx.fillRect(x + 0.5, y + 1, Math.max(3, px - 2), rowPx - 2);
   });
 
@@ -1115,7 +1110,7 @@ function buildStaff() {
 
     song.tracks[sys.id].forEach(n => {
       const { dn, sharp } = midiToDiatonic(n.midi);
-      const x = xForStep(n.step) + 3;
+      const x = xForStep(n.t) + 3;
       const y = yForDn(dn);
       // ledger lines
       ctx.strokeStyle = "#2c5840";
@@ -1142,7 +1137,7 @@ function buildStaff() {
     ctx.fillStyle = CHAN_COLOR.noise; ctx.font = "9px ui-monospace,monospace";
     const yOff = { kick: 8, snare: 0, hat: -8 };
     song.tracks.noise.forEach(n => {
-      const x = xForStep(n.step) + 3;
+      const x = xForStep(n.t) + 3;
       ctx.fillText("×", x - 2, py + (yOff[n.drum] || 0) + 3);
     });
   }
