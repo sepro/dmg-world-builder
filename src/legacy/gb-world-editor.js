@@ -112,7 +112,7 @@ const EVENT_ORDER = ["spawn", "warp", "sign", "item", "npc", "trigger", "dialog"
 // The in-game dialog box shows 2 rows of 18 characters.
 const DIALOG_MAX_CHARS = 18;
 // How an NPC moves. "static" holds its tile (facing is authored separately).
-// "sentinel" also holds its tile, but turns clockwise every second from an
+// "sentinel" also holds its tile, but turns clockwise every two seconds from an
 // authored compass direction. "walk_path" patrols a list of waypoints
 // there-and-back (ping-pong); "walk_path_loop" closes the route into a cycle.
 // Every path segment must be axis-aligned (a straight run of tiles). Values are
@@ -2814,7 +2814,7 @@ function renderEventInspector(map) {
       card.appendChild(ff);
       card.appendChild(spacer(4));
       card.appendChild(el("p", "hint", sentinel
-        ? "Stands in place and turns clockwise every second from this direction. It still turns to face the player while being talked to."
+        ? "Stands in place and turns clockwise every two seconds from this direction. It still turns to face the player while being talked to."
         : "\"player\" turns to face the player; a compass direction is held until the NPC is talked to."));
       card.appendChild(spacer(8));
     } else {

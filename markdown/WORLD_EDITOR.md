@@ -97,7 +97,7 @@ NPC events have a **Movement** selector whose value is stored in the exported
 
 - `static` stays on its cell and either tracks the player or holds an authored
   facing.
-- `sentinel` stays on its cell and turns clockwise every second. Choose a
+- `sentinel` stays on its cell and turns clockwise every two seconds. Choose a
   concrete **Starting facing**; while spoken to it turns toward the player and
   resumes its sweep afterward.
 - `walk_path` follows its waypoints there-and-back.

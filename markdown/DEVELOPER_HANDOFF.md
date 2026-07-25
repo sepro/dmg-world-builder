@@ -345,7 +345,7 @@ converter prints a warning counting them.
 | DIALOG | zone width | zone height | text (`\n` splits the lines) | — |
 
 For NPCs, `movement: "sentinel"` emits `MOVE_SENTINEL`: the NPC remains on
-its cell and rotates clockwise once per second. Its `facing` must be a compass
+its cell and rotates clockwise once every two seconds. Its `facing` must be a compass
 direction and becomes the starting `DIR_*` in `p1`; the converter defaults or
 repairs invalid sentinel facing to `up`. A sentinel temporarily faces the player
 while its dialog is open, then resumes rotating.
