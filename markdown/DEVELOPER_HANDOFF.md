@@ -233,7 +233,7 @@ Events live on a map at **metatile coordinates** (`x` in `[0, width*2)`, `y` in
 walked in with. Files that predate these fields import as `transport` / `same`.
 `movement` is one of `static | sentinel | walk_path | walk_path_loop`.
 `sentinel` requires a compass `facing`; walking modes may include an axis-aligned
-`path` array and `onBlock` (`stop | reverse`). The string
+`path` array. If any walker would step onto the player, every walker waits. The string
 fields (`text`, `item`, `sprite`, `script`, `flag`) are free-form ids your engine
 resolves.
 

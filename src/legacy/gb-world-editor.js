@@ -118,10 +118,6 @@ const DIALOG_MAX_CHARS = 18;
 // Every path segment must be axis-aligned (a straight run of tiles). Values are
 // the JSON contract consumed by tools/world_builder/gbworld_to_c.py.
 const NPC_MOVEMENTS = ["static", "sentinel", "walk_path", "walk_path_loop"];
-// What a walking NPC does when something (not the player) blocks its next tile.
-// "stop" waits and resumes when the way clears; "reverse" turns around and runs
-// the route the other way. The player blocking always forces a stop regardless.
-const NPC_ONBLOCK = ["stop", "reverse"];
 // Most waypoints a walking NPC may have, counting the spawn cell as the first.
 // Matches OW_NPC_PATH_MAX in the engine; the converter warns past it too.
 const NPC_PATH_MAX = 8;
@@ -147,7 +143,7 @@ function makeEvent(type, x, y) {
   else if (type === "warp") { e.toMap = null; e.toX = 0; e.toY = 0; e.warpType = "transport"; e.facing = "same"; }
   else if (type === "sign") { e.text = ""; }
   else if (type === "item") { e.item = ""; e.qty = 1; e.flag = ""; }
-  else if (type === "npc") { e.sprite = ""; e.movement = "static"; e.facing = "player"; e.onBlock = "stop"; e.path = []; e.script = ""; }
+  else if (type === "npc") { e.sprite = ""; e.movement = "static"; e.facing = "player"; e.path = []; e.script = ""; }
   else if (type === "trigger") { e.script = ""; }
   else if (type === "dialog") { e.w = 1; e.h = 1; e.text = ""; }
   return e;
@@ -2822,13 +2818,7 @@ function renderEventInspector(map) {
         : "\"player\" turns to face the player; a compass direction is held until the NPC is talked to."));
       card.appendChild(spacer(8));
     } else {
-      // Walking NPCs face their travel direction; instead they carry a
-      // waypoint path and a blocked-behaviour choice.
-      const bf = el("div", "field");
-      bf.appendChild(label("When blocked"));
-      bf.appendChild(selectFrom(NPC_ONBLOCK, ev.onBlock || "stop", v => { snapshot(); ev.onBlock = v; }));
-      card.appendChild(bf);
-      card.appendChild(spacer(8));
+      // Walking NPCs face their travel direction and carry a waypoint path.
       card.appendChild(renderNpcPathEditor(map, ev));
       card.appendChild(spacer(8));
     }
@@ -3636,7 +3626,10 @@ function loadProjectFrom(text) {
         // is also the value a no-op re-export writes. Sentinel p1 must be a
         // concrete DIR_*; NPC_FACE_PLAYER is only meaningful for static NPCs.
         if (!NPC_MOVEMENTS.includes(e.movement)) e.movement = "static";
-        if (!NPC_ONBLOCK.includes(e.onBlock)) e.onBlock = "stop";
+        // The engine always pauses all walkers when the player blocks any one
+        // of them. Drop the obsolete stop/reverse authoring field on import so
+        // a no-op re-export also migrates older projects.
+        delete e.onBlock;
         if (!Array.isArray(e.path)) e.path = [];
         if (e.movement === "sentinel") {
           if (!NPC_SENTINEL_FACINGS.includes(e.facing)) e.facing = "up";
