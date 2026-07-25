@@ -1,0 +1,1374 @@
+// @ts-nocheck
+import { el, label, selectFrom, numberInput, clampInt, toggle, openModal, closeModal, downloadBlob, downloadText, copyText } from "../lib/common.js";
+
+"use strict";
+
+/* ============================================================
+   Music theory tables
+   ============================================================ */
+
+const FORMAT_VERSION = 1;
+const STEPS_PER_QUARTER = 4;          // base grid = 16th note
+
+const NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+
+// Scale interval sets (semitones from the root).
+const SCALES = {
+  major:            { label: "Major (Ionian)",      ivals: [0,2,4,5,7,9,11], minorish: false },
+  natural_minor:    { label: "Natural Minor",       ivals: [0,2,3,5,7,8,10], minorish: true },
+  harmonic_minor:   { label: "Harmonic Minor",      ivals: [0,2,3,5,7,8,11], minorish: true },
+  dorian:           { label: "Dorian",              ivals: [0,2,3,5,7,9,10], minorish: true },
+  phrygian:         { label: "Phrygian",            ivals: [0,1,3,5,7,8,10], minorish: true },
+  lydian:           { label: "Lydian",              ivals: [0,2,4,6,7,9,11], minorish: false },
+  mixolydian:       { label: "Mixolydian",          ivals: [0,2,4,5,7,9,10], minorish: false },
+  pentatonic_major: { label: "Major Pentatonic",    ivals: [0,2,4,7,9],      minorish: false },
+  pentatonic_minor: { label: "Minor Pentatonic",    ivals: [0,3,5,7,10],     minorish: true },
+  blues:            { label: "Blues",               ivals: [0,3,5,6,7,10],   minorish: true },
+  melodic_minor:    { label: "Melodic Minor",       ivals: [0,2,3,5,7,9,11], minorish: true },
+  hungarian_minor:  { label: "Hungarian Minor",     ivals: [0,2,3,6,7,8,11], minorish: true },
+  whole_tone:       { label: "Whole Tone",          ivals: [0,2,4,6,8,10],   minorish: false },
+  hirajoshi:        { label: "Hirajoshi (Japanese)",ivals: [0,2,3,7,8],      minorish: true },
+  egyptian:         { label: "Egyptian (sus pent.)",ivals: [0,2,5,7,10],     minorish: false },
+  okinawan:         { label: "Okinawan (Ryukyu)",   ivals: [0,4,5,7,11],     minorish: false },
+  chromatic:        { label: "Chromatic",           ivals: [0,1,2,3,4,5,6,7,8,9,10,11], minorish: false },
+};
+
+const TIME_SIGS = ["4/4", "3/4", "2/4", "6/8", "5/4"];
+
+// Chord progressions expressed as 0-based diatonic scale degrees, one entry per bar.
+const PROGRESSIONS = {
+  auto:        { label: "Auto (from mood)", degrees: null },
+  I_V_vi_IV:   { label: "I-V-vi-IV (pop)",  degrees: [0,4,5,3] },
+  I_IV_V:      { label: "I-IV-V",           degrees: [0,3,4,4] },
+  fifties:     { label: "I-vi-IV-V (50s)",  degrees: [0,5,3,4] },
+  ii_V_I:      { label: "ii-V-I (jazz)",    degrees: [1,4,0,0] },
+  canon:       { label: "Canon (Pachelbel)",degrees: [0,4,5,2,3,0,3,4] },
+  minor_loop:  { label: "i-VI-III-VII",     degrees: [0,5,2,6] },
+  minor_iv_v:  { label: "i-iv-v",           degrees: [0,3,4,4] },
+  andalusian:  { label: "i-VII-VI-V",       degrees: [0,6,5,4] },
+  blues12:     { label: "12-bar blues",     degrees: [0,0,0,0,3,3,0,0,4,3,0,4] },
+  axis:        { label: "vi-IV-I-V (axis)", degrees: [5,3,0,4] },
+  royal_road:  { label: "IV-V-iii-vi (royal road)", degrees: [3,4,2,5] },
+  I_vi_ii_V:   { label: "I-vi-ii-V (turnaround)", degrees: [0,5,1,4] },
+  mixo_rock:   { label: "I-VII-IV (rock)",  degrees: [0,6,3,0] },
+  dorian_vamp: { label: "i-IV vamp (modal)",degrees: [0,3,0,3] },
+  epic_minor:  { label: "i-VI-iv-V (epic)", degrees: [0,5,3,4] },
+  suspended:   { label: "I-V-IV-V (drift)", degrees: [0,4,3,4] },
+  lament:      { label: "i-VII-VI-VII",     degrees: [0,6,5,6] },
+};
+
+// Rhythmic archetypes. Each tunes the per-role grid spacing and onset density.
+const PATTERNS = {
+  arpeggio:     { label: "Arpeggio" },
+  march:        { label: "March" },
+  waltz:        { label: "Waltz" },
+  ballad:       { label: "Ballad" },
+  driving:      { label: "Driving 8ths" },
+  callresponse: { label: "Call & Response" },
+  syncopated:   { label: "Syncopated / Funk" },
+  galop:        { label: "Galop" },
+  ostinato:     { label: "Ostinato" },
+};
+
+const STRUCTURES = {
+  single:       { label: "Single phrase" },
+  loop:         { label: "Loop (resolves)" },
+  introloop:    { label: "Intro + loop" },
+  versechorus:  { label: "Verse / Chorus" },
+  through:      { label: "Through-composed" },
+};
+
+const DENSITIES = [
+  { value: "sparse", label: "Sparse" },
+  { value: "medium", label: "Medium" },
+  { value: "busy",   label: "Busy" },
+];
+const DENSITY_PROB = { sparse: 0.5, medium: 0.78, busy: 1.0 };
+
+// Pulse duty cycles -> timbre. Value is the high fraction of the period.
+const DUTIES = [
+  { value: 0.125, label: "12.5% (thin)" },
+  { value: 0.25,  label: "25% (round)" },
+  { value: 0.5,   label: "50% (full)" },
+  { value: 0.75,  label: "75% (nasal)" },
+];
+const WAVES = [
+  { value: "triangle", label: "Triangle" },
+  { value: "sine",     label: "Sine" },
+  { value: "sawtooth", label: "Saw" },
+  { value: "square",   label: "Square" },
+];
+const DRUMS = [
+  { value: "rock",  label: "Rock kit" },
+  { value: "march", label: "Marching" },
+  { value: "busy",  label: "Busy / 16ths" },
+  { value: "dance", label: "Dance / 4-on-floor" },
+  { value: "halftime", label: "Half-time" },
+  { value: "none",  label: "Silent" },
+];
+
+// Mood profiles. A mood colours the improvisation: it nudges contour, rest
+// density, syncopation, register and dynamics, and supplies a default
+// progression and drum feel when the user leaves those on "auto".
+//   leap    - chance the lead jumps instead of stepping
+//   rest    - chance a melodic slot is silent
+//   sync    - chance an onset is pushed off the beat
+//   lead/bass- centre MIDI note of each register
+//   prog    - default chord progression id
+//   drums   - default drum style
+//   swing   - suggested swing feel baked in when user swing is 0
+const MOODS = {
+  // --- Classic chiptune ---
+  happy:      { group: "Classic", label: "Happy / Upbeat",   leap: .3, rest: .18, sync: .2, lead: 74, bass: 40, prog: "I_V_vi_IV", drums: "rock",  vel: 104 },
+  sad:        { group: "Classic", label: "Sad / Melancholy", leap: .18,rest: .28, sync: .1, lead: 72, bass: 38, prog: "minor_loop",drums: "rock",  vel: 86 },
+  heroic:     { group: "Classic", label: "Heroic / Adventure",leap:.4, rest: .12, sync: .15,lead: 76, bass: 40, prog: "I_IV_V",   drums: "march", vel: 110 },
+  spooky:     { group: "Classic", label: "Spooky / Tense",   leap: .35,rest: .3,  sync: .35,lead: 73, bass: 36, prog: "andalusian",drums: "busy", vel: 92 },
+  calm:       { group: "Classic", label: "Calm / Peaceful",  leap: .15,rest: .35, sync: .05,lead: 72, bass: 40, prog: "I_V_vi_IV", drums: "none",  vel: 80 },
+  mysterious: { group: "Classic", label: "Mysterious",       leap: .3, rest: .3,  sync: .25,lead: 74, bass: 38, prog: "minor_loop",drums: "busy",  vel: 88 },
+  // --- Battle / Action ---
+  boss:       { group: "Battle",  label: "Boss Battle",      leap: .45,rest: .08, sync: .3, lead: 76, bass: 36, prog: "minor_iv_v",drums: "busy",  vel: 118 },
+  chase:      { group: "Battle",  label: "Chase",            leap: .4, rest: .06, sync: .25,lead: 77, bass: 38, prog: "andalusian",drums: "busy",  vel: 114 },
+  victory:    { group: "Battle",  label: "Victory Fanfare",  leap: .5, rest: .1,  sync: .1, lead: 79, bass: 43, prog: "I_IV_V",    drums: "march", vel: 120 },
+  gameover:   { group: "Battle",  label: "Game Over",        leap: .25,rest: .3,  sync: .05,lead: 70, bass: 36, prog: "minor_iv_v",drums: "none",  vel: 84 },
+  // --- Ambient / Town ---
+  town:       { group: "Town",    label: "Town",             leap: .25,rest: .2,  sync: .15,lead: 74, bass: 40, prog: "fifties",   drums: "rock",  vel: 96 },
+  shop:       { group: "Town",    label: "Shop",             leap: .3, rest: .22, sync: .2, lead: 75, bass: 41, prog: "ii_V_I",    drums: "rock",  vel: 92 },
+  overworld:  { group: "Town",    label: "Overworld",        leap: .35,rest: .12, sync: .18,lead: 75, bass: 40, prog: "canon",     drums: "march", vel: 102 },
+  cave:       { group: "Town",    label: "Cave / Dungeon",   leap: .2, rest: .35, sync: .2, lead: 71, bass: 36, prog: "minor_loop",drums: "busy",  vel: 84 },
+  title:      { group: "Town",    label: "Title Screen",     leap: .45,rest: .15, sync: .1, lead: 78, bass: 41, prog: "I_V_vi_IV", drums: "march", vel: 108 },
+  // --- Scene / Extras ---
+  credits:    { group: "Scene",   label: "Credits / Ending", leap: .3, rest: .2,  sync: .08,lead: 75, bass: 41, prog: "canon",     drums: "halftime", vel: 96 },
+  lullaby:    { group: "Scene",   label: "Lullaby",          leap: .12,rest: .4,  sync: .02,lead: 73, bass: 41, prog: "I_vi_ii_V", drums: "none",  vel: 70 },
+  festival:   { group: "Scene",   label: "Festival",         leap: .4, rest: .1,  sync: .3, lead: 77, bass: 41, prog: "axis",      drums: "dance", vel: 112 },
+  sea:        { group: "Scene",   label: "Sea / Sailing",    leap: .35,rest: .18, sync: .12,lead: 74, bass: 39, prog: "epic_minor",drums: "halftime", vel: 100 },
+  desert:     { group: "Scene",   label: "Desert Ruins",     leap: .28,rest: .3,  sync: .22,lead: 72, bass: 37, prog: "lament",    drums: "halftime", vel: 88 },
+  factory:    { group: "Scene",   label: "Factory",          leap: .3, rest: .1,  sync: .35,lead: 74, bass: 38, prog: "dorian_vamp",drums: "dance", vel: 106 },
+  space:      { group: "Scene",   label: "Space Station",    leap: .35,rest: .25, sync: .2, lead: 76, bass: 37, prog: "suspended", drums: "halftime", vel: 94 },
+  racing:     { group: "Scene",   label: "Racing",           leap: .4, rest: .05, sync: .28,lead: 77, bass: 39, prog: "mixo_rock", drums: "dance", vel: 116 },
+};
+const MOOD_ORDER = Object.keys(MOODS);
+
+// Channel display metadata (order is the GB hardware order).
+const CHANNELS = [
+  { id: "pulse1", name: "Pulse 1", role: "Lead",    color: "#b8f25a" },
+  { id: "pulse2", name: "Pulse 2", role: "Harmony", color: "#5ad6ff" },
+  { id: "wave",   name: "Wave",    role: "Bass",    color: "#ffd23f" },
+  { id: "noise",  name: "Noise",   role: "Drums",   color: "#e06ad6" },
+];
+const CHAN_COLOR = Object.fromEntries(CHANNELS.map(c => [c.id, c.color]));
+
+/* ============================================================
+   Deterministic RNG (mulberry32) - same seed => same stream
+   ============================================================ */
+
+function makeRng(seed) {
+  let a = (seed >>> 0) || 1;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const chance = (rng, p) => rng() < p;
+const pick = (rng, arr) => arr[Math.floor(rng() * arr.length)];
+
+/* ============================================================
+   Default settings
+   ============================================================ */
+
+function makeDefaultSettings() {
+  return {
+    formatVersion: FORMAT_VERSION,
+    kind: "gbmusic",
+    name: "Untitled Tune",
+    key: "C",
+    scale: "major",
+    timeSig: "4/4",
+    tempo: 120,
+    mood: "happy",
+    pattern: "march",
+    progression: "auto",
+    structure: "loop",
+    bars: 16,
+    swing: 0,
+    seed: 1337,
+    channels: {
+      pulse1: { on: true, duty: 0.5,  density: "medium" },
+      pulse2: { on: true, duty: 0.25, density: "medium" },
+      wave:   { on: true, wave: "triangle", density: "medium" },
+      noise:  { on: true, drums: "auto" },
+    },
+  };
+}
+
+/* ============================================================
+   Generator: settings -> song
+   ============================================================ */
+
+function parseTimeSig(ts) {
+  const [n, d] = ts.split("/").map(Number);
+  return { beats: n, unit: d };
+}
+
+// All MIDI notes within [lo,hi] whose pitch class is in the scale, ascending.
+function scaleMidiList(rootPc, ivals, lo, hi) {
+  const pcs = new Set(ivals.map(i => (rootPc + i) % 12));
+  const out = [];
+  for (let m = lo; m <= hi; m++) if (pcs.has(m % 12)) out.push(m);
+  return out;
+}
+
+// Build a diatonic triad (pitch classes) on a scale degree by stacking thirds.
+function triadPcs(rootPc, ivals, degree) {
+  const n = ivals.length;
+  return [0, 2, 4].map(k => (rootPc + ivals[(degree + k) % n]) % 12);
+}
+
+// Nearest MIDI note of pitch class `pc` to a centre note.
+function pcNear(pc, centre) {
+  const base = centre - (((centre % 12) - pc + 12) % 12);
+  let best = base, bd = Infinity;
+  for (const cand of [base - 12, base, base + 12]) {
+    const d = Math.abs(cand - centre);
+    if (d < bd) { bd = d; best = cand; }
+  }
+  return best;
+}
+
+// Walk to the nearest scale index whose note belongs to the chord.
+function nearestChordIndex(scaleMidi, fromIdx, chordPcs) {
+  for (let d = 0; d < scaleMidi.length; d++) {
+    for (const idx of [fromIdx + d, fromIdx - d]) {
+      if (idx >= 0 && idx < scaleMidi.length && chordPcs.includes(scaleMidi[idx] % 12)) return idx;
+    }
+  }
+  return Math.max(0, Math.min(scaleMidi.length - 1, fromIdx));
+}
+
+// Onset rhythm for a bar: notes at multiples of `grid` kept with probability p.
+// Returns [{step, dur}] with durations stretched to the next onset.
+function gridRhythm(stepsPerBar, grid, p, rng, syncProb) {
+  const onsets = [];
+  for (let s = 0; s < stepsPerBar; s += grid) {
+    if (s === 0 || chance(rng, p)) {
+      let st = s;
+      if (s !== 0 && syncProb && chance(rng, syncProb) && s + 1 < stepsPerBar) st = s + 1;
+      onsets.push(st);
+    }
+  }
+  const notes = [];
+  for (let i = 0; i < onsets.length; i++) {
+    const dur = (i + 1 < onsets.length ? onsets[i + 1] : stepsPerBar) - onsets[i];
+    notes.push({ step: onsets[i], dur });
+  }
+  return notes;
+}
+
+// Per-role grid spacing (in steps) for each rhythmic archetype.
+function roleGrid(pattern, role, stepsPerBeat) {
+  const eighth = Math.max(1, Math.round(stepsPerBeat / 2));
+  const quarter = stepsPerBeat;
+  const half = stepsPerBeat * 2;
+  const G = {
+    arpeggio:     { lead: quarter, harmony: eighth,  bass: eighth },
+    march:        { lead: quarter, harmony: quarter, bass: quarter },
+    waltz:        { lead: quarter, harmony: quarter, bass: quarter },
+    ballad:       { lead: half,    harmony: half,    bass: half },
+    driving:      { lead: eighth,  harmony: eighth,  bass: eighth },
+    callresponse: { lead: eighth,  harmony: quarter, bass: half },
+    syncopated:   { lead: eighth,  harmony: eighth,  bass: quarter },
+    galop:        { lead: eighth,  harmony: eighth,  bass: eighth },
+    ostinato:     { lead: quarter, harmony: eighth,  bass: eighth },
+  };
+  return (G[pattern] || G.march)[role];
+}
+
+/* ---- Motifs: reusable one-bar melodic ideas ----
+   A motif is a rhythm plus one "move" token per onset:
+     'C'  land on the nearest chord tone
+     'S+'/'S-' scale step up/down
+     'L+'/'L-' leap up/down
+     'R'  rest
+   Repeating a small set of motifs (with variation) is what makes the melody
+   sound composed rather than random-walked. */
+
+function makeMotif(rng, stepsPerBar, grid, dens, mood, stepsPerBeat) {
+  const rhythm = gridRhythm(stepsPerBar, grid, dens, rng, mood.sync);
+  const arch = chance(rng, 0.5) ? 1 : -1;   // rise-then-fall contour, or the reverse
+  const moves = rhythm.map((r, i) => {
+    if (i === 0) return "C";                // anchor each bar on the harmony
+    if (chance(rng, mood.rest)) return "R";
+    const strong = r.step % stepsPerBeat === 0;
+    if (strong && chance(rng, 0.6)) return "C";
+    const dir = (i < rhythm.length / 2 ? arch : -arch) > 0 ? "+" : "-";
+    return (chance(rng, mood.leap) ? "L" : "S") + dir;
+  });
+  return { rhythm, moves };
+}
+
+// A variant keeps the rhythm and overall shape but tweaks a few moves,
+// so the repeat is recognizable without being identical.
+function variantOf(motif, rng) {
+  const moves = motif.moves.map(m => {
+    if (m === "C" || m === "R") return m;
+    if (chance(rng, 0.25)) return m[0] + (m[1] === "+" ? "-" : "+"); // mirror
+    if (chance(rng, 0.15)) return (m[0] === "S" ? "L" : "S") + m[1]; // step<->leap
+    return m;
+  });
+  return { rhythm: motif.rhythm, moves };
+}
+
+// Realize one bar of a motif against the current chord. `mem` carries the
+// melodic position (scale index) across bars; gravity toward the register
+// centre stops the line drifting off into the weeds.
+function playMotifBar(track, motif, barStep, chordPcs, leadScale, mem, mood, s, rng, stepsPerBeat, opts = {}) {
+  const centre = mem.centre + (opts.lift || 0);
+  motif.rhythm.forEach((r, i) => {
+    if (opts.stopAt != null && r.step >= opts.stopAt) return;
+    if (opts.skipBefore != null && r.step < opts.skipBefore) return;
+    const move = motif.moves[i] || "C";
+    if (move === "R") return;
+    if (move === "C") {
+      mem.idx = nearestChordIndex(leadScale, mem.idx, chordPcs);
+    } else {
+      const dir = move[1] === "+" ? 1 : -1;
+      mem.idx += dir * (move[0] === "L" ? pick(rng, [3, 4]) : pick(rng, [1, 1, 2]));
+    }
+    if (mem.idx < centre - 6) mem.idx += 2;
+    if (mem.idx > centre + 6) mem.idx -= 2;
+    mem.idx = Math.max(0, Math.min(leadScale.length - 1, mem.idx));
+    const strong = r.step % stepsPerBeat === 0;
+    const vel = mood.vel + (strong ? 8 : -6) + (opts.velBoost || 0);
+    addNote(track, barStep + r.step, r.dur, leadScale[mem.idx], vel, s, rng, stepsPerBeat);
+  });
+}
+
+function generate(settings) {
+  const s = settings;
+  const rng = makeRng(s.seed >>> 0);
+  const mood = MOODS[s.mood] || MOODS.happy;
+  const scale = SCALES[s.scale] || SCALES.major;
+  const rootPc = NOTE_NAMES.indexOf(s.key);
+  const { beats, unit } = parseTimeSig(s.timeSig);
+  const stepsPerBeat = Math.round(16 / unit);          // 16th-steps per notated beat
+  const stepsPerBar = beats * stepsPerBeat;
+  const totalBars = Math.max(1, Math.min(64, s.bars | 0));
+
+  // Resolve "auto" choices from the mood.
+  const progId = s.progression === "auto" ? mood.prog : s.progression;
+  const progression = PROGRESSIONS[progId] || PROGRESSIONS.I_V_vi_IV;
+  const degrees = progression.degrees || PROGRESSIONS.I_V_vi_IV.degrees;
+  const drumStyle = s.channels.noise.drums === "auto" ? mood.drums : s.channels.noise.drums;
+
+  const leadScale = scaleMidiList(rootPc, scale.ivals, mood.lead - 9, mood.lead + 12);
+  const harmScale = mood.lead - 14;
+
+  const tracks = { pulse1: [], pulse2: [], wave: [], noise: [] };
+  const chords = [];
+
+  // A coarse dynamics / density envelope from the structure choice.
+  const sectionFeel = (bar) => {
+    switch (s.structure) {
+      case "introloop":   return bar < 2 ? "intro" : "main";
+      case "versechorus": return (Math.floor(bar / 4) % 2 === 0) ? "verse" : "chorus";
+      case "through":     return "through";
+      default:            return "main";
+    }
+  };
+
+  // Motif bank: main idea (A), its variant, a contrasting idea (B), and a
+  // separate pair for chorus sections. Bars pick from these in an A A' B A'
+  // shape, which gives the tune recognizable phrases.
+  const leadDens = DENSITY_PROB[s.channels.pulse1.density];
+  const leadGrid = roleGrid(s.pattern, "lead", stepsPerBeat);
+  const motifA  = makeMotif(rng, stepsPerBar, leadGrid, leadDens, mood, stepsPerBeat);
+  const motifA2 = variantOf(motifA, rng);
+  const motifB  = makeMotif(rng, stepsPerBar, leadGrid, Math.min(1, leadDens * 1.1), mood, stepsPerBeat);
+  let   motifC  = makeMotif(rng, stepsPerBar, leadGrid, Math.min(1, leadDens * 1.15), mood, stepsPerBeat);
+  let   motifC2 = variantOf(motifC, rng);
+  const mem = { idx: Math.floor(leadScale.length / 2), centre: Math.floor(leadScale.length / 2) };
+
+  for (let bar = 0; bar < totalBars; bar++) {
+    const barStep = bar * stepsPerBar;
+    const feel = sectionFeel(bar);
+    const isLast = bar === totalBars - 1;
+
+    // Resolve to the tonic on the final bar of a looping/single tune.
+    let degree = degrees[bar % degrees.length];
+    if (isLast && (s.structure === "loop" || s.structure === "single")) degree = 0;
+    const chordPcs = triadPcs(rootPc, scale.ivals, degree);
+    chords.push({ step: barStep, len: stepsPerBar, degree, pcs: chordPcs });
+
+    // Density modifiers from structure feel.
+    const densBoost = feel === "chorus" ? 1.1 : feel === "verse" ? 0.85 : feel === "intro" ? 0.5 : 1.0;
+    const leadActive = feel !== "intro";   // intro: let accompaniment breathe
+
+    /* ---- Bass (Wave channel) ---- */
+    if (s.channels.wave.on) {
+      const p = Math.min(1, DENSITY_PROB[s.channels.wave.density] * densBoost);
+      const grid = roleGrid(s.pattern, "bass", stepsPerBeat);
+      const rhythm = s.pattern === "waltz"
+        ? [{ step: 0, dur: stepsPerBar }]                       // waltz: bass on beat 1
+        : gridRhythm(stepsPerBar, grid, p, rng, 0);
+      rhythm.forEach((r, i) => {
+        // Alternate root and fifth for motion on busier patterns; galop and
+        // ostinato pump root-octave instead for that classic chiptune drive.
+        const pump = (s.pattern === "galop" || s.pattern === "ostinato") && i % 2 === 1;
+        const usefifth = !pump && i % 2 === 1 && s.pattern !== "ballad" && chance(rng, 0.6);
+        const pc = usefifth ? chordPcs[2] : chordPcs[0];
+        const midi = pcNear(pc, mood.bass) + (pump ? 12 : 0);
+        addNote(tracks.wave, barStep + r.step, r.dur, midi, mood.vel - 6, s, rng, stepsPerBeat);
+      });
+      // Approach tone: lead into the next bar's chord from a semitone below.
+      const nextDegree = degrees[(bar + 1) % degrees.length];
+      if (!isLast && nextDegree !== degree && chance(rng, 0.35)) {
+        const nextRoot = triadPcs(rootPc, scale.ivals, nextDegree)[0];
+        const eighth = Math.max(1, Math.round(stepsPerBeat / 2));
+        addNote(tracks.wave, barStep + stepsPerBar - eighth, eighth,
+          pcNear((nextRoot + 11) % 12, mood.bass), mood.vel - 14, s, rng, stepsPerBeat);
+      }
+    }
+
+    /* ---- Harmony (Pulse 2): monophonic broken chord ---- */
+    if (s.channels.pulse2.on) {
+      const p = Math.min(1, DENSITY_PROB[s.channels.pulse2.density] * densBoost);
+      const grid = roleGrid(s.pattern, "harmony", stepsPerBeat);
+      let rhythm;
+      if (s.pattern === "waltz") {
+        rhythm = [];                                            // waltz: chords on beats 2..n
+        for (let b = 1; b < beats; b++) rhythm.push({ step: b * stepsPerBeat, dur: stepsPerBeat });
+      } else {
+        rhythm = gridRhythm(stepsPerBar, grid, p, rng, mood.sync * 0.5);
+      }
+      rhythm.forEach((r, i) => {
+        const pc = chordPcs[i % chordPcs.length];               // arpeggiate the triad
+        addNote(tracks.pulse2, barStep + r.step, r.dur, pcNear(pc, harmScale + 16), mood.vel - 24, s, rng, stepsPerBeat);
+      });
+    }
+
+    /* ---- Lead (Pulse 1): motif-based melody ---- */
+    if (s.channels.pulse1.on && leadActive) {
+      // Through-composed: refresh the motif bank at each 4-bar phrase so the
+      // material keeps evolving instead of looping.
+      if (s.structure === "through" && bar > 0 && bar % 4 === 0) {
+        motifC = makeMotif(rng, stepsPerBar, leadGrid, Math.min(1, leadDens * 1.15), mood, stepsPerBeat);
+        motifC2 = variantOf(motifC, rng);
+      }
+      const groupPos = bar % 4;
+      const isChorus = feel === "chorus" || (s.structure === "through" && Math.floor(bar / 4) % 2 === 1);
+      // Phrase shape: A A' B A' (chorus uses its own C C' B C' with a lifted register).
+      const motif = isChorus
+        ? [motifC, motifC2, motifB, motifC2][groupPos]
+        : [motifA, motifA2, motifB, motifA2][groupPos];
+      const opts = { lift: isChorus ? 2 : 0, velBoost: isChorus ? 6 : 0 };
+      // Call & response: lead answers in the second half of odd bars.
+      if (s.pattern === "callresponse" && bar % 2 === 1) opts.skipBefore = stepsPerBar / 2;
+      // Cadence: end each 8-bar period (and the tune) on a held chord root.
+      const isCadence = bar % 8 === 7 || isLast;
+      if (isCadence) opts.stopAt = Math.floor(stepsPerBar / 2);
+      playMotifBar(tracks.pulse1, motif, barStep, chordPcs, leadScale, mem, mood, s, rng, stepsPerBeat, opts);
+      if (isCadence) {
+        mem.idx = nearestChordIndex(leadScale, mem.idx, [chordPcs[0]]);
+        addNote(tracks.pulse1, barStep + Math.floor(stepsPerBar / 2), Math.ceil(stepsPerBar / 2),
+          leadScale[mem.idx], mood.vel + 6, s, rng, stepsPerBeat);
+      }
+    }
+
+    /* ---- Drums (Noise channel) ---- */
+    if (s.channels.noise.on && drumStyle !== "none") {
+      const fill = bar % 4 === 3 && !isLast;   // snare build into each new phrase
+      addDrums(tracks.noise, barStep, stepsPerBar, stepsPerBeat, drumStyle, rng, s, fill);
+    }
+  }
+
+  /* ---- Hardware truth pass ----
+     Each GB channel is monophonic, so overlapping notes are impossible on
+     real hardware: clip every note at the next onset in its channel.
+     (Cross-channel timing is already exact: onsets and note ends all sit on
+     the same swing-adjusted grid.) */
+  [tracks.pulse1, tracks.pulse2, tracks.wave].forEach(enforceMonophony);
+
+  const totalSteps = totalBars * stepsPerBar;
+  return {
+    settings: JSON.parse(JSON.stringify(s)),
+    rootPc, scale: s.scale, stepsPerBar, stepsPerBeat, beats, unit,
+    totalBars, totalSteps, tracks, chords, drumStyle,
+  };
+}
+
+// Make a track physically playable on one GB channel: sort by onset, drop
+// notes that land on the same instant, and cut every note off no later than
+// the next one starts.
+function enforceMonophony(track) {
+  track.sort((a, b) => a.t - b.t);              // stable: ties keep insert order
+  for (let i = track.length - 2; i >= 0; i--) {
+    const cur = track[i], next = track[i + 1];
+    // Same instant, same grid step, or a gap too short to hear: the earlier
+    // note would be cut to nothing, so drop it and keep the later one.
+    if (next.t - cur.t < 0.25 || next.step === cur.step) { track.splice(i, 1); continue; }
+    cur.dur = Math.min(cur.dur, next.t - cur.t);
+  }
+}
+
+// The time of a grid step, with swing applied. Every onset AND every note
+// end goes through this, so a note ending on a step lands exactly where any
+// channel's onset on that step begins - no rubbing transitions between
+// channels. Any per-note timing variation would break that alignment, which
+// is why there is deliberately no "humanize" here.
+function onsetTime(step, s, stepsPerBeat) {
+  let t = step;
+  // Swing: delay the off-eighth of each beat.
+  if (s.swing > 0 && stepsPerBeat >= 2 && step % stepsPerBeat === Math.round(stepsPerBeat / 2)) {
+    t += (s.swing / 100) * 0.6;
+  }
+  return Math.max(0, t);
+}
+
+// Bake swing into an absolute onset time `t` (in fractional steps), so
+// playback, MIDI and the score all agree. `dur` is stored as playable length
+// from `t`.
+function addNote(track, step, dur, midi, vel, s, rng, stepsPerBeat) {
+  const t = onsetTime(step, s, stepsPerBeat);
+  const tEnd = onsetTime(step + dur, s, stepsPerBeat);
+  track.push({ step, dur: Math.max(0.1, tEnd - t), midi,
+               vel: Math.max(1, Math.min(127, Math.round(vel))), t });
+}
+
+function addDrums(track, barStep, stepsPerBar, stepsPerBeat, style, rng, s, fill) {
+  const beat = stepsPerBeat;
+  const eighth = Math.max(1, Math.round(beat / 2));
+  const sixteenth = Math.max(1, Math.round(eighth / 2));
+  const beats = Math.round(stepsPerBar / beat);
+
+  // The noise channel plays ONE sound at a time on hardware, so the bar is
+  // built as a step -> instrument map: a later `put` replaces, never stacks.
+  // Backbone hits (kick/snare) are placed after hats so they win the slot.
+  const slots = new Map();
+  const put = (step, drum, vel) => { if (step >= 0 && step < stepsPerBar) slots.set(step, { drum, vel }); };
+
+  if (style === "rock") {
+    // Sparse hats first (with gaps), then the backbeat on top.
+    for (let s2 = eighth; s2 < stepsPerBar; s2 += eighth) {
+      if (chance(rng, 0.55)) put(s2, "hat", 66);
+    }
+    put(0, "kick", 112);
+    for (let b = 1; b < beats; b++) {
+      if (b % 2 === 1) put(b * beat, "snare", 104);
+      else if (chance(rng, 0.5)) put(b * beat, "kick", 106);
+    }
+    if (chance(rng, 0.35)) put(3 * eighth, "kick", 94);         // pushed kick
+    if (chance(rng, 0.25)) put(stepsPerBar - sixteenth, "hat", 58); // pickup tick
+  } else if (style === "march") {
+    put(0, "kick", 110);
+    for (let b = 1; b < beats; b++) {
+      if (chance(rng, 0.75)) put(b * beat, b % 2 === 1 ? "snare" : "kick", 96);
+    }
+    // Occasional snare drag before a beat instead of a constant afterbeat.
+    if (chance(rng, 0.4)) {
+      const target = pick(rng, [1, Math.max(1, beats - 1)]) * beat;
+      put(target - sixteenth, "snare", 72);
+      put(target - eighth, "snare", 60);
+    }
+  } else if (style === "busy") {
+    // 16th hats but with holes punched in them, so the ear gets a break.
+    for (let s2 = 0; s2 < stepsPerBar; s2 += sixteenth) {
+      if (chance(rng, 0.6)) put(s2, "hat", 58 + (s2 % beat === 0 ? 14 : 0));
+    }
+    for (let b = 0; b < beats; b++) {
+      if (b % 2 === 0) { if (chance(rng, 0.85)) put(b * beat, "kick", 110); }
+      else put(b * beat, "snare", 102);
+    }
+    if (chance(rng, 0.3)) put(stepsPerBar - eighth, "snare", 70);  // ghost push
+  } else if (style === "dance") {
+    for (let b = 0; b < beats; b++) {
+      put(b * beat, "kick", 114);
+      if (chance(rng, 0.7)) put(b * beat + eighth, "hat", 82);     // offbeat open-hat feel
+    }
+    if (beats >= 4) put(2 * beat, "snare", 100);
+  } else if (style === "halftime") {
+    put(0, "kick", 112);
+    if (beats > 2) put(Math.floor(beats / 2) * beat, "snare", 106);
+    for (let b = 1; b < beats; b++) {
+      if (chance(rng, 0.35)) put(b * beat, "hat", 62);             // air, not wallpaper
+    }
+    if (chance(rng, 0.3)) put(stepsPerBar - eighth, "kick", 88);   // lazy pickup
+  }
+
+  // Fill: a rising snare run through the final beat, with occasional gaps.
+  if (fill) {
+    const start = stepsPerBar - beat;
+    for (let s2 = start; s2 < stepsPerBar; s2 += sixteenth) {
+      if (s2 === start || chance(rng, 0.8)) {
+        put(s2, "snare", 80 + Math.round(((s2 - start) / beat) * 28));
+      }
+    }
+  }
+
+  [...slots.keys()].sort((a, b) => a - b).forEach(step => {
+    const h = slots.get(step);
+    track.push({ step: barStep + step, dur: 1, drum: h.drum, vel: h.vel, t: barStep + step });
+  });
+}
+
+/* ============================================================
+   Audio engine (Web Audio approximation of the GB channels)
+   ============================================================ */
+
+const audio = {
+  ctx: null,
+  master: null,
+  pulseWaves: {},
+  noiseBuffer: null,
+  voices: [],
+  timers: [],
+  playing: false,
+  startTime: 0,
+  song: null,
+
+  ensure() {
+    if (this.ctx) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    this.ctx = new AC();
+    this.master = this.ctx.createGain();
+    this.master.gain.value = 0.22;
+    this.master.connect(this.ctx.destination);
+    // White-noise buffer reused by every drum hit.
+    const len = this.ctx.sampleRate * 1.0;
+    this.noiseBuffer = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const d = this.noiseBuffer.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+  },
+
+  // A band-limited pulse wave of the given duty cycle.
+  pulseWave(duty) {
+    const key = String(duty);
+    if (this.pulseWaves[key]) return this.pulseWaves[key];
+    const n = 32;
+    const real = new Float32Array(n), imag = new Float32Array(n);
+    for (let k = 1; k < n; k++) {
+      // Fourier coefficients of a pulse with the given high fraction.
+      imag[k] = (2 / (k * Math.PI)) * Math.sin(Math.PI * k * duty);
+    }
+    const w = this.ctx.createPeriodicWave(real, imag);
+    this.pulseWaves[key] = w;
+    return w;
+  },
+
+  secPerStep() { return (60 / this.song.settings.tempo) / STEPS_PER_QUARTER; },
+
+  playTone(type, midi, startSec, durSec, vel, dutyOrWave) {
+    const ctx = this.ctx;
+    const osc = ctx.createOscillator();
+    if (type === "pulse") osc.setPeriodicWave(this.pulseWave(dutyOrWave));
+    else osc.type = dutyOrWave;                       // wave channel: built-in shapes
+    osc.frequency.value = 440 * Math.pow(2, (midi - 69) / 12);
+    const g = ctx.createGain();
+    const peak = (vel / 127) * (type === "pulse" ? 0.5 : 0.6);
+    const end = startSec + durSec;
+    g.gain.setValueAtTime(0.0001, startSec);
+    g.gain.linearRampToValueAtTime(peak, startSec + 0.005);
+    g.gain.setValueAtTime(peak, Math.max(startSec + 0.006, end - 0.04));
+    g.gain.linearRampToValueAtTime(0.0001, end);     // short release stops clicks
+    osc.connect(g); g.connect(this.master);
+    osc.start(startSec); osc.stop(end + 0.02);
+    this.voices.push(osc);
+  },
+
+  playDrum(drum, startSec, vel) {
+    const ctx = this.ctx;
+    const g = ctx.createGain();
+    g.connect(this.master);
+    const amp = vel / 127;
+    if (drum === "kick") {
+      const osc = ctx.createOscillator();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(150, startSec);
+      osc.frequency.exponentialRampToValueAtTime(48, startSec + 0.12);
+      g.gain.setValueAtTime(amp * 0.9, startSec);
+      g.gain.exponentialRampToValueAtTime(0.0001, startSec + 0.16);
+      osc.connect(g); osc.start(startSec); osc.stop(startSec + 0.18);
+      this.voices.push(osc);
+    } else {
+      const src = ctx.createBufferSource();
+      src.buffer = this.noiseBuffer;
+      const hp = ctx.createBiquadFilter();
+      hp.type = "highpass";
+      hp.frequency.value = drum === "hat" ? 7000 : 1500;
+      const dur = drum === "hat" ? 0.04 : 0.14;
+      g.gain.setValueAtTime(amp * (drum === "hat" ? 0.4 : 0.7), startSec);
+      g.gain.exponentialRampToValueAtTime(0.0001, startSec + dur);
+      src.connect(hp); hp.connect(g); src.start(startSec); src.stop(startSec + dur + 0.02);
+      this.voices.push(src);
+    }
+  },
+
+  scheduleSong(atTime) {
+    const sp = this.secPerStep();
+    const s = this.song.settings;
+    const T = this.song.tracks;
+    if (s.channels.pulse1.on) T.pulse1.forEach(n => this.playTone("pulse", n.midi, atTime + n.t * sp, n.dur * sp, n.vel, s.channels.pulse1.duty));
+    if (s.channels.pulse2.on) T.pulse2.forEach(n => this.playTone("pulse", n.midi, atTime + n.t * sp, n.dur * sp, n.vel, s.channels.pulse2.duty));
+    if (s.channels.wave.on)   T.wave.forEach(n => this.playTone("wave", n.midi, atTime + n.t * sp, n.dur * sp, n.vel, s.channels.wave.wave));
+    if (s.channels.noise.on)  T.noise.forEach(n => this.playDrum(n.drum, atTime + n.t * sp, n.vel));
+  },
+
+  play(song, loop) {
+    this.ensure();
+    if (this.ctx.state === "suspended") this.ctx.resume();
+    this.stop();
+    this.song = song;
+    this.playing = true;
+    this.loop = loop;
+    const sp = this.secPerStep();
+    const durSec = song.totalSteps * sp;
+    const start = this.ctx.currentTime + 0.08;
+    this.startTime = start;
+    this.scheduleSong(start);
+    if (loop) {
+      // Re-schedule each loop a little before the previous one ends.
+      const reloop = (n) => {
+        if (!this.playing || !this.loop) return;
+        const at = start + n * durSec;
+        const timer = setTimeout(() => {
+          if (!this.playing || !this.loop) return;
+          this.scheduleSong(at);
+          reloop(n + 1);
+        }, (at - this.ctx.currentTime - 0.2) * 1000);
+        this.timers.push(timer);
+      };
+      reloop(1);
+    } else {
+      this.timers.push(setTimeout(() => { this.playing = false; onTransportEnd(); }, durSec * 1000 + 200));
+    }
+  },
+
+  stop() {
+    this.timers.forEach(clearTimeout); this.timers = [];
+    this.voices.forEach(v => { try { v.stop(); } catch {} });
+    this.voices = [];
+    this.playing = false;
+  },
+
+  // Position in fractional steps for the playhead, or null if stopped.
+  positionSteps() {
+    if (!this.playing || !this.song) return null;
+    const sp = this.secPerStep();
+    let elapsed = this.ctx.currentTime - this.startTime;
+    if (elapsed < 0) elapsed = 0;
+    let steps = elapsed / sp;
+    if (this.loop) steps %= this.song.totalSteps;
+    return Math.min(steps, this.song.totalSteps);
+  },
+};
+
+/* ============================================================
+   App state + lifecycle
+   ============================================================ */
+
+const state = {
+  settings: makeDefaultSettings(),
+  song: null,
+  view: "grid",          // "grid" | "staff"
+  stepPx: 16,
+  loop: true,
+};
+
+function regenerate() {
+  state.song = generate(state.settings);
+}
+
+function onTransportEnd() { renderTransport(); }
+
+/* ============================================================
+   Settings panel
+   ============================================================ */
+
+function field(labelText, control, wide) {
+  const f = el("div", "field" + (wide ? " wide" : ""));
+  f.appendChild(label(labelText));
+  f.appendChild(control);
+  return f;
+}
+
+function rangeField(labelText, value, min, max, onChange, unit) {
+  const f = el("div", "field wide");
+  f.appendChild(label(labelText));
+  const row = el("div", "range-row");
+  const r = document.createElement("input");
+  r.type = "range"; r.min = min; r.max = max; r.value = value;
+  const out = el("span", "val", value + (unit || ""));
+  r.addEventListener("input", () => { out.textContent = r.value + (unit || ""); onChange(Number(r.value)); });
+  row.append(r, out);
+  f.appendChild(row);
+  return f;
+}
+
+function moodOptions() {
+  return MOOD_ORDER.map(id => ({ value: id, label: MOODS[id].group + " · " + MOODS[id].label }));
+}
+
+function renderSettings() {
+  const root = document.getElementById("settings-col");
+  root.innerHTML = "";
+  const s = state.settings;
+
+  // --- Musical settings card ---
+  const c1 = el("div", "card");
+  c1.appendChild(el("h2", null, "Composition"));
+  const g1 = el("div", "settings-grid");
+
+  g1.appendChild(field("Key", selectFrom(NOTE_NAMES, s.key, v => { s.key = v; })));
+  g1.appendChild(field("Scale / Mode", selectFrom(
+    Object.keys(SCALES).map(k => ({ value: k, label: SCALES[k].label })), s.scale, v => { s.scale = v; })));
+  g1.appendChild(field("Time signature", selectFrom(TIME_SIGS, s.timeSig, v => { s.timeSig = v; })));
+  g1.appendChild(field("Tempo (BPM)", (() => {
+    const i = numberInput(s.tempo, 40, 280); i.addEventListener("change", () => { s.tempo = clampInt(i.value, 40, 280); }); return i;
+  })()));
+  g1.appendChild(field("Mood", selectFrom(moodOptions(), s.mood, v => { s.mood = v; }), true));
+  g1.appendChild(field("Pattern", selectFrom(
+    Object.keys(PATTERNS).map(k => ({ value: k, label: PATTERNS[k].label })), s.pattern, v => { s.pattern = v; })));
+  g1.appendChild(field("Chord progression", selectFrom(
+    Object.keys(PROGRESSIONS).map(k => ({ value: k, label: PROGRESSIONS[k].label })), s.progression, v => { s.progression = v; })));
+  g1.appendChild(field("Structure", selectFrom(
+    Object.keys(STRUCTURES).map(k => ({ value: k, label: STRUCTURES[k].label })), s.structure, v => { s.structure = v; })));
+  g1.appendChild(field("Length (bars)", (() => {
+    const i = numberInput(s.bars, 1, 64); i.addEventListener("change", () => { s.bars = clampInt(i.value, 1, 64); }); return i;
+  })()));
+  c1.appendChild(g1);
+  c1.appendChild(rangeField("Swing", s.swing, 0, 100, v => { s.swing = v; }, "%"));
+  root.appendChild(c1);
+
+  // --- Channels card ---
+  const c2 = el("div", "card");
+  c2.appendChild(el("h2", null, "Channels"));
+  CHANNELS.forEach(ch => c2.appendChild(channelCard(ch)));
+  root.appendChild(c2);
+
+  // --- Seed + generate card ---
+  const c3 = el("div", "card");
+  c3.appendChild(el("h2", null, "Generation"));
+  const seedRow = el("div", "row");
+  const seedField = el("div", "field");
+  seedField.appendChild(label("Seed"));
+  const seedInput = numberInput(s.seed, 0, 2147483647);
+  seedInput.style.width = "120px";
+  seedInput.addEventListener("change", () => { s.seed = clampInt(seedInput.value, 0, 2147483647); });
+  seedField.appendChild(seedInput);
+  const rndBtn = el("button", "tiny", "🎲 Random");
+  rndBtn.style.alignSelf = "flex-end";
+  rndBtn.addEventListener("click", () => { s.seed = Math.floor(Math.random() * 2147483647); seedInput.value = s.seed; });
+  seedRow.append(seedField, rndBtn);
+  c3.appendChild(seedRow);
+
+  const genBtn = el("button", "primary", "♫ Generate");
+  genBtn.style.marginTop = "12px";
+  genBtn.style.width = "100%";
+  genBtn.addEventListener("click", () => { audio.stop(); regenerate(); renderOutput(); });
+  c3.appendChild(genBtn);
+  c3.appendChild(el("p", "hint",
+    "Same settings + seed always produce the same tune — that is what makes a generation reproducible. Export saves only the settings."));
+  root.appendChild(c3);
+}
+
+function channelCard(ch) {
+  const s = state.settings.channels[ch.id];
+  const card = el("div", "chan-card");
+  const head = el("div", "chan-head");
+  const dot = el("span", "dot"); dot.style.background = ch.color;
+  head.appendChild(dot);
+  head.appendChild(el("span", "chan-name", ch.name));
+  head.appendChild(el("span", "chan-role", ch.role));
+  head.appendChild(toggle("On", s.on, v => { s.on = v; }));
+  card.appendChild(head);
+
+  const body = el("div", "chan-body");
+  if (ch.id === "pulse1" || ch.id === "pulse2") {
+    body.appendChild(field("Duty", selectFrom(DUTIES, s.duty, v => { s.duty = Number(v); })));
+    body.appendChild(field("Density", selectFrom(DENSITIES, s.density, v => { s.density = v; })));
+  } else if (ch.id === "wave") {
+    body.appendChild(field("Waveform", selectFrom(WAVES, s.wave, v => { s.wave = v; })));
+    body.appendChild(field("Density", selectFrom(DENSITIES, s.density, v => { s.density = v; })));
+  } else {
+    const drumOpts = [{ value: "auto", label: "Auto (from mood)" }].concat(DRUMS);
+    body.appendChild(field("Drum style", selectFrom(drumOpts, s.drums, v => { s.drums = v; })));
+  }
+  card.appendChild(body);
+  return card;
+}
+
+/* ============================================================
+   Output: transport + score views
+   ============================================================ */
+
+function renderOutput() {
+  const root = document.getElementById("output-col");
+  root.innerHTML = "";
+  if (!state.song) { root.appendChild(el("div", "empty-note", "Press Generate to improvise a tune.")); return; }
+
+  const card = el("div", "card");
+  card.id = "output-card";
+  card.appendChild(el("h2", null, "Tune"));
+  card.appendChild(transportEl());
+  card.appendChild(legendEl());
+
+  // View switch
+  const tabs = el("div", "view-tabs");
+  ["grid", "staff"].forEach(v => {
+    const b = el("button", "tab" + (state.view === v ? " active" : ""), v === "grid" ? "Piano roll" : "Staff");
+    b.addEventListener("click", () => { state.view = v; renderScore(); });
+    tabs.appendChild(b);
+  });
+  card.appendChild(tabs);
+
+  const holder = el("div");
+  holder.id = "score-holder";
+  card.appendChild(holder);
+  root.appendChild(card);
+  renderScore();
+}
+
+function renderTransport() {
+  const old = document.getElementById("transport-el");
+  if (old) old.replaceWith(transportEl());
+}
+
+function transportEl() {
+  const t = el("div", "transport");
+  t.id = "transport-el";
+  const play = el("button", "primary btn-play", audio.playing ? "■ Stop" : "▶ Play");
+  play.addEventListener("click", () => {
+    if (audio.playing) { audio.stop(); renderTransport(); }
+    else { audio.play(state.song, state.loop); renderTransport(); requestAnimationFrame(playheadLoop); }
+  });
+  t.appendChild(play);
+
+  const loopWrap = toggle("Loop", state.loop, v => { state.loop = v; if (audio.playing) { audio.stop(); renderTransport(); } });
+  t.appendChild(loopWrap);
+
+  const s = state.settings;
+  const now = el("span", "now");
+  now.innerHTML = `<b>${s.key} ${SCALES[s.scale].label}</b> &middot; ${s.timeSig} &middot; ${s.tempo} BPM &middot; ` +
+    `${state.song.totalBars} bars &middot; seed <b>${s.seed}</b>`;
+  t.appendChild(now);
+  return t;
+}
+
+function legendEl() {
+  const l = el("div", "legend");
+  CHANNELS.forEach(ch => {
+    const it = el("div", "item");
+    const sw = el("span", "sw"); sw.style.background = ch.color;
+    it.append(sw, document.createTextNode(`${ch.name} – ${ch.role}`));
+    l.appendChild(it);
+  });
+  return l;
+}
+
+function renderScore() {
+  const holder = document.getElementById("score-holder");
+  if (!holder) return;
+  holder.innerHTML = "";
+  // refresh active tab styling
+  document.querySelectorAll(".view-tabs .tab").forEach((b, i) => {
+    b.classList.toggle("active", (i === 0 && state.view === "grid") || (i === 1 && state.view === "staff"));
+  });
+  if (state.view === "grid") holder.appendChild(buildPianoRoll());
+  else holder.appendChild(buildStaff());
+}
+
+const LEFT_PAD = 52;
+
+function xForStep(step) { return LEFT_PAD + step * state.stepPx; }
+
+// ---- Piano roll -------------------------------------------------------------
+
+function buildPianoRoll() {
+  const song = state.song;
+  const px = state.stepPx;
+  const rowPx = 7;
+
+  // pitch range across pitched channels
+  let lo = 127, hi = 0;
+  ["pulse1", "pulse2", "wave"].forEach(id => song.tracks[id].forEach(n => { lo = Math.min(lo, n.midi); hi = Math.max(hi, n.midi); }));
+  if (lo > hi) { lo = 60; hi = 72; }
+  lo -= 1; hi += 1;
+  const pitchRows = hi - lo + 1;
+  const drumRows = 3;
+  const gap = 10;
+  const pitchH = pitchRows * rowPx;
+  const drumH = drumRows * rowPx;
+  const h = 16 + pitchH + gap + drumH + 16;
+  const w = LEFT_PAD + song.totalSteps * px + 16;
+
+  const wrap = el("div", "score-wrap");
+  const canvas = document.createElement("canvas");
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext("2d");
+
+  const yForMidi = (m) => 16 + (hi - m) * rowPx;
+  const drumTop = 16 + pitchH + gap;
+  const drumY = { kick: drumTop + 2 * rowPx, snare: drumTop + rowPx, hat: drumTop };
+
+  // background lanes
+  ctx.fillStyle = "#0c2016";
+  for (let m = lo; m <= hi; m++) {
+    if (NOTE_NAMES[m % 12].length === 1 && (m % 12 === 0)) { ctx.fillStyle = "#10341f"; ctx.fillRect(LEFT_PAD, yForMidi(m), w - LEFT_PAD - 8, rowPx); ctx.fillStyle = "#0c2016"; }
+  }
+  // bar / beat grid
+  for (let step = 0; step <= song.totalSteps; step += song.stepsPerBeat) {
+    const isBar = step % song.stepsPerBar === 0;
+    ctx.strokeStyle = isBar ? "#2c5840" : "#18301f";
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(xForStep(step) + 0.5, 12); ctx.lineTo(xForStep(step) + 0.5, drumTop + drumH); ctx.stroke();
+    if (isBar) {
+      ctx.fillStyle = "#6fa860"; ctx.font = "9px ui-monospace, monospace";
+      ctx.fillText(String(step / song.stepsPerBar + 1), xForStep(step) + 2, 10);
+    }
+  }
+  // C labels on the left
+  ctx.fillStyle = "#6fa860"; ctx.font = "9px ui-monospace, monospace";
+  for (let m = lo; m <= hi; m++) {
+    if (m % 12 === 0) ctx.fillText("C" + (Math.floor(m / 12) - 1), 4, yForMidi(m) + rowPx);
+  }
+  ctx.fillText("HAT", 4, drumY.hat + rowPx);
+  ctx.fillText("SNR", 4, drumY.snare + rowPx);
+  ctx.fillText("KCK", 4, drumY.kick + rowPx);
+
+  // notes
+  ["wave", "pulse2", "pulse1"].forEach(id => {
+    ctx.fillStyle = CHAN_COLOR[id];
+    song.tracks[id].forEach(n => {
+      const x = xForStep(n.step), y = yForMidi(n.midi);
+      ctx.fillRect(x + 0.5, y + 0.5, Math.max(2, n.dur * px - 1), rowPx - 1);
+    });
+  });
+  // drums
+  ctx.fillStyle = CHAN_COLOR.noise;
+  song.tracks.noise.forEach(n => {
+    const x = xForStep(n.step), y = drumY[n.drum];
+    ctx.fillRect(x + 0.5, y + 1, Math.max(3, px - 2), rowPx - 2);
+  });
+
+  wrap.appendChild(canvas);
+  attachOverlay(wrap, w, h);
+  return wrap;
+}
+
+// ---- Simplified staff -------------------------------------------------------
+
+// Map a MIDI note to a diatonic staff step (C-major spelling) + accidental flag.
+function midiToDiatonic(midi) {
+  const white = { 0: 0, 2: 1, 4: 2, 5: 3, 7: 4, 9: 5, 11: 6 };
+  const pc = midi % 12;
+  const oct = Math.floor(midi / 12) - 1;
+  let sharp = false, wpc = pc;
+  if (!(pc in white)) { wpc = pc - 1; sharp = true; }
+  return { dn: oct * 7 + white[wpc], sharp };
+}
+
+function buildStaff() {
+  const song = state.song;
+  const px = state.stepPx;
+  const lineGap = 8;
+  const systems = [
+    { id: "pulse1", clef: "treble", bottomDn: midiToDiatonic(64).dn },   // E4
+    { id: "pulse2", clef: "treble", bottomDn: midiToDiatonic(64).dn },
+    { id: "wave",   clef: "bass",   bottomDn: midiToDiatonic(43).dn },   // G2
+  ].filter(sys => song.settings.channels[sys.id].on && song.tracks[sys.id].length);
+
+  const sysH = lineGap * 4 + 46;          // staff + headroom for ledger lines/labels
+  const percH = 34;
+  const h = systems.length * sysH + percH + 16;
+  const w = LEFT_PAD + song.totalSteps * px + 16;
+
+  const wrap = el("div", "score-wrap");
+  const canvas = document.createElement("canvas");
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#0c2016"; ctx.fillRect(0, 0, w, h);
+
+  // bar lines spanning everything
+  for (let bar = 0; bar <= song.totalBars; bar++) {
+    const x = xForStep(bar * song.stepsPerBar);
+    ctx.strokeStyle = "#2c5840"; ctx.beginPath(); ctx.moveTo(x + 0.5, 8); ctx.lineTo(x + 0.5, h - 8); ctx.stroke();
+    if (bar < song.totalBars) { ctx.fillStyle = "#6fa860"; ctx.font = "9px ui-monospace,monospace"; ctx.fillText(String(bar + 1), x + 3, 8); }
+  }
+
+  systems.forEach((sys, i) => {
+    const top = 24 + i * sysH;
+    const bottomLineY = top + lineGap * 4;
+    // five staff lines
+    ctx.strokeStyle = "#2c5840"; ctx.lineWidth = 1;
+    for (let ln = 0; ln < 5; ln++) {
+      const y = bottomLineY - ln * lineGap;
+      ctx.beginPath(); ctx.moveTo(LEFT_PAD - 8, y + 0.5); ctx.lineTo(w - 8, y + 0.5); ctx.stroke();
+    }
+    // clef + channel label
+    ctx.fillStyle = CHAN_COLOR[sys.id]; ctx.font = "bold 18px serif";
+    ctx.fillText(sys.clef === "treble" ? "𝄞" : "𝄢", 6, bottomLineY - lineGap);
+    ctx.font = "8px ui-monospace,monospace"; ctx.fillStyle = "#6fa860";
+    ctx.fillText(CHANNELS.find(c => c.id === sys.id).name, 6, top - 6);
+
+    const yForDn = (dn) => bottomLineY - (dn - sys.bottomDn) * (lineGap / 2);
+    ctx.fillStyle = CHAN_COLOR[sys.id]; ctx.strokeStyle = CHAN_COLOR[sys.id];
+
+    song.tracks[sys.id].forEach(n => {
+      const { dn, sharp } = midiToDiatonic(n.midi);
+      const x = xForStep(n.step) + 3;
+      const y = yForDn(dn);
+      // ledger lines
+      ctx.strokeStyle = "#2c5840";
+      for (let d = dn; d > sys.bottomDn + 8; d -= 2) { const ly = yForDn(d); ctx.beginPath(); ctx.moveTo(x - 5, ly + 0.5); ctx.lineTo(x + 6, ly + 0.5); ctx.stroke(); }
+      for (let d = dn; d < sys.bottomDn; d += 2) { const ly = yForDn(d); ctx.beginPath(); ctx.moveTo(x - 5, ly + 0.5); ctx.lineTo(x + 6, ly + 0.5); ctx.stroke(); }
+      // note head (open for >= half note)
+      ctx.fillStyle = CHAN_COLOR[sys.id]; ctx.strokeStyle = CHAN_COLOR[sys.id];
+      const open = n.dur >= song.stepsPerBeat * 2;
+      ctx.beginPath(); ctx.ellipse(x, y, 3.4, 2.6, -0.3, 0, Math.PI * 2);
+      if (open) { ctx.lineWidth = 1.3; ctx.stroke(); } else { ctx.fill(); }
+      // stem
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x + 3, y); ctx.lineTo(x + 3, y - lineGap * 2.4); ctx.stroke();
+      // accidental
+      if (sharp) { ctx.font = "9px serif"; ctx.fillText("♯", x - 11, y + 3); }
+    });
+  });
+
+  // percussion single line
+  if (song.settings.channels.noise.on && song.tracks.noise.length) {
+    const py = systems.length * sysH + 24 + 6;
+    ctx.strokeStyle = "#2c5840"; ctx.beginPath(); ctx.moveTo(LEFT_PAD - 8, py + 0.5); ctx.lineTo(w - 8, py + 0.5); ctx.stroke();
+    ctx.fillStyle = "#6fa860"; ctx.font = "8px ui-monospace,monospace"; ctx.fillText("Drums", 6, py - 4);
+    ctx.fillStyle = CHAN_COLOR.noise; ctx.font = "9px ui-monospace,monospace";
+    const yOff = { kick: 8, snare: 0, hat: -8 };
+    song.tracks.noise.forEach(n => {
+      const x = xForStep(n.step) + 3;
+      ctx.fillText("×", x - 2, py + (yOff[n.drum] || 0) + 3);
+    });
+  }
+
+  wrap.appendChild(canvas);
+  attachOverlay(wrap, w, h);
+  return wrap;
+}
+
+// ---- Playhead overlay -------------------------------------------------------
+
+function attachOverlay(wrap, w, h) {
+  const ov = document.createElement("canvas");
+  ov.className = "score-overlay";
+  ov.width = w; ov.height = h;
+  wrap.appendChild(ov);
+  wrap._overlay = ov;
+}
+
+function playheadLoop() {
+  const pos = audio.positionSteps();
+  document.querySelectorAll(".score-wrap").forEach(wrap => {
+    const ov = wrap._overlay; if (!ov) return;
+    const ctx = ov.getContext("2d");
+    ctx.clearRect(0, 0, ov.width, ov.height);
+    if (pos == null) return;
+    const x = xForStep(pos);
+    ctx.strokeStyle = "#b8f25a"; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, ov.height); ctx.stroke();
+  });
+  if (audio.playing) {
+    // keep the playhead in view
+    const wrap = document.querySelector(".score-wrap");
+    if (wrap && pos != null) {
+      const x = xForStep(pos);
+      if (x < wrap.scrollLeft + 40 || x > wrap.scrollLeft + wrap.clientWidth - 40) wrap.scrollLeft = x - wrap.clientWidth / 2;
+    }
+    requestAnimationFrame(playheadLoop);
+  } else {
+    document.querySelectorAll(".score-overlay").forEach(ov => ov.getContext("2d").clearRect(0, 0, ov.width, ov.height));
+  }
+}
+
+/* ============================================================
+   MIDI export (Standard MIDI File, format 1)
+   ============================================================ */
+
+const MIDI_TPQ = 96;                 // ticks per quarter
+const STEP_TICKS = MIDI_TPQ / STEPS_PER_QUARTER;
+
+function vlq(n) {                     // variable-length quantity
+  const bytes = [n & 0x7f];
+  n >>= 7;
+  while (n > 0) { bytes.unshift((n & 0x7f) | 0x80); n >>= 7; }
+  return bytes;
+}
+
+function midiBytes() {
+  const song = state.song, s = song.settings;
+  const tracksOut = [];
+
+  // Tempo / meta track
+  const microPerQuarter = Math.round(60000000 / s.tempo);
+  const meta = [];
+  pushEvent(meta, 0, [0xFF, 0x51, 0x03, (microPerQuarter >> 16) & 0xff, (microPerQuarter >> 8) & 0xff, microPerQuarter & 0xff]);
+  pushEvent(meta, 0, [0xFF, 0x58, 0x04, song.beats, Math.log2(song.unit), 24, 8]);
+  endTrack(meta);
+  tracksOut.push(meta);
+
+  const programs = { pulse1: 80, pulse2: 81, wave: 38 };  // square lead, square, synth bass
+  const channelNo = { pulse1: 0, pulse2: 1, wave: 2 };
+  const DRUM_NOTE = { kick: 36, snare: 38, hat: 42 };
+
+  ["pulse1", "pulse2", "wave"].forEach(id => {
+    if (!s.channels[id].on || !song.tracks[id].length) return;
+    const ch = channelNo[id];
+    const ev = [];
+    const list = [];
+    pushEvent(ev, 0, [0xC0 | ch, programs[id]]);
+    song.tracks[id].forEach(n => {
+      const on = Math.round(n.t * STEP_TICKS);
+      const off = Math.round((n.t + n.dur) * STEP_TICKS);
+      list.push({ tick: on, data: [0x90 | ch, n.midi, n.vel] });
+      list.push({ tick: off, data: [0x80 | ch, n.midi, 0] });
+    });
+    writeSorted(ev, list);
+    endTrack(ev);
+    tracksOut.push(ev);
+  });
+
+  if (s.channels.noise.on && song.tracks.noise.length) {
+    const ev = [];
+    const list = [];
+    song.tracks.noise.forEach(n => {
+      const on = Math.round(n.t * STEP_TICKS);
+      list.push({ tick: on, data: [0x99, DRUM_NOTE[n.drum] || 38, n.vel] });
+      list.push({ tick: on + STEP_TICKS, data: [0x89, DRUM_NOTE[n.drum] || 38, 0] });
+    });
+    writeSorted(ev, list);
+    endTrack(ev);
+    tracksOut.push(ev);
+  }
+
+  // assemble
+  const header = [0x4D, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 1, (tracksOut.length >> 8) & 0xff, tracksOut.length & 0xff, (MIDI_TPQ >> 8) & 0xff, MIDI_TPQ & 0xff];
+  const out = [].concat(header);
+  tracksOut.forEach(tr => {
+    const len = tr.length;
+    out.push(0x4D, 0x54, 0x72, 0x6B, (len >> 24) & 0xff, (len >> 16) & 0xff, (len >> 8) & 0xff, len & 0xff);
+    for (const b of tr) out.push(b);
+  });
+  return new Uint8Array(out);
+
+  function pushEvent(track, delta, data) { for (const b of vlq(delta)) track.push(b); for (const b of data) track.push(b); }
+  function writeSorted(track, list) {
+    list.sort((a, b) => a.tick - b.tick);
+    let last = 0;
+    for (const e of list) { pushEvent(track, e.tick - last, e.data); last = e.tick; }
+  }
+  function endTrack(track) { pushEvent(track, 0, [0xFF, 0x2F, 0x00]); }
+}
+
+/* ============================================================
+   Import / export (settings are the source of truth)
+   ============================================================ */
+
+function safeName(ext) {
+  return (state.settings.name || "tune").replace(/[^a-z0-9_-]+/gi, "_") + ext;
+}
+
+function exportTune() {
+  const json = JSON.stringify(state.settings, null, 2);
+  openModal("Export tune", (modal) => {
+    modal.appendChild(el("p", "hint",
+      "The .json holds the settings + seed, which fully reproduce this tune on import. You can also export a .mid for use in a DAW."));
+    const btnRow = el("div", "row"); btnRow.style.margin = "10px 0";
+    const dlJson = el("button", "primary", "Download .json");
+    dlJson.addEventListener("click", () => downloadText(safeName(".gbmusic.json"), json, "application/json"));
+    const dlMidi = el("button", null, "Download .mid");
+    dlMidi.addEventListener("click", () => downloadBlob(safeName(".mid"), new Blob([midiBytes()], { type: "audio/midi" })));
+    const copy = el("button", null, "Copy JSON");
+    btnRow.append(dlJson, dlMidi, copy);
+    modal.appendChild(btnRow);
+
+    const ta = document.createElement("textarea");
+    ta.value = json; ta.readOnly = true;
+    ta.addEventListener("focus", () => ta.select());
+    modal.appendChild(ta);
+    copy.addEventListener("click", async () => {
+      const ok = await copyText(json);
+      copy.textContent = ok ? "Copied" : "Press Ctrl/Cmd+C";
+      if (ok) setTimeout(() => copy.textContent = "Copy JSON", 1200);
+    });
+  });
+}
+
+function loadTuneFrom(text) {
+  const parsed = JSON.parse(text);
+  if (parsed.kind !== "gbmusic" || !parsed.channels) throw new Error("Not a gbmusic file.");
+  // Backfill any fields newer than the file.
+  const def = makeDefaultSettings();
+  state.settings = Object.assign(def, parsed);
+  state.settings.channels = Object.assign(def.channels, parsed.channels || {});
+  audio.stop();
+  regenerate();
+  renderAll();
+  closeModal();
+}
+
+function importTune() {
+  openModal("Import tune", (modal) => {
+    modal.appendChild(el("p", "hint", "Open a .gbmusic.json file, or paste its contents below."));
+    const fileBtn = el("button", "primary", "Choose file");
+    fileBtn.style.margin = "10px 0";
+    const fileInput = document.createElement("input");
+    fileInput.type = "file"; fileInput.accept = "application/json,.json"; fileInput.style.display = "none";
+    fileInput.addEventListener("change", (e) => {
+      const file = e.target.files[0]; if (!file) return;
+      const r = new FileReader();
+      r.onload = () => { try { loadTuneFrom(r.result); } catch (err) { alert("Could not open: " + err.message); } };
+      r.readAsText(file);
+    });
+    fileBtn.addEventListener("click", () => fileInput.click());
+    modal.append(fileBtn, fileInput);
+
+    const ta = document.createElement("textarea");
+    ta.placeholder = "Paste tune JSON here...";
+    modal.appendChild(ta);
+    const loadBtn = el("button", null, "Load pasted JSON");
+    loadBtn.style.marginTop = "10px";
+    loadBtn.addEventListener("click", () => { try { loadTuneFrom(ta.value); } catch (err) { alert("Could not open: " + err.message); } });
+    modal.appendChild(loadBtn);
+  });
+}
+
+/* ============================================================
+   Wiring
+   ============================================================ */
+
+function renderAll() {
+  document.getElementById("tune-name").value = state.settings.name;
+  renderSettings();
+  renderOutput();
+}
+
+document.getElementById("tune-name").addEventListener("input", (e) => { state.settings.name = e.target.value; });
+document.getElementById("btn-new").addEventListener("click", () => {
+  if (!confirm("Start a new tune? Current settings are lost. Export first to keep them.")) return;
+  audio.stop();
+  state.settings = makeDefaultSettings();
+  regenerate();
+  renderAll();
+});
+document.getElementById("btn-export").addEventListener("click", exportTune);
+document.getElementById("btn-import").addEventListener("click", importTune);
+
+// Spacebar toggles playback (unless typing in a field).
+document.addEventListener("keydown", (e) => {
+  if (e.code !== "Space") return;
+  const tag = (document.activeElement && document.activeElement.tagName) || "";
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  e.preventDefault();
+  if (!state.song) return;
+  if (audio.playing) { audio.stop(); renderTransport(); }
+  else { audio.play(state.song, state.loop); renderTransport(); requestAnimationFrame(playheadLoop); }
+});
+
+regenerate();
+renderAll();

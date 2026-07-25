@@ -1,0 +1,2423 @@
+// @ts-nocheck
+import { el, label, spacer, inputText, selectFrom, numberInput, clampInt, toggle, openModal, closeModal, downloadBlob, downloadText, copyText } from "../lib/common.js";
+
+"use strict";
+
+/* ============================================================
+   Project model
+   ============================================================ */
+
+const FORMAT_VERSION = 1;
+const TILE_PX = 8;                    // a hardware tile is always 8x8 pixels
+const PIXELS_PER_TILE = TILE_PX * TILE_PX;
+const TILE_BUDGET = 256;              // OBJ tile slots in VRAM (shared with BG in practice)
+const WORKSPACE = 64;                 // metasprite canvas is 64x64 px, plenty for GB objects
+
+// The current OBJ height in pixels: 8 or 16 depending on the project mode.
+function objHeight() { return state.project.meta.spriteMode === "8x16" ? 16 : 8; }
+// Tiles per metasprite part: an 8x16 hardware sprite is two stacked 8x8 tiles.
+function tilesPerPart() { return state.project.meta.spriteMode === "8x16" ? 2 : 1; }
+
+// seedDemo controls whether the slime placeholder is added. It's handy on first
+// page load so every panel has something to explore, but "New project" passes
+// false to start from a clean, empty project.
+function makeDefaultProject(seedDemo = true) {
+  const project = {
+    formatVersion: FORMAT_VERSION,
+    meta: { name: "Untitled Sprites", target: "GBC, DMG-compatible", spriteMode: "8x8" },
+    nextId: 1,
+    palettes: [],
+    // DMG OBP0/OBP1 registers as shade mappings: for pixel values 1..3, which
+    // of the four DMG shades (0 = lightest .. 3 = darkest) the hardware shows.
+    // Value 0 is always transparent for OBJs, so bits 0-1 of the register are
+    // ignored and only three entries are needed. Each part picks one register.
+    dmg: { obp0: [1, 2, 3], obp1: [0, 2, 3] },
+    tiles: [],
+    metasprites: [],
+    animations: [],
+  };
+  const id = () => project.nextId++;
+
+  // Sprite palettes: value 0 is transparent on hardware, so only 1..3 show.
+  project.palettes.push(
+    { id: id(), name: "OBJ Green",  colors: ["#e0f8d0", "#88c070", "#346856", "#081820"] },
+    { id: id(), name: "Grayscale",  colors: ["#ffffff", "#aaaaaa", "#555555", "#000000"] },
+  );
+  const pal = project.palettes[0].id;
+
+  if (seedDemo) seedDemoContent(project, pal, id);
+
+  project._displayPaletteId = pal;
+  return project;
+}
+
+// Turn strings of "0".."3" into a flat pixel array so demo art reads as a picture.
+function rows(...r) { return r.join("").split("").map(Number); }
+
+// Slice a 16x16 picture (16 strings of 16 chars) into 4 tiles: TL, TR, BL, BR.
+function slice16(rows16) {
+  const grid = rows16.map(line => line.split("").map(Number));
+  const tileAt = (tx, ty) => {
+    const pixels = [];
+    for (let y = 0; y < TILE_PX; y++)
+      for (let x = 0; x < TILE_PX; x++)
+        pixels.push(grid[ty * TILE_PX + y][tx * TILE_PX + x]);
+    return pixels;
+  };
+  return [tileAt(0, 0), tileAt(1, 0), tileAt(0, 1), tileAt(1, 1)];
+}
+
+// Fill a fresh project with a small slime + bounce animation so every panel is
+// explorable immediately. Ordinary authored content, nothing special.
+function seedDemoContent(project, pal, id) {
+  const slimePixels = slice16([
+    "0000000000000000",
+    "0000033333300000",
+    "0003311111133000",
+    "0031111111111300",
+    "0311111111111130",
+    "0311311111311130",
+    "3111311111311113",
+    "3111111111111113",
+    "3111111111111113",
+    "3111112222111113",
+    "3111121111211113",
+    "3111111111111213",
+    "0311111111112130",
+    "0031122222211300",
+    "0003322222233000",
+    "0000033333300000",
+  ]);
+  const tileIds = slimePixels.map(pixels => {
+    const tile = { id: id(), pixels };
+    project.tiles.push(tile);
+    return tile.id;
+  });
+
+  // Parts are TL, TR, BL, BR of the 16x16 slime, centered in the workspace.
+  const part = (tileId, x, y) =>
+    ({ tiles: [tileId], x, y, hFlip: false, vFlip: false, paletteId: pal, obp: 0 });
+  const cx = (WORKSPACE - 16) / 2;
+  const msIdle = {
+    id: id(), name: "slime",
+    parts: [
+      part(tileIds[0], cx, cx), part(tileIds[1], cx + 8, cx),
+      part(tileIds[2], cx, cx + 8), part(tileIds[3], cx + 8, cx + 8),
+    ],
+  };
+  // Squash frame: same tiles, top half pushed down 2px so the body compresses.
+  const msSquash = {
+    id: id(), name: "slime squash",
+    parts: [
+      part(tileIds[0], cx, cx + 2), part(tileIds[1], cx + 8, cx + 2),
+      part(tileIds[2], cx, cx + 8), part(tileIds[3], cx + 8, cx + 8),
+    ],
+  };
+  project.metasprites.push(msIdle, msSquash);
+
+  project.animations.push({
+    id: id(), name: "bounce", loop: true,
+    frames: [
+      { metaspriteId: msIdle.id, duration: 20 },
+      { metaspriteId: msSquash.id, duration: 12 },
+    ],
+  });
+}
+
+/* ============================================================
+   App state (selections and tool, kept separate from the saved project)
+   ============================================================ */
+
+const state = {
+  project: makeDefaultProject(),
+  activePanel: "tiles",
+  displayPaletteId: null,
+  dmgPreview: false,       // render parts through their OBP mapping (DMG look)
+
+  selectedTileId: null,
+  ink: 3,                  // current pixel value to paint (0..3; 0 = transparent)
+  tool: "pencil",          // pencil | fill | eyedropper | select
+  selection: null,         // { x, y, w, h } marquee in tile-pixel coords, or null
+
+  selectedMetaspriteId: null,
+  msSort: "id",            // metasprite list order: "id" (array/C order) or "name"
+  selectedPartIndex: -1,
+  selectedPartCell: 0,     // 0 = top tile, 1 = bottom tile (8x16 mode only)
+  snapToGrid: false,       // snap part dragging to the 8px grid
+
+  selectedAnimationId: null,
+  selectedFrameIndex: -1,
+  animPlay: true,
+
+  onionSkin: true,         // ghost neighboring animation frames in the composer
+  drawMode: null,          // { animId, frameIndex, bitmap, onion, grid } while drawing on a frame
+};
+
+function syncSelectionsToProject() {
+  // Point selections at valid objects after a New or Import.
+  const p = state.project;
+  state.displayPaletteId = p._displayPaletteId ?? (p.palettes[0] && p.palettes[0].id);
+  state.selectedTileId = p.tiles[0] ? p.tiles[0].id : null;
+  state.selectedMetaspriteId = p.metasprites[0] ? p.metasprites[0].id : null;
+  state.selectedPartIndex = -1;
+  state.selectedPartCell = 0;
+  state.selectedAnimationId = p.animations[0] ? p.animations[0].id : null;
+  state.selectedFrameIndex = -1;
+}
+
+/* ============================================================
+   Undo / redo history (full JSON snapshots, same scheme as the world editor)
+   ============================================================ */
+
+const history = { undo: [], redo: [], limit: 60 };
+
+function currentJson() {
+  state.project._displayPaletteId = state.displayPaletteId;
+  return JSON.stringify(state.project);
+}
+
+// Capture the pre-edit state. Call this immediately before a mutation.
+function snapshot() {
+  history.undo.push(currentJson());
+  if (history.undo.length > history.limit) history.undo.shift();
+  history.redo.length = 0;
+  updateHistoryButtons();
+}
+
+function restoreFrom(json) {
+  state.project = JSON.parse(json);
+  state.displayPaletteId = state.project._displayPaletteId
+    ?? (state.project.palettes[0] && state.project.palettes[0].id);
+  validateSelections();
+}
+
+function undo() {
+  if (!history.undo.length) return;
+  history.redo.push(currentJson());
+  restoreFrom(history.undo.pop());
+  render();
+}
+function redo() {
+  if (!history.redo.length) return;
+  history.undo.push(currentJson());
+  restoreFrom(history.redo.pop());
+  render();
+}
+
+function resetHistory() {
+  history.undo.length = 0;
+  history.redo.length = 0;
+  updateHistoryButtons();
+}
+
+function updateHistoryButtons() {
+  const u = document.getElementById("btn-undo");
+  const r = document.getElementById("btn-redo");
+  if (u) u.disabled = history.undo.length === 0;
+  if (r) r.disabled = history.redo.length === 0;
+}
+
+// After an undo/redo, keep selections pointing at things that still exist.
+function validateSelections() {
+  const p = state.project;
+  const has = (arr, id) => arr.some(x => x.id === id);
+  if (!has(p.palettes, state.displayPaletteId)) state.displayPaletteId = p.palettes[0] && p.palettes[0].id;
+  if (!has(p.tiles, state.selectedTileId)) state.selectedTileId = p.tiles[0] ? p.tiles[0].id : null;
+  if (!has(p.metasprites, state.selectedMetaspriteId)) state.selectedMetaspriteId = p.metasprites[0] ? p.metasprites[0].id : null;
+  const ms = selectedMetasprite();
+  if (!ms || state.selectedPartIndex >= ms.parts.length) state.selectedPartIndex = -1;
+  if (!has(p.animations, state.selectedAnimationId)) state.selectedAnimationId = p.animations[0] ? p.animations[0].id : null;
+  const anim = selectedAnimation();
+  if (!anim || state.selectedFrameIndex >= anim.frames.length) state.selectedFrameIndex = -1;
+  if (state.drawMode) {
+    const dmAnim = animationById(state.drawMode.animId);
+    if (!dmAnim || state.drawMode.frameIndex >= dmAnim.frames.length) state.drawMode = null;
+  }
+}
+
+/* ============================================================
+   Lookups
+   ============================================================ */
+
+const genId = () => state.project.nextId++;
+const paletteById = (id) => state.project.palettes.find(p => p.id === id) || null;
+const colorsForPalette = (id) => {
+  const pal = paletteById(id);
+  return pal ? pal.colors : ["#000000", "#000000", "#000000", "#000000"];
+};
+// DMG OBP registers. A mapping is [shade for value 1, value 2, value 3];
+// value 0 is always transparent so the register's low two bits are ignored.
+const OBP_NAMES = ["OBP0", "OBP1"];
+const obpMapping = (reg) => (reg === 1 ? state.project.dmg.obp1 : state.project.dmg.obp0);
+// The actual register byte to write to 0xFF48/0xFF49 on hardware.
+const obpByte = (map) => (map[2] << 6) | (map[1] << 4) | (map[0] << 2);
+const hex2 = (b) => "0x" + b.toString(16).toUpperCase().padStart(2, "0");
+
+// Colors a part draws with. In DMG preview the part's palette acts as the
+// shade ramp (index 0 = lightest .. 3 = darkest) and the part's OBP register
+// remaps pixel values 1..3 into that ramp, exactly as OBP0/OBP1 do on
+// hardware. Value 0 stays transparent either way (drawSpritePixels skips it).
+function colorsForPart(part) {
+  const ramp = colorsForPalette(part.paletteId);
+  if (!state.dmgPreview) return ramp;
+  const map = obpMapping(part.obp ?? 0);
+  return [ramp[0], ramp[map[0]], ramp[map[1]], ramp[map[2]]];
+}
+
+const tileById = (id) => state.project.tiles.find(t => t.id === id) || null;
+const metaspriteById = (id) => state.project.metasprites.find(m => m.id === id) || null;
+const animationById = (id) => state.project.animations.find(a => a.id === id) || null;
+const selectedMetasprite = () => metaspriteById(state.selectedMetaspriteId);
+const selectedAnimation = () => animationById(state.selectedAnimationId);
+
+// How many metasprite part cells reference a given tile (guards tile deletion).
+function countTileReferences(tileId) {
+  return state.project.metasprites.reduce((n, ms) =>
+    n + ms.parts.reduce((k, part) => k + part.tiles.filter(t => t === tileId).length, 0), 0);
+}
+
+// How many animation frames reference a given metasprite (guards deletion).
+function countMetaspriteReferences(msId) {
+  return state.project.animations.reduce((n, anim) =>
+    n + anim.frames.filter(f => f.metaspriteId === msId).length, 0);
+}
+
+/* ============================================================
+   Drawing helpers
+   ============================================================ */
+
+// Checkerboard = transparency (OBJ color 0). Same shades the world editor uses
+// for empty cells, so "nothing here" reads consistently across the suite.
+function drawChecker(ctx, w, h, ox = 0, oy = 0, step = 8) {
+  for (let y = 0; y < Math.ceil(h / step); y++) {
+    for (let x = 0; x < Math.ceil(w / step); x++) {
+      ctx.fillStyle = (x + y) % 2 === 0 ? "#15281c" : "#0c1c12";
+      ctx.fillRect(ox + x * step, oy + y * step,
+        Math.min(step, w - x * step), Math.min(step, h - y * step));
+    }
+  }
+}
+
+// Paint an 8x8 pixel array, skipping value 0 (transparent) and applying the
+// hardware H/V flips. One filled rect per pixel keeps it crisp at any scale.
+function drawSpritePixels(ctx, pixels, colors, scale, ox = 0, oy = 0, hFlip = false, vFlip = false) {
+  for (let y = 0; y < TILE_PX; y++) {
+    for (let x = 0; x < TILE_PX; x++) {
+      const v = pixels[y * TILE_PX + x];
+      if (v === 0) continue;
+      const dx = hFlip ? TILE_PX - 1 - x : x;
+      const dy = vFlip ? TILE_PX - 1 - y : y;
+      ctx.fillStyle = colors[v];
+      ctx.fillRect(ox + dx * scale, oy + dy * scale, scale, scale);
+    }
+  }
+}
+
+// Draw one metasprite part (one hardware sprite). In 8x16 mode a vertical flip
+// also swaps the two 8x8 halves, exactly as the hardware does.
+function drawPart(ctx, part, scale, ox = 0, oy = 0) {
+  const colors = colorsForPart(part);
+  const n = part.tiles.length;
+  for (let i = 0; i < n; i++) {
+    const tile = part.tiles[i] != null ? tileById(part.tiles[i]) : null;
+    if (!tile) continue;
+    const slot = part.vFlip ? n - 1 - i : i;
+    drawSpritePixels(ctx, tile.pixels, colors, scale,
+      ox + part.x * scale, oy + (part.y + slot * TILE_PX) * scale,
+      part.hFlip, part.vFlip);
+  }
+}
+
+// Draw a whole metasprite. Parts are drawn last-to-first so parts[0] ends up
+// on top, matching OAM priority (lower index wins).
+function drawMetasprite(ctx, ms, scale, ox = 0, oy = 0) {
+  for (let i = ms.parts.length - 1; i >= 0; i--) {
+    drawPart(ctx, ms.parts[i], scale, ox, oy);
+  }
+}
+
+// Thumbnail of a metasprite over a transparency checker (44px lib cells etc).
+function paintMetaspriteThumb(canvas, ms) {
+  const ctx = canvas.getContext("2d");
+  const scale = canvas.width / WORKSPACE;
+  drawChecker(ctx, canvas.width, canvas.height, 0, 0, canvas.width / 8);
+  if (ms) drawMetasprite(ctx, ms, scale);
+}
+
+// Thumbnail of a single tile over the checker.
+function paintTileThumb(canvas, tile, colors) {
+  const ctx = canvas.getContext("2d");
+  drawChecker(ctx, canvas.width, canvas.height, 0, 0, canvas.width / 4);
+  drawSpritePixels(ctx, tile.pixels, colors, canvas.width / TILE_PX);
+}
+
+/* ============================================================
+   Rasterizing, onion skins, and the frame-drawing bake
+   ============================================================ */
+
+// Flip an 8x8 pixel array. Involution: applying the same flags twice returns
+// the original, so the same function converts drawn <-> stored pixels.
+function flipPixels(pixels, hFlip, vFlip) {
+  if (!hFlip && !vFlip) return Array.from(pixels);
+  const out = new Array(PIXELS_PER_TILE);
+  for (let y = 0; y < TILE_PX; y++) {
+    for (let x = 0; x < TILE_PX; x++) {
+      const sx = hFlip ? TILE_PX - 1 - x : x;
+      const sy = vFlip ? TILE_PX - 1 - y : y;
+      out[y * TILE_PX + x] = pixels[sy * TILE_PX + sx];
+    }
+  }
+  return out;
+}
+
+// Flatten a metasprite into a WORKSPACE^2 bitmap of pixel values 0..3.
+// Painted bottom-to-top so parts[0] wins overlaps, like the renderer.
+function rasterizeMetasprite(ms) {
+  const bmp = new Uint8Array(WORKSPACE * WORKSPACE);
+  for (let i = ms.parts.length - 1; i >= 0; i--) {
+    const part = ms.parts[i];
+    const n = part.tiles.length;
+    for (let t = 0; t < n; t++) {
+      const tile = part.tiles[t] != null ? tileById(part.tiles[t]) : null;
+      if (!tile) continue;
+      const slot = part.vFlip ? n - 1 - t : t;
+      for (let y = 0; y < TILE_PX; y++) {
+        for (let x = 0; x < TILE_PX; x++) {
+          const v = tile.pixels[y * TILE_PX + x];
+          if (v === 0) continue;
+          const px = part.x + (part.hFlip ? TILE_PX - 1 - x : x);
+          const py = part.y + slot * TILE_PX + (part.vFlip ? TILE_PX - 1 - y : y);
+          if (px >= 0 && px < WORKSPACE && py >= 0 && py < WORKSPACE) bmp[py * WORKSPACE + px] = v;
+        }
+      }
+    }
+  }
+  return bmp;
+}
+
+// Paint a bitmap as a flat-color silhouette: the onion-skin ghost.
+function drawGhostBitmap(ctx, bmp, scale, color, alpha) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  for (let y = 0; y < WORKSPACE; y++) {
+    for (let x = 0; x < WORKSPACE; x++) {
+      if (bmp[y * WORKSPACE + x]) ctx.fillRect(x * scale, y * scale, scale, scale);
+    }
+  }
+  ctx.restore();
+}
+
+// Which metasprites come before/after this one in an animation? Prefers the
+// selected animation, falls back to the first one that uses it.
+function animationNeighborsFor(msId) {
+  const anims = state.project.animations;
+  let anim = selectedAnimation();
+  if (!anim || !anim.frames.some(f => f.metaspriteId === msId)) {
+    anim = anims.find(a => a.frames.some(f => f.metaspriteId === msId)) || null;
+  }
+  if (!anim || anim.frames.length < 2) return null;
+  const i = anim.frames.findIndex(f => f.metaspriteId === msId);
+  const n = anim.frames.length;
+  const pi = anim.loop ? (i - 1 + n) % n : i - 1;
+  const ni = anim.loop ? (i + 1) % n : i + 1;
+  return {
+    prev: pi >= 0 && pi !== i ? metaspriteById(anim.frames[pi].metaspriteId) : null,
+    next: ni < n && ni !== i ? metaspriteById(anim.frames[ni].metaspriteId) : null,
+  };
+}
+
+/* ---- bake: compile a drawn bitmap into parts + tiles ----
+
+   The drawing is free-form; structure is recovered by slicing it into part
+   cells. For each candidate grid alignment (up to 8x16 offsets around the
+   painted bounding box) every non-empty cell is matched against existing
+   tiles under all four flip combinations - a mirrored match reuses the tile
+   with flip flags, which is free on OBJs. New tiles are deduped the same
+   way. The alignment producing the fewest new tiles (then fewest parts)
+   wins. Nothing is mutated here; bakeDrawing() applies the plan. */
+
+function planBake(bitmap) {
+  const p = state.project;
+  const cellH = objHeight();
+  const n = tilesPerPart();
+
+  let x0 = WORKSPACE, y0 = WORKSPACE, x1 = -1, y1 = -1;
+  for (let y = 0; y < WORKSPACE; y++) {
+    for (let x = 0; x < WORKSPACE; x++) {
+      if (bitmap[y * WORKSPACE + x]) {
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+      }
+    }
+  }
+  if (x1 < 0) return { parts: [], newTiles: new Map(), reused: 0 };
+
+  const existingByKey = new Map();
+  p.tiles.forEach(t => {
+    const k = t.pixels.join(",");
+    if (!existingByKey.has(k)) existingByKey.set(k, t.id);
+  });
+
+  const tileAt = (cx, cy) => {
+    const out = new Array(PIXELS_PER_TILE).fill(0);
+    for (let y = 0; y < TILE_PX; y++) {
+      for (let x = 0; x < TILE_PX; x++) {
+        const px = cx + x, py = cy + y;
+        if (px < WORKSPACE && py < WORKSPACE) out[y * TILE_PX + x] = bitmap[py * WORKSPACE + px];
+      }
+    }
+    return out;
+  };
+
+  const COMBOS = [[false, false], [true, false], [false, true], [true, true]];
+
+  const tryGrid = (gx, gy) => {
+    const newTiles = new Map();
+    const parts = [];
+    let reused = 0;
+    for (let cy = gy; cy <= y1; cy += cellH) {
+      for (let cx = gx; cx <= x1; cx += TILE_PX) {
+        const drawn = [];
+        let empty = true;
+        for (let s = 0; s < n; s++) {
+          const t = tileAt(cx, cy + s * TILE_PX);
+          if (t.some(v => v)) empty = false;
+          drawn.push(t);
+        }
+        if (empty) continue;
+
+        // Pick the flip combo that needs the fewest brand-new tiles.
+        let best = null;
+        for (const [h, v] of COMBOS) {
+          const stored = [];
+          let cost = 0;
+          for (let s = 0; s < n; s++) {
+            const src = drawn[v ? n - 1 - s : s];
+            if (!src.some(q => q)) { stored.push(null); continue; }
+            const t = flipPixels(src, h, v);
+            const k = t.join(",");
+            stored.push({ t, k });
+            if (!existingByKey.has(k) && !newTiles.has(k)) cost++;
+          }
+          if (!best || cost < best.cost) best = { h, v, stored, cost };
+          if (best.cost === 0) break;
+        }
+
+        const slots = best.stored.map(s => {
+          if (!s) return null;
+          if (existingByKey.has(s.k)) { reused++; return { existing: existingByKey.get(s.k) }; }
+          if (!newTiles.has(s.k)) newTiles.set(s.k, s.t);
+          return { key: s.k };
+        });
+        parts.push({ x: cx, y: cy, hFlip: best.h, vFlip: best.v, slots });
+      }
+    }
+    return { parts, newTiles, reused };
+  };
+
+  // Try grid anchors around the bounding box; keep the cheapest plan.
+  let best = null;
+  for (let sy = 0; sy < cellH; sy++) {
+    const gy = y0 - sy;
+    if (gy < 0 || gy + Math.ceil((y1 + 1 - gy) / cellH) * cellH > WORKSPACE) continue;
+    for (let sx = 0; sx < TILE_PX; sx++) {
+      const gx = x0 - sx;
+      if (gx < 0 || gx + Math.ceil((x1 + 1 - gx) / TILE_PX) * TILE_PX > WORKSPACE) continue;
+      const plan = tryGrid(gx, gy);
+      const score = plan.newTiles.size * 1000 + plan.parts.length;
+      if (!best || score < best.score) { best = plan; best.score = score; }
+    }
+  }
+  return best || tryGrid(0, 0);   // (0,0) always covers; unreachable in practice
+}
+
+// Apply a bake plan to the frame being drawn on. Copy-on-write throughout:
+// tiles are only ever added (never edited), and the metasprite is rebuilt in
+// place only when no other animation frame displays it.
+function bakeDrawing() {
+  const dm = state.drawMode;
+  const anim = animationById(dm.animId);
+  if (!anim) { state.drawMode = null; render(); return; }
+  const frame = anim.frames[dm.frameIndex];
+  const plan = planBake(dm.bitmap);
+  snapshot();
+  const p = state.project;
+
+  const idByKey = new Map();
+  plan.newTiles.forEach((pixels, key) => {
+    const tile = { id: genId(), pixels: Array.from(pixels) };
+    p.tiles.push(tile);
+    idByKey.set(key, tile.id);
+  });
+
+  const pal = state.displayPaletteId;
+  const parts = plan.parts.map(part => ({
+    tiles: part.slots.map(s => s == null ? null : (s.existing ?? idByKey.get(s.key))),
+    x: part.x, y: part.y,
+    hFlip: part.hFlip, vFlip: part.vFlip,
+    paletteId: pal, obp: 0,
+  }));
+
+  const src = metaspriteById(frame.metaspriteId);
+  if (src && countMetaspriteReferences(src.id) <= 1) {
+    src.parts = parts;
+  } else {
+    const ms = { id: genId(), name: (src ? src.name : "drawn") + " (frame " + (dm.frameIndex + 1) + ")", parts };
+    p.metasprites.push(ms);
+    frame.metaspriteId = ms.id;
+    state.selectedMetaspriteId = ms.id;
+  }
+  state.drawMode = null;
+  render();
+}
+
+/* ============================================================
+   Rendering: top bar and tabs
+   ============================================================ */
+
+function renderTopBar() {
+  document.getElementById("project-name").value = state.project.meta.name;
+  document.getElementById("sprite-mode").value = state.project.meta.spriteMode;
+  updateHistoryButtons();
+}
+
+function renderTabs() {
+  document.querySelectorAll(".tab").forEach(tab => {
+    tab.classList.toggle("active", tab.dataset.panel === state.activePanel);
+  });
+}
+
+function render() {
+  stopAnimPreview();
+  renderTopBar();
+  renderTabs();
+  const panel = document.getElementById("panel");
+  panel.innerHTML = "";
+  if (state.activePanel === "palettes") renderPalettesPanel(panel);
+  else if (state.activePanel === "tiles") renderTilesPanel(panel);
+  else if (state.activePanel === "metasprites") renderMetaspritesPanel(panel);
+  else if (state.activePanel === "animations") renderAnimationsPanel(panel);
+}
+
+/* ============================================================
+   Panel: Palettes
+   ============================================================ */
+
+function renderPalettesPanel(root) {
+  const card = el("div", "card");
+  card.appendChild(el("h2", null, "Sprite palettes"));
+  card.appendChild(el("p", "hint",
+    "Value 0 is always transparent for sprites, so only values 1-3 are visible. " +
+    "On GBC each hardware sprite picks one of eight OBJ palettes; here every " +
+    "metasprite part picks one of these. On DMG the part instead picks OBP0 or " +
+    "OBP1 (below), which remap values 1-3 into this palette's four shades."));
+
+  state.project.palettes.forEach(pal => {
+    const row = el("div", "row");
+    row.style.marginTop = "12px";
+
+    const preview = document.createElement("canvas");
+    preview.width = 4 * 18; preview.height = 18;
+    const pctx = preview.getContext("2d");
+    const paintPreview = () => {
+      // Slot 0 is drawn as the transparency checker instead of its color.
+      drawChecker(pctx, 18, 18, 0, 0, 6);
+      pal.colors.forEach((c, i) => {
+        if (i === 0) return;
+        pctx.fillStyle = c; pctx.fillRect(i * 18, 0, 18, 18);
+      });
+    };
+    paintPreview();
+    preview.style.border = "1px solid var(--border)";
+
+    const nameInput = inputText(pal.name, 140);
+    nameInput.addEventListener("input", () => { pal.name = nameInput.value; });
+
+    const colorInputs = pal.colors.map((c, i) => {
+      const ci = document.createElement("input");
+      ci.type = "color"; ci.value = c;
+      ci.title = i === 0 ? "Pixel value 0 (transparent on hardware)" : "Pixel value " + i;
+      ci.addEventListener("input", () => { pal.colors[i] = ci.value; paintPreview(); });
+      return ci;
+    });
+
+    const useBtn = el("button", "tiny", state.displayPaletteId === pal.id ? "Editing with this" : "Edit with this");
+    useBtn.addEventListener("click", () => {
+      state.displayPaletteId = pal.id;
+      state.project._displayPaletteId = pal.id;
+      render();
+    });
+
+    const delBtn = el("button", "tiny danger", "Delete");
+    delBtn.addEventListener("click", () => {
+      if (state.project.palettes.length <= 1) { alert("Keep at least one palette."); return; }
+      snapshot();
+      state.project.palettes = state.project.palettes.filter(p => p.id !== pal.id);
+      // Repoint any part that referenced the removed palette.
+      const fallback = state.project.palettes[0].id;
+      state.project.metasprites.forEach(ms => ms.parts.forEach(part => {
+        if (!paletteById(part.paletteId)) part.paletteId = fallback;
+      }));
+      if (state.displayPaletteId === pal.id) state.displayPaletteId = fallback;
+      render();
+    });
+
+    row.append(preview, nameInput, ...colorInputs, useBtn, delBtn);
+    card.appendChild(row);
+  });
+
+  const addBtn = el("button", null, "+ Add palette");
+  addBtn.style.marginTop = "16px";
+  addBtn.addEventListener("click", () => {
+    snapshot();
+    state.project.palettes.push({
+      id: genId(), name: "Palette " + (state.project.palettes.length + 1),
+      colors: ["#e0f8d0", "#88c070", "#346856", "#081820"],
+    });
+    render();
+  });
+  card.appendChild(addBtn);
+
+  root.appendChild(card);
+  root.appendChild(buildDmgRegistersCard());
+}
+
+// Card for the two DMG OBJ palette registers. Each register maps pixel
+// values 1..3 to one of the four DMG shades; the hex byte shown is exactly
+// what the game writes to 0xFF48 (OBP0) / 0xFF49 (OBP1).
+function buildDmgRegistersCard() {
+  const card = el("div", "card");
+  card.appendChild(el("h2", null, "DMG registers (OBP0 / OBP1)"));
+  card.appendChild(el("p", "hint",
+    "On DMG each hardware sprite uses one of these two registers. They remap " +
+    "pixel values 1-3 to any of the four shades, so a sprite can show the " +
+    "lightest shade even though value 0 itself is always transparent. " +
+    "Changing a value switches on “DMG preview” (top bar) so the Metasprites " +
+    "and Animations panels show the result; note OBP0 starts as the identity " +
+    "mapping, which looks the same as the preview being off. Each metasprite " +
+    "part picks its register with the “DMG reg” field (Metasprites panel, " +
+    "click a part to select it). Previews below use the “Editing with this” " +
+    "palette as the shade ramp."));
+
+  const ramp = colorsForPalette(state.displayPaletteId);
+
+  [0, 1].forEach(reg => {
+    const map = obpMapping(reg);
+    const row = el("div", "row");
+    row.style.marginTop = "12px";
+    row.appendChild(el("span", "cell-label", OBP_NAMES[reg]));
+
+    const preview = document.createElement("canvas");
+    preview.width = 4 * 18; preview.height = 18;
+    preview.style.border = "1px solid var(--border)";
+    const pctx = preview.getContext("2d");
+    const byteLabel = el("span", "cell-label", "");
+    const paintPreview = () => {
+      drawChecker(pctx, 18, 18, 0, 0, 6);  // value 0 = transparent, always
+      map.forEach((shade, i) => {
+        pctx.fillStyle = ramp[shade];
+        pctx.fillRect((i + 1) * 18, 0, 18, 18);
+      });
+      byteLabel.textContent = "= " + hex2(obpByte(map)) +
+        " → " + (reg === 0 ? "0xFF48" : "0xFF49");
+    };
+
+    const selects = map.map((shade, i) => {
+      const field = el("div", "field");
+      field.appendChild(label("Value " + (i + 1)));
+      field.appendChild(selectFrom(
+        SHADE_LABELS.map((l, s) => ({ value: s, label: s + " (" + l + ")" })),
+        shade,
+        v => {
+          snapshot(); map[i] = Number(v);
+          // Seeing the mapping in action is the whole point, so editing it
+          // switches the top-bar DMG preview on (the checkbox stays in sync).
+          state.dmgPreview = true;
+          document.getElementById("dmg-preview").checked = true;
+          paintPreview(); render();
+        }));
+      return field;
+    });
+
+    paintPreview();
+
+    // Bulk switch: point every part of every metasprite at this register.
+    const allBtn = el("button", "tiny", "Use for all parts");
+    allBtn.title = "Set every metasprite part to " + OBP_NAMES[reg];
+    allBtn.addEventListener("click", () => {
+      snapshot();
+      state.project.metasprites.forEach(ms => ms.parts.forEach(part => { part.obp = reg; }));
+      state.dmgPreview = true;
+      document.getElementById("dmg-preview").checked = true;
+      render();
+    });
+
+    row.append(preview, ...selects, byteLabel, allBtn);
+    card.appendChild(row);
+  });
+
+  return card;
+}
+
+/* ============================================================
+   Panel: Tiles
+   ============================================================ */
+
+const EDIT_SCALE = 40;  // pixels per tile-pixel in the big editing canvas
+
+function renderTilesPanel(root) {
+  const p = state.project;
+  const cols = el("div", "cols");
+
+  /* ---- left: tile library ---- */
+  const lib = el("div", "card col-library");
+  lib.appendChild(el("h2", null, "Sprite tiles"));
+
+  const used = p.tiles.length;
+  const budget = el("p", used > TILE_BUDGET ? "budget-over" : "budget-ok",
+    used + " / " + TILE_BUDGET + " tiles" + (used > TILE_BUDGET ? "  (over VRAM budget)" : ""));
+  lib.appendChild(budget);
+
+  const colors = colorsForPalette(state.displayPaletteId);
+  const grid = el("div", "lib-grid");
+  p.tiles.forEach((tile, index) => {
+    const cell = document.createElement("button");
+    cell.className = "lib-cell" + (tile.id === state.selectedTileId ? " selected" : "");
+    const c = document.createElement("canvas");
+    c.width = 38; c.height = 38;
+    paintTileThumb(c, tile, colors);
+    cell.appendChild(c);
+    cell.appendChild(el("span", "idx", String(index)));
+    cell.addEventListener("click", () => { state.selectedTileId = tile.id; state.selection = null; render(); });
+    grid.appendChild(cell);
+  });
+  lib.appendChild(grid);
+
+  const libBtns = el("div", "row");
+  libBtns.style.marginTop = "12px";
+  const addBtn = el("button", null, "+ New tile");
+  addBtn.addEventListener("click", () => {
+    snapshot();
+    const t = { id: genId(), pixels: new Array(PIXELS_PER_TILE).fill(0) };
+    p.tiles.push(t); state.selectedTileId = t.id; render();
+  });
+  const dupBtn = el("button", null, "Duplicate");
+  dupBtn.addEventListener("click", () => {
+    const src = tileById(state.selectedTileId);
+    if (!src) return;
+    snapshot();
+    const t = { id: genId(), pixels: [...src.pixels] };
+    p.tiles.push(t); state.selectedTileId = t.id; render();
+  });
+  const delBtn = el("button", "danger", "Delete");
+  delBtn.addEventListener("click", () => {
+    const tile = tileById(state.selectedTileId);
+    if (!tile) return;
+    if (p.tiles.length <= 1) { alert("Keep at least one tile."); return; }
+    const refs = countTileReferences(tile.id);
+    if (refs > 0) { alert("This tile is used by " + refs + " metasprite part(s). Remove it there first."); return; }
+    snapshot();
+    p.tiles = p.tiles.filter(t => t.id !== tile.id);
+    state.selectedTileId = p.tiles[0].id; render();
+  });
+  // Baking drawn frames orphans replaced tiles by design (copy-on-write);
+  // this sweeps up anything no metasprite references anymore.
+  const cleanBtn = el("button", null, "Delete unused");
+  cleanBtn.title = "Remove all tiles that no metasprite part references";
+  cleanBtn.addEventListener("click", () => {
+    const unused = p.tiles.filter(t => countTileReferences(t.id) === 0);
+    if (unused.length === 0) { alert("No unused tiles."); return; }
+    if (!confirm("Delete " + unused.length + " unused tile(s)?")) return;
+    snapshot();
+    p.tiles = p.tiles.filter(t => countTileReferences(t.id) > 0);
+    if (p.tiles.length === 0) {
+      p.tiles.push({ id: genId(), pixels: new Array(PIXELS_PER_TILE).fill(0) });
+    }
+    if (!p.tiles.some(t => t.id === state.selectedTileId)) state.selectedTileId = p.tiles[0].id;
+    render();
+  });
+  libBtns.append(addBtn, dupBtn, delBtn, cleanBtn);
+  lib.appendChild(libBtns);
+
+  // PNG round-trip: import a sprite sheet as tiles (and optionally metasprites),
+  // export all tiles as a transparent sheet that re-imports losslessly.
+  const pngBtns = el("div", "row");
+  pngBtns.style.marginTop = "8px";
+  const importPngBtn = el("button", null, "Import PNG sheet");
+  importPngBtn.addEventListener("click", importSheetPng);
+  const exportPngBtn = el("button", null, "Export PNG");
+  exportPngBtn.addEventListener("click", exportTilesToPng);
+  pngBtns.append(importPngBtn, exportPngBtn);
+  lib.appendChild(pngBtns);
+
+  cols.appendChild(lib);
+
+  /* ---- right: pixel editor ---- */
+  const ed = el("div", "card col-editor");
+  ed.appendChild(el("h2", null, "Tile editor"));
+
+  const tile = tileById(state.selectedTileId);
+  if (!tile) { ed.appendChild(el("p", "hint", "Select a tile.")); cols.appendChild(ed); root.appendChild(cols); return; }
+
+  // Ink picker: swatch 0 shows the transparency checker instead of a color.
+  const inkRow = el("div", "row");
+  const inks = el("div", "ink-swatches");
+  for (let v = 0; v < 4; v++) {
+    const sw = el("button", "ink-swatch" + (state.ink === v ? " active" : ""));
+    if (v === 0) {
+      sw.style.backgroundImage =
+        "repeating-conic-gradient(#15281c 0% 25%, #0c1c12 0% 50%)";
+      sw.title = "Pixel value 0 (transparent)";
+    } else {
+      sw.style.background = colors[v];
+      sw.title = "Pixel value " + v;
+    }
+    sw.appendChild(el("span", "val", v === 0 ? "T" : String(v)));
+    sw.addEventListener("click", () => { state.ink = v; render(); });
+    inks.appendChild(sw);
+  }
+  inkRow.appendChild(el("span", "cell-label", "Ink"));
+  inkRow.appendChild(inks);
+  ed.appendChild(inkRow);
+
+  // Tools.
+  const toolRow = el("div", "row");
+  toolRow.style.marginTop = "10px";
+  ["pencil", "fill", "eyedropper", "select"].forEach(name => {
+    const b = el("button", "tool-btn" + (state.tool === name ? " active" : ""), name);
+    b.addEventListener("click", () => {
+      state.tool = name;
+      if (name !== "select") state.selection = null;  // marquee only makes sense with the select tool
+      render();
+    });
+    toolRow.appendChild(b);
+  });
+  const clearBtn = el("button", "danger", "Clear");
+  clearBtn.addEventListener("click", () => { snapshot(); tile.pixels.fill(0); render(); });
+  toolRow.appendChild(clearBtn);
+  ed.appendChild(toolRow);
+
+  ed.appendChild(spacer(8));
+  ed.appendChild(el("span", "hint", "Value 0 (checker) is transparent on hardware."));
+  ed.appendChild(el("span", "hint", "Select: drag a box, then drag inside it to move those pixels (source is left transparent)."));
+
+  // The drawing surface. Internal size matches CSS size so offsetX maps directly.
+  const canvas = document.createElement("canvas");
+  canvas.className = "editor-canvas";
+  canvas.width = TILE_PX * EDIT_SCALE;
+  canvas.height = TILE_PX * EDIT_SCALE;
+  canvas.style.marginTop = "8px";
+  const ctx = canvas.getContext("2d");
+
+  // Draw the editor from a pixel array (defaults to the live tile, but a move
+  // preview passes its own composite so it doesn't touch the tile until drop).
+  const repaintEditor = (pixels = tile.pixels) => {
+    drawChecker(ctx, canvas.width, canvas.height, 0, 0, EDIT_SCALE);
+    drawSpritePixels(ctx, pixels, colors, EDIT_SCALE);
+    // Pixel grid for orientation.
+    ctx.strokeStyle = "rgba(224,248,208,0.12)";
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= TILE_PX; i++) {
+      const q = i * EDIT_SCALE + 0.5;
+      ctx.beginPath(); ctx.moveTo(q, 0); ctx.lineTo(q, canvas.height); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, q); ctx.lineTo(canvas.width, q); ctx.stroke();
+    }
+    // Marquee outline for the active selection (drawn on top of everything).
+    if (state.selection) {
+      const s = state.selection;
+      ctx.save();
+      ctx.setLineDash([6, 4]);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#0f380f";
+      ctx.strokeRect(s.x * EDIT_SCALE + 1, s.y * EDIT_SCALE + 1, s.w * EDIT_SCALE - 2, s.h * EDIT_SCALE - 2);
+      ctx.strokeStyle = "#e0f8d0";
+      ctx.lineDashOffset = 4;
+      ctx.strokeRect(s.x * EDIT_SCALE + 1, s.y * EDIT_SCALE + 1, s.w * EDIT_SCALE - 2, s.h * EDIT_SCALE - 2);
+      ctx.restore();
+    }
+  };
+  repaintEditor();
+
+  const pixelAt = (ev) => {
+    const x = Math.floor(ev.offsetX / EDIT_SCALE);
+    const y = Math.floor(ev.offsetY / EDIT_SCALE);
+    if (x < 0 || x > 7 || y < 0 || y > 7) return null;
+    return { x, y };
+  };
+  // Like pixelAt but clamped to the tile, so a marquee or move drag that leaves
+  // the canvas resolves to the nearest edge cell instead of returning null.
+  const clampedPixelAt = (ev) => ({
+    x: Math.min(7, Math.max(0, Math.floor(ev.offsetX / EDIT_SCALE))),
+    y: Math.min(7, Math.max(0, Math.floor(ev.offsetY / EDIT_SCALE))),
+  });
+
+  const applyAt = (ev) => {
+    const pos = pixelAt(ev);
+    if (!pos) return;
+    if (state.tool === "eyedropper") {
+      state.ink = tile.pixels[pos.y * TILE_PX + pos.x];
+      render();
+      return;
+    }
+    if (state.tool === "fill") {
+      floodFill(tile.pixels, pos.x, pos.y, state.ink);
+    } else {
+      tile.pixels[pos.y * TILE_PX + pos.x] = state.ink;
+    }
+    repaintEditor();
+  };
+
+  /* ---- select-and-move interaction ----
+     Two gestures share the pointer handlers while the select tool is active:
+     dragging on empty space rubber-bands a new marquee; dragging that starts
+     inside the current selection lifts those pixels (leaving transparency
+     behind) and moves them, committing on release as a single undo step. */
+  let marquee = null;   // { ax, ay } anchor cell while rubber-banding a selection
+  let move = null;      // lifted-pixels bookkeeping while dragging a selection
+
+  const insideSelection = (pos) => {
+    const s = state.selection;
+    return s && pos.x >= s.x && pos.x < s.x + s.w && pos.y >= s.y && pos.y < s.y + s.h;
+  };
+
+  // The composite shown mid-move: base tile with the source region cleared,
+  // then the lifted buffer stamped at its current offset (clipped to the tile).
+  const moveComposite = () => {
+    const out = move.base.slice();
+    const dx = move.curX - move.startX, dy = move.curY - move.startY;
+    for (let yy = 0; yy < move.h; yy++) {
+      for (let xx = 0; xx < move.w; xx++) {
+        const v = move.buffer[yy * move.w + xx];
+        if (v === 0) continue;  // transparent pixels never overwrite the base
+        const tx = move.srcX + xx + dx, ty = move.srcY + yy + dy;
+        if (tx < 0 || tx > 7 || ty < 0 || ty > 7) continue;  // clip to the tile
+        out[ty * TILE_PX + tx] = v;
+      }
+    }
+    return out;
+  };
+
+  const beginMove = (pos) => {
+    const s = state.selection;
+    snapshot();  // one undo step covers the whole move
+    const base = tile.pixels.slice();
+    const buffer = new Array(s.w * s.h).fill(0);
+    for (let yy = 0; yy < s.h; yy++) {
+      for (let xx = 0; xx < s.w; xx++) {
+        const idx = (s.y + yy) * TILE_PX + (s.x + xx);
+        buffer[yy * s.w + xx] = base[idx];
+        base[idx] = 0;  // clearing the source is what makes it a move, not a copy
+      }
+    }
+    move = { base, buffer, w: s.w, h: s.h, srcX: s.x, srcY: s.y,
+             startX: pos.x, startY: pos.y, curX: pos.x, curY: pos.y };
+  };
+
+  let painting = false;
+  canvas.addEventListener("pointerdown", (ev) => {
+    if (state.tool === "select") {
+      const pos = clampedPixelAt(ev);
+      if (insideSelection(pos)) {
+        beginMove(pos);
+      } else {
+        marquee = { ax: pos.x, ay: pos.y };
+        state.selection = { x: pos.x, y: pos.y, w: 1, h: 1 };
+        repaintEditor();
+      }
+      return;
+    }
+    if (state.tool !== "eyedropper") snapshot();  // whole stroke = one undo step
+    painting = state.tool === "pencil";
+    applyAt(ev);
+  });
+
+  canvas.addEventListener("pointermove", (ev) => {
+    if (state.tool === "select") {
+      if (move) {
+        const pos = clampedPixelAt(ev);
+        move.curX = pos.x; move.curY = pos.y;
+        repaintEditor(moveComposite());
+      } else if (marquee) {
+        const pos = clampedPixelAt(ev);
+        const x0 = Math.min(marquee.ax, pos.x), x1 = Math.max(marquee.ax, pos.x);
+        const y0 = Math.min(marquee.ay, pos.y), y1 = Math.max(marquee.ay, pos.y);
+        state.selection = { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+        repaintEditor();
+      }
+      return;
+    }
+    if (painting) applyAt(ev);
+  });
+
+  const stop = () => {
+    if (move) {
+      const composite = moveComposite();
+      for (let i = 0; i < composite.length; i++) tile.pixels[i] = composite[i];
+      // Let the marquee follow the pixels, clipped so it stays on the tile.
+      const nx = Math.min(7, Math.max(0, move.srcX + (move.curX - move.startX)));
+      const ny = Math.min(7, Math.max(0, move.srcY + (move.curY - move.startY)));
+      state.selection = { x: nx, y: ny, w: Math.min(move.w, TILE_PX - nx), h: Math.min(move.h, TILE_PX - ny) };
+      move = null;
+      refreshTileThumb(tile);
+      repaintEditor();
+      return;
+    }
+    if (marquee) { marquee = null; return; }
+    if (painting) { painting = false; refreshTileThumb(tile); }
+  };
+  canvas.addEventListener("pointerup", stop);
+  canvas.addEventListener("pointerleave", stop);
+  ed.appendChild(canvas);
+
+  cols.appendChild(ed);
+  root.appendChild(cols);
+}
+
+// Redraw a single library thumbnail without rebuilding the whole panel, so
+// dragging in the editor stays smooth.
+function refreshTileThumb(tile) {
+  const index = state.project.tiles.indexOf(tile);
+  const cell = document.querySelectorAll(".lib-grid .lib-cell")[index];
+  if (!cell) return;
+  paintTileThumb(cell.querySelector("canvas"), tile, colorsForPalette(state.displayPaletteId));
+}
+
+function floodFill(pixels, x, y, newInk) {
+  const target = pixels[y * TILE_PX + x];
+  if (target === newInk) return;
+  const stack = [[x, y]];
+  while (stack.length) {
+    const [cx, cy] = stack.pop();
+    if (cx < 0 || cx > 7 || cy < 0 || cy > 7) continue;
+    if (pixels[cy * TILE_PX + cx] !== target) continue;
+    pixels[cy * TILE_PX + cx] = newInk;
+    stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
+  }
+}
+
+/* ============================================================
+   PNG import / export
+   ============================================================
+
+   Import slices a PNG into 8x8 tiles. Transparency: if the image has an alpha
+   channel, transparent pixels become value 0 and opaque pixels quantize into
+   values 1..3 by luminance. If it is fully opaque, an import dialog asks which
+   of the four quantized shades should mean transparent; the remaining shades
+   remap to 1..3 keeping their lightness order.
+
+   The dialog can also slice the sheet into metasprites: one metasprite per
+   frame cell of a chosen size, skipping fully transparent tiles and reusing
+   duplicate tiles instead of adding them twice.
+
+   Export writes all tiles as a 16-column sheet where value 0 is transparent
+   and values 1..3 are grays at the importer's bucket midpoints, so an
+   exported sheet re-imports losslessly. */
+
+const PNG_VISIBLE_SHADES = [null, "#aaaaaa", "#555555", "#000000"];
+const SHADE_LABELS = ["lightest", "light", "dark", "darkest"];
+
+// Luminance (0..255) -> value 0..3 (lightest = 0), same buckets as the world editor.
+function shade4(lum) { return 3 - Math.min(3, Math.floor(lum / 64)); }
+// Luminance -> value 1..3 for pixels that are known to be visible.
+function shade3(lum) { return 3 - Math.min(2, Math.floor(lum / 85)); }
+
+function importSheetPng() {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "image/png,image/*";
+  input.addEventListener("change", () => {
+    const file = input.files[0];
+    if (!file) return;
+    const img = new Image();
+    img.onload = () => {
+      try { openImportDialog(img, file.name); }
+      catch (err) { alert("Could not import image: " + err.message); }
+      URL.revokeObjectURL(img.src);
+    };
+    img.onerror = () => alert("Could not read that file as an image.");
+    img.src = URL.createObjectURL(file);
+  });
+  input.click();
+}
+
+function openImportDialog(img, fileName) {
+  if (img.width < TILE_PX || img.height < TILE_PX) { alert("Image is smaller than one 8x8 tile."); return; }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = img.width; canvas.height = img.height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0);
+  const data = ctx.getImageData(0, 0, img.width, img.height).data;
+
+  let hasAlpha = false;
+  for (let i = 3; i < data.length; i += 4) {
+    if (data[i] < 128) { hasAlpha = true; break; }
+  }
+
+  openModal("Import sprite sheet", (modal) => {
+    modal.appendChild(el("p", "hint",
+      fileName + " — " + img.width + "×" + img.height + " px, " +
+      Math.floor(img.width / TILE_PX) * Math.floor(img.height / TILE_PX) + " full 8×8 tiles."));
+
+    // Transparency handling.
+    let transparentShade = 0;
+    if (hasAlpha) {
+      modal.appendChild(el("p", "hint",
+        "Transparency: PNG alpha → value 0; opaque pixels quantize to values 1-3."));
+    } else {
+      const trow = el("div", "row");
+      trow.appendChild(el("span", "cell-label", "Transparent shade"));
+      trow.appendChild(selectFrom(
+        SHADE_LABELS.map((l, i) => ({ value: i, label: l })),
+        0, v => { transparentShade = Number(v); }));
+      modal.appendChild(trow);
+      modal.appendChild(el("p", "hint",
+        "No alpha channel found. Pixels quantize to four shades; the chosen shade " +
+        "becomes transparent (value 0), the rest remap to values 1-3."));
+    }
+
+    // Optional metasprite slicing.
+    modal.appendChild(spacer(10));
+    let makeMs = false;
+    const frameW = numberInput(16, TILE_PX, WORKSPACE);
+    const frameH = numberInput(16, TILE_PX, WORKSPACE);
+    modal.appendChild(toggle("Also slice into metasprites (one per frame cell)", false, v => { makeMs = v; }));
+    const frow = el("div", "row");
+    frow.style.marginTop = "8px";
+    const fw = el("div", "field"); fw.append(label("Frame width (px)"), frameW);
+    const fh = el("div", "field"); fh.append(label("Frame height (px)"), frameH);
+    frow.append(fw, fh);
+    modal.appendChild(frow);
+
+    modal.appendChild(spacer(12));
+    const go = el("button", "primary", "Import");
+    go.addEventListener("click", () => {
+      const opts = {
+        hasAlpha, transparentShade,
+        makeMetasprites: makeMs,
+        frameW: clampInt(frameW.value, TILE_PX, WORKSPACE),
+        frameH: clampInt(frameH.value, TILE_PX, WORKSPACE),
+        baseName: fileName.replace(/\.[^.]*$/, ""),
+      };
+      if (opts.frameW % TILE_PX || opts.frameH % TILE_PX) {
+        alert("Frame size must be a multiple of 8."); return;
+      }
+      closeModal();
+      runSheetImport(img.width, img.height, data, opts);
+    });
+    modal.appendChild(go);
+  });
+}
+
+// Read one 8x8 tile's quantized pixels out of the sheet's RGBA data.
+function readSheetTile(data, imgW, px, py, opts) {
+  const pixels = new Array(PIXELS_PER_TILE);
+  for (let y = 0; y < TILE_PX; y++) {
+    for (let x = 0; x < TILE_PX; x++) {
+      const i = ((py + y) * imgW + (px + x)) * 4;
+      const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      let v;
+      if (opts.hasAlpha) {
+        v = data[i + 3] < 128 ? 0 : shade3(lum);
+      } else {
+        v = shade4(lum);
+        if (v === opts.transparentShade) v = 0;
+        // Remap the remaining shades to 1..3 preserving lightness order.
+        else v = [0, 1, 2, 3].filter(s => s !== opts.transparentShade).indexOf(v) + 1;
+      }
+      pixels[y * TILE_PX + x] = v;
+    }
+  }
+  return pixels;
+}
+
+function runSheetImport(imgW, imgH, data, opts) {
+  const p = state.project;
+  snapshot();
+
+  // Dedupe against existing tiles; reuse ids so metasprite slicing can share art.
+  const idByKey = new Map(p.tiles.map(t => [t.pixels.join(""), t.id]));
+  let added = 0, reused = 0, skippedEmpty = 0;
+
+  const internTile = (pixels) => {
+    const key = pixels.join("");
+    if (idByKey.has(key)) { reused++; return idByKey.get(key); }
+    const tile = { id: genId(), pixels };
+    p.tiles.push(tile);
+    idByKey.set(key, tile.id);
+    added++;
+    return tile.id;
+  };
+  const isEmpty = (pixels) => pixels.every(v => v === 0);
+
+  if (!opts.makeMetasprites) {
+    // Plain tile import: left-to-right, top-to-bottom, skipping blanks and dupes.
+    for (let ty = 0; ty + TILE_PX <= imgH; ty += TILE_PX) {
+      for (let tx = 0; tx + TILE_PX <= imgW; tx += TILE_PX) {
+        const pixels = readSheetTile(data, imgW, tx, ty, opts);
+        if (isEmpty(pixels)) { skippedEmpty++; continue; }
+        internTile(pixels);
+      }
+    }
+  } else {
+    // Frame slicing: one metasprite per frame cell, parts per 8xH sprite cell.
+    const cellH = objHeight();
+    if (opts.frameH % cellH) {
+      alert("Frame height must be a multiple of " + cellH + " in " + p.meta.spriteMode + " mode.");
+      history.undo.pop();  // nothing was mutated; drop the snapshot we just took
+      updateHistoryButtons();
+      return;
+    }
+    const pal = state.displayPaletteId;
+    const ox = Math.floor((WORKSPACE - opts.frameW) / 2);
+    const oy = Math.floor((WORKSPACE - opts.frameH) / 2);
+    let frameNo = 0;
+    for (let fy = 0; fy + opts.frameH <= imgH; fy += opts.frameH) {
+      for (let fx = 0; fx + opts.frameW <= imgW; fx += opts.frameW) {
+        const parts = [];
+        for (let cy = 0; cy < opts.frameH; cy += cellH) {
+          for (let cx = 0; cx < opts.frameW; cx += TILE_PX) {
+            const tiles = [];
+            let allEmpty = true;
+            for (let sub = 0; sub < cellH; sub += TILE_PX) {
+              const pixels = readSheetTile(data, imgW, fx + cx, fy + cy + sub, opts);
+              if (isEmpty(pixels)) { skippedEmpty++; tiles.push(null); continue; }
+              allEmpty = false;
+              tiles.push(internTile(pixels));
+            }
+            if (allEmpty) continue;
+            parts.push({ tiles, x: ox + cx, y: oy + cy, hFlip: false, vFlip: false, paletteId: pal, obp: 0 });
+          }
+        }
+        frameNo++;
+        if (parts.length) {
+          p.metasprites.push({ id: genId(), name: opts.baseName + " " + frameNo, parts });
+        }
+      }
+    }
+  }
+
+  if (added === 0 && !opts.makeMetasprites) {
+    alert("No new tiles (" + reused + " duplicate(s), " + skippedEmpty + " blank tile(s) skipped).");
+    history.undo.pop();  // nothing was mutated; drop the snapshot
+    updateHistoryButtons();
+    return;
+  }
+  if (p.tiles.length > TILE_BUDGET) {
+    alert("Warning: tileset now holds " + p.tiles.length + " tiles, over the " + TILE_BUDGET + " VRAM budget.");
+  }
+  state.selectedTileId = p.tiles[p.tiles.length - 1].id;
+  if (opts.makeMetasprites && p.metasprites.length) {
+    state.selectedMetaspriteId = p.metasprites[p.metasprites.length - 1].id;
+  }
+  render();
+  alert("Imported " + added + " tile(s)" +
+    (reused ? ", reused " + reused + " duplicate(s)" : "") +
+    (skippedEmpty ? ", skipped " + skippedEmpty + " blank(s)" : "") + ".");
+}
+
+function exportTilesToPng() {
+  const tiles = state.project.tiles;
+  const cols = 16;
+  const rowsCount = Math.max(1, Math.ceil(tiles.length / cols));
+  const canvas = document.createElement("canvas");
+  canvas.width = cols * TILE_PX;
+  canvas.height = rowsCount * TILE_PX;
+  const ctx = canvas.getContext("2d");
+  // Value 0 stays unpainted, so the exported PNG is transparent there.
+  tiles.forEach((tile, index) => {
+    drawSpritePixels(ctx, tile.pixels, PNG_VISIBLE_SHADES, 1,
+      (index % cols) * TILE_PX, Math.floor(index / cols) * TILE_PX);
+  });
+  const name = safeBaseName() + "-tiles.png";
+  canvas.toBlob(blob => {
+    if (blob) downloadBlob(name, blob);
+    else alert("Could not encode the PNG.");
+  }, "image/png");
+}
+
+// Render one metasprite to a PNG, cropped to its parts' bounding box.
+function exportMetaspriteToPng(ms) {
+  const trimmed = trimmedMetaspriteCanvas(ms);
+  if (!trimmed) { alert("This metasprite has no parts."); return; }
+  const name = (ms.name || "metasprite").replace(/[^a-z0-9_-]+/gi, "_") + ".png";
+  trimmed.canvas.toBlob(blob => {
+    if (blob) downloadBlob(name, blob);
+    else alert("Could not encode the PNG.");
+  }, "image/png");
+}
+
+// Render one metasprite to a canvas cropped to its parts' bounding box.
+// Cropping to part cells (not painted pixels) keeps transparent padding that
+// is part of the sprite, so e.g. four 16x16 metasprites export as 64x16.
+// Returns { canvas, w, h } or null when the metasprite has no parts.
+function trimmedMetaspriteCanvas(ms) {
+  if (ms.parts.length === 0) return null;
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const part of ms.parts) {
+    const partH = part.tiles.length * TILE_PX;  // 8 in 8x8 mode, 16 in 8x16
+    if (part.x < minX) minX = part.x;
+    if (part.y < minY) minY = part.y;
+    if (part.x + TILE_PX > maxX) maxX = part.x + TILE_PX;
+    if (part.y + partH > maxY) maxY = part.y + partH;
+  }
+
+  const out = document.createElement("canvas");
+  out.width = maxX - minX; out.height = maxY - minY;
+  drawMetasprite(out.getContext("2d"), ms, 1, -minX, -minY);
+  return { canvas: out, w: out.width, h: out.height };
+}
+
+// Export every metasprite into one PNG, laid out left to right and top-aligned,
+// each cropped to its parts' bounding box (transparent padding inside part
+// cells is kept), placed flush so the sheet re-imports cleanly.
+function exportAllMetaspritesToPng() {
+  const metasprites = state.project.metasprites;
+  if (metasprites.length === 0) { alert("There are no metasprites to export."); return; }
+
+  const GAP = 0;  // no gap: sprites sit flush so the sheet re-imports cleanly
+  const trimmed = metasprites.map(trimmedMetaspriteCanvas).filter(Boolean);
+  if (trimmed.length === 0) { alert("No metasprite has any parts."); return; }
+
+  const sheetW = trimmed.reduce((sum, t) => sum + t.w, 0) + GAP * (trimmed.length - 1);
+  const sheetH = trimmed.reduce((max, t) => Math.max(max, t.h), 0);
+
+  const sheet = document.createElement("canvas");
+  sheet.width = sheetW; sheet.height = sheetH;
+  const ctx = sheet.getContext("2d");
+  let x = 0;
+  for (const t of trimmed) {
+    ctx.drawImage(t.canvas, x, 0);  // top-aligned
+    x += t.w + GAP;
+  }
+
+  const name = safeBaseName() + "-metasprites.png";
+  sheet.toBlob(blob => {
+    if (blob) downloadBlob(name, blob);
+    else alert("Could not encode the PNG.");
+  }, "image/png");
+}
+
+/* ============================================================
+   Panel: Metasprites
+   ============================================================ */
+
+const COMPOSE_SCALE = 6;  // pixels per sprite-pixel in the composer canvas
+
+// Switching the global OBJ size converts every part so no art is lost:
+// to 8x16 each part gains an empty bottom slot; back to 8x8 a filled bottom
+// slot splits off into its own part 8px lower.
+function convertSpriteMode(newMode) {
+  const p = state.project;
+  if (p.meta.spriteMode === newMode) return;
+  snapshot();
+  p.metasprites.forEach(ms => {
+    if (newMode === "8x16") {
+      ms.parts.forEach(part => { part.tiles = [part.tiles[0] ?? null, null]; });
+    } else {
+      const split = [];
+      ms.parts.forEach(part => {
+        const [top, bottom] = [part.tiles[0] ?? null, part.tiles[1] ?? null];
+        part.tiles = [top];
+        if (bottom != null) {
+          split.push({ ...part, tiles: [bottom], y: part.y + TILE_PX });
+        }
+      });
+      ms.parts.push(...split);
+    }
+  });
+  p.meta.spriteMode = newMode;
+  state.selectedPartCell = 0;
+  render();
+}
+
+function renderMetaspritesPanel(root) {
+  const p = state.project;
+  const cols = el("div", "cols");
+
+  /* ---- left: metasprite list ---- */
+  const lib = el("div", "card col-library");
+  lib.appendChild(el("h2", null, "Metasprites"));
+
+  if (p.metasprites.length === 0) {
+    lib.appendChild(el("p", "hint", "No metasprites yet. Create one to start arranging hardware sprites."));
+  }
+
+  // Sort control. This only changes the display order; the project array order
+  // is left untouched so it still drives the C metasprite index at export time.
+  if (p.metasprites.length > 1) {
+    const sortRow = el("div", "row");
+    sortRow.style.marginBottom = "8px";
+    sortRow.appendChild(el("span", "cell-label", "Sort by"));
+    sortRow.appendChild(selectFrom(
+      [{ value: "id", label: "# (ID order)" }, { value: "name", label: "Name" }],
+      state.msSort,
+      v => { state.msSort = v; render(); }));
+    lib.appendChild(sortRow);
+  }
+
+  const list = el("div", "ms-list");
+  // Display order follows the chosen sort, but each row keeps its true array
+  // index for the "#" label so the exported C order stays visible.
+  const displayOrder = p.metasprites.map((ms, index) => ({ ms, index }));
+  if (state.msSort === "name") {
+    displayOrder.sort((a, b) =>
+      a.ms.name.localeCompare(b.ms.name, undefined, { numeric: true, sensitivity: "base" }));
+  }
+  displayOrder.forEach(({ ms, index }) => {
+    const row = el("div", "ms-row" + (ms.id === state.selectedMetaspriteId ? " selected" : ""));
+    const c = document.createElement("canvas");
+    c.width = 40; c.height = 40;
+    paintMetaspriteThumb(c, ms);
+    c.style.border = "1px solid var(--border)";
+    const name = el("span", "ms-name", "#" + index + "  " + ms.name);
+    const meta = el("span", "ms-meta", ms.parts.length + " part" + (ms.parts.length === 1 ? "" : "s"));
+    row.append(c, name, meta);
+    row.addEventListener("click", () => {
+      state.selectedMetaspriteId = ms.id; state.selectedPartIndex = -1; render();
+    });
+    list.appendChild(row);
+  });
+  lib.appendChild(list);
+
+  const libBtns = el("div", "row");
+  libBtns.style.marginTop = "12px";
+  const addBtn = el("button", null, "+ New metasprite");
+  addBtn.addEventListener("click", () => {
+    snapshot();
+    const ms = { id: genId(), name: "metasprite", parts: [] };
+    p.metasprites.push(ms);
+    state.selectedMetaspriteId = ms.id; state.selectedPartIndex = -1; render();
+  });
+  const dupBtn = el("button", null, "Duplicate");
+  dupBtn.addEventListener("click", () => {
+    const src = selectedMetasprite();
+    if (!src) return;
+    snapshot();
+    const ms = {
+      id: genId(), name: src.name + " copy",
+      parts: src.parts.map(part => ({ ...part, tiles: [...part.tiles] })),
+    };
+    p.metasprites.push(ms);
+    state.selectedMetaspriteId = ms.id; state.selectedPartIndex = -1; render();
+  });
+  const delBtn = el("button", "danger", "Delete");
+  delBtn.addEventListener("click", () => {
+    const ms = selectedMetasprite();
+    if (!ms) return;
+    const refs = countMetaspriteReferences(ms.id);
+    if (refs > 0) { alert("This metasprite is used by " + refs + " animation frame(s). Remove it there first."); return; }
+    snapshot();
+    p.metasprites = p.metasprites.filter(m => m.id !== ms.id);
+    state.selectedMetaspriteId = p.metasprites[0] ? p.metasprites[0].id : null;
+    state.selectedPartIndex = -1;
+    render();
+  });
+  libBtns.append(addBtn, dupBtn, delBtn);
+  lib.appendChild(libBtns);
+
+  const sortBtn = el("button", null, "Sort A–Z");
+  sortBtn.title = "Reorder the metasprites alphabetically (this changes their export/C index order)";
+  sortBtn.disabled = p.metasprites.length < 2;
+  sortBtn.addEventListener("click", () => {
+    snapshot();
+    p.metasprites.sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+    render();
+  });
+  const sheetBtn = el("button", null, "Export sheet PNG");
+  sheetBtn.title = "Export all metasprites side by side as one PNG spritesheet";
+  sheetBtn.addEventListener("click", exportAllMetaspritesToPng);
+  const sheetRow = el("div", "row");
+  sheetRow.style.marginTop = "8px";
+  sheetRow.append(sortBtn, sheetBtn);
+  lib.appendChild(sheetRow);
+
+  cols.appendChild(lib);
+
+  /* ---- right: composer ---- */
+  const ed = el("div", "card col-editor");
+  ed.appendChild(el("h2", null, "Composer"));
+
+  const ms = selectedMetasprite();
+  if (!ms) { ed.appendChild(el("p", "hint", "Select a metasprite.")); cols.appendChild(ed); root.appendChild(cols); return; }
+
+  const nameRow = el("div", "row");
+  const nameField = el("div", "field");
+  nameField.appendChild(label("Name"));
+  const nameInput = inputText(ms.name, 160);
+  nameInput.addEventListener("input", () => { ms.name = nameInput.value; });
+  nameField.appendChild(nameInput);
+  nameRow.appendChild(nameField);
+  const pngBtn = el("button", "tiny", "Export PNG");
+  pngBtn.addEventListener("click", () => exportMetaspriteToPng(ms));
+  nameRow.appendChild(pngBtn);
+  const mirrorBtn = el("button", "tiny", "Mirror H");
+  mirrorBtn.title = "Flip the whole metasprite horizontally (mirrors every part's tiles and position)";
+  mirrorBtn.disabled = ms.parts.length === 0;
+  mirrorBtn.addEventListener("click", () => {
+    snapshot();
+    // Mirror each part around the workspace center: a part spanning [x, x+8)
+    // moves to the opposite side, and its own tiles flip via the hFlip flag
+    // (OBJs support per-sprite horizontal flip on hardware, so this is free).
+    ms.parts.forEach(part => {
+      part.x = WORKSPACE - part.x - TILE_PX;
+      part.hFlip = !part.hFlip;
+    });
+    render();
+  });
+  nameRow.appendChild(mirrorBtn);
+  nameRow.appendChild(toggle("Snap to 8px grid", state.snapToGrid, v => { state.snapToGrid = v; }));
+  nameRow.appendChild(toggle("Onion skin", state.onionSkin, v => { state.onionSkin = v; render(); }));
+  ed.appendChild(nameRow);
+  ed.appendChild(spacer(8));
+
+  // The 64x64 workspace canvas. Parts drag with the pointer.
+  const canvas = document.createElement("canvas");
+  canvas.className = "composer-canvas";
+  canvas.width = WORKSPACE * COMPOSE_SCALE;
+  canvas.height = WORKSPACE * COMPOSE_SCALE;
+  const ctx = canvas.getContext("2d");
+
+  const cellH = objHeight();
+
+  const repaintComposer = () => {
+    drawChecker(ctx, canvas.width, canvas.height, 0, 0, TILE_PX * COMPOSE_SCALE);
+    // Center crosshair as a composition reference.
+    ctx.strokeStyle = "rgba(184,242,90,0.25)";
+    ctx.lineWidth = 1;
+    const mid = (WORKSPACE / 2) * COMPOSE_SCALE + 0.5;
+    ctx.beginPath(); ctx.moveTo(mid, 0); ctx.lineTo(mid, canvas.height); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(canvas.width, mid); ctx.stroke();
+    // Onion skins: ghost the neighboring animation frames under the artwork
+    // (previous in orange, next in cyan) so poses line up between frames.
+    if (state.onionSkin) {
+      const nb = animationNeighborsFor(ms.id);
+      if (nb) {
+        if (nb.prev && nb.prev !== ms) drawGhostBitmap(ctx, rasterizeMetasprite(nb.prev), COMPOSE_SCALE, "#e08a5a", 0.30);
+        if (nb.next && nb.next !== ms && nb.next !== nb.prev) drawGhostBitmap(ctx, rasterizeMetasprite(nb.next), COMPOSE_SCALE, "#5ad6ff", 0.30);
+      }
+    }
+    drawMetasprite(ctx, ms, COMPOSE_SCALE);
+    // Outline the selected part.
+    const sel = ms.parts[state.selectedPartIndex];
+    if (sel) {
+      ctx.strokeStyle = "#b8f25a";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(sel.x * COMPOSE_SCALE, sel.y * COMPOSE_SCALE,
+        TILE_PX * COMPOSE_SCALE, cellH * COMPOSE_SCALE);
+    }
+  };
+  repaintComposer();
+
+  // Hit test in part order: parts[0] is topmost (OAM priority), so it wins.
+  const partAt = (px, py) => ms.parts.findIndex(part =>
+    px >= part.x && px < part.x + TILE_PX && py >= part.y && py < part.y + cellH);
+
+  let drag = null;  // { grabX, grabY } while a part is being moved
+  canvas.addEventListener("pointerdown", (ev) => {
+    const px = ev.offsetX / COMPOSE_SCALE;
+    const py = ev.offsetY / COMPOSE_SCALE;
+    const hit = partAt(px, py);
+    if (hit !== state.selectedPartIndex) {
+      state.selectedPartIndex = hit;
+      // Mirror the clicked part's tile in the picker below, so it's obvious
+      // which tile the part uses and easy to reassign it from there.
+      if (hit >= 0) {
+        const hitPart = ms.parts[hit];
+        const cellTile = hitPart.tiles[state.selectedPartCell];
+        const partTile = cellTile != null ? cellTile : hitPart.tiles.find(t => t != null);
+        if (partTile != null) state.selectedTileId = partTile;
+      }
+      render();  // rebuild so the part controls follow the selection
+      return;
+    }
+    if (hit < 0) return;
+    snapshot();  // the whole drag collapses into one undo step
+    const part = ms.parts[hit];
+    drag = { grabX: px - part.x, grabY: py - part.y };
+    canvas.setPointerCapture(ev.pointerId);
+  });
+  canvas.addEventListener("pointermove", (ev) => {
+    if (!drag) return;
+    const part = ms.parts[state.selectedPartIndex];
+    if (!part) return;
+    let nx = Math.round(ev.offsetX / COMPOSE_SCALE - drag.grabX);
+    let ny = Math.round(ev.offsetY / COMPOSE_SCALE - drag.grabY);
+    if (state.snapToGrid) { nx = Math.round(nx / TILE_PX) * TILE_PX; ny = Math.round(ny / TILE_PX) * TILE_PX; }
+    part.x = Math.max(0, Math.min(WORKSPACE - TILE_PX, nx));
+    part.y = Math.max(0, Math.min(WORKSPACE - cellH, ny));
+    repaintComposer();
+  });
+  const endDrag = () => { if (drag) { drag = null; render(); } };
+  canvas.addEventListener("pointerup", endDrag);
+  canvas.addEventListener("pointercancel", endDrag);
+  ed.appendChild(canvas);
+
+  /* ---- part controls ---- */
+  const part = ms.parts[state.selectedPartIndex];
+
+  const partBtns = el("div", "row");
+  partBtns.style.marginTop = "10px";
+  const addPart = el("button", null, "+ Add part");
+  addPart.title = "Adds a hardware sprite using the tile picked below";
+  addPart.addEventListener("click", () => {
+    snapshot();
+    const tiles = new Array(tilesPerPart()).fill(null);
+    tiles[0] = state.selectedTileId;
+    ms.parts.push({
+      tiles,
+      x: (WORKSPACE - TILE_PX) / 2, y: (WORKSPACE - cellH) / 2,
+      hFlip: false, vFlip: false,
+      paletteId: state.displayPaletteId,
+      obp: 0,
+    });
+    state.selectedPartIndex = ms.parts.length - 1;
+    render();
+  });
+  const dupPart = el("button", null, "Duplicate part");
+  dupPart.disabled = !part;
+  dupPart.addEventListener("click", () => {
+    if (!part) return;
+    snapshot();
+    ms.parts.push({ ...part, tiles: [...part.tiles], x: Math.min(WORKSPACE - TILE_PX, part.x + TILE_PX) });
+    state.selectedPartIndex = ms.parts.length - 1;
+    render();
+  });
+  const delPart = el("button", "danger", "Delete part");
+  delPart.disabled = !part;
+  delPart.addEventListener("click", () => {
+    if (!part) return;
+    snapshot();
+    ms.parts.splice(state.selectedPartIndex, 1);
+    state.selectedPartIndex = -1;
+    render();
+  });
+  partBtns.append(addPart, dupPart, delPart);
+  ed.appendChild(partBtns);
+
+  if (part) {
+    const ctlRow = el("div", "row");
+    ctlRow.style.marginTop = "10px";
+
+    const xField = el("div", "field");
+    xField.appendChild(label("X"));
+    const xIn = numberInput(part.x, 0, WORKSPACE - TILE_PX);
+    xIn.addEventListener("change", () => { snapshot(); part.x = clampInt(xIn.value, 0, WORKSPACE - TILE_PX); render(); });
+    xField.appendChild(xIn);
+
+    const yField = el("div", "field");
+    yField.appendChild(label("Y"));
+    const yIn = numberInput(part.y, 0, WORKSPACE - cellH);
+    yIn.addEventListener("change", () => { snapshot(); part.y = clampInt(yIn.value, 0, WORKSPACE - cellH); render(); });
+    yField.appendChild(yIn);
+
+    const palField = el("div", "field");
+    palField.appendChild(label("Palette"));
+    palField.appendChild(selectFrom(
+      p.palettes.map(pl => ({ value: pl.id, label: pl.name })),
+      part.paletteId,
+      v => { snapshot(); part.paletteId = Number(v); render(); }));
+
+    // Which DMG OBJ palette register this hardware sprite uses (OAM bit 4).
+    const obpField = el("div", "field");
+    obpField.appendChild(label("DMG reg"));
+    obpField.appendChild(selectFrom(
+      OBP_NAMES.map((n, i) => ({ value: i, label: n })),
+      part.obp ?? 0,
+      v => { snapshot(); part.obp = Number(v); render(); }));
+
+    ctlRow.append(xField, yField, palField, obpField);
+    ctlRow.appendChild(toggle("H flip", part.hFlip, v => { snapshot(); part.hFlip = v; render(); }));
+    ctlRow.appendChild(toggle("V flip", part.vFlip, v => { snapshot(); part.vFlip = v; render(); }));
+    ed.appendChild(ctlRow);
+
+    // Priority: lower part index draws on top, like a lower OAM index.
+    const orderRow = el("div", "row");
+    orderRow.style.marginTop = "8px";
+    orderRow.appendChild(el("span", "cell-label",
+      "Part " + state.selectedPartIndex + " of " + ms.parts.length + " (lower = on top)"));
+    const upBtn = el("button", "tiny", "Raise");
+    upBtn.disabled = state.selectedPartIndex === 0;
+    upBtn.addEventListener("click", () => {
+      snapshot();
+      const i = state.selectedPartIndex;
+      [ms.parts[i - 1], ms.parts[i]] = [ms.parts[i], ms.parts[i - 1]];
+      state.selectedPartIndex = i - 1;
+      render();
+    });
+    const downBtn = el("button", "tiny", "Lower");
+    downBtn.disabled = state.selectedPartIndex >= ms.parts.length - 1;
+    downBtn.addEventListener("click", () => {
+      snapshot();
+      const i = state.selectedPartIndex;
+      [ms.parts[i + 1], ms.parts[i]] = [ms.parts[i], ms.parts[i + 1]];
+      state.selectedPartIndex = i + 1;
+      render();
+    });
+    orderRow.append(upBtn, downBtn);
+    ed.appendChild(orderRow);
+
+    // Tile assignment: pick which cell of the part to fill (8x16 has two),
+    // then click a tile in the picker grid below.
+    ed.appendChild(spacer(10));
+    const assignRow = el("div", "row");
+    assignRow.appendChild(el("span", "cell-label", "Assign tile to"));
+    if (tilesPerPart() === 2) {
+      ["Top", "Bottom"].forEach((lbl, i) => {
+        const b = el("button", "tiny cell-toggle" + (state.selectedPartCell === i ? " active" : ""), lbl);
+        b.addEventListener("click", () => { state.selectedPartCell = i; render(); });
+        assignRow.appendChild(b);
+      });
+    } else {
+      state.selectedPartCell = 0;
+      assignRow.appendChild(el("span", "hint", "this part (click a tile below)"));
+    }
+    const clearCell = el("button", "tiny danger", "Clear cell");
+    clearCell.addEventListener("click", () => {
+      snapshot();
+      part.tiles[state.selectedPartCell] = null;
+      render();
+    });
+    assignRow.appendChild(clearCell);
+    ed.appendChild(assignRow);
+  } else {
+    ed.appendChild(spacer(8));
+    ed.appendChild(el("p", "hint",
+      "Click a part on the canvas to select it, drag to move it. " +
+      "“+ Add part” places the tile picked below."));
+  }
+
+  // Tile picker: clicking assigns to the selected part cell (or just picks the
+  // tile that "+ Add part" will use when no part is selected).
+  ed.appendChild(spacer(10));
+  ed.appendChild(el("span", "cell-label", "Tile picker"));
+  ed.appendChild(spacer(6));
+  const picker = el("div", "lib-grid");
+  const colors = colorsForPalette(state.displayPaletteId);
+  p.tiles.forEach((tile, index) => {
+    const cell = document.createElement("button");
+    cell.className = "lib-cell" + (tile.id === state.selectedTileId ? " selected" : "");
+    const c = document.createElement("canvas");
+    c.width = 38; c.height = 38;
+    paintTileThumb(c, tile, colors);
+    cell.appendChild(c);
+    cell.appendChild(el("span", "idx", String(index)));
+    cell.addEventListener("click", () => {
+      state.selectedTileId = tile.id;
+      if (part) { snapshot(); part.tiles[state.selectedPartCell] = tile.id; }
+      render();
+    });
+    picker.appendChild(cell);
+  });
+  ed.appendChild(picker);
+
+  cols.appendChild(ed);
+  root.appendChild(cols);
+}
+
+/* ============================================================
+   Panel: Animations
+   ============================================================ */
+
+// Playback runs on requestAnimationFrame, counting time in 60Hz ticks so a
+// frame's duration means the same thing here and on hardware.
+const animPreview = { raf: 0, ctx: null, anim: null, frame: 0, ticksLeft: 0, lastMs: 0 };
+
+function stopAnimPreview() {
+  if (animPreview.raf) { cancelAnimationFrame(animPreview.raf); animPreview.raf = 0; }
+  animPreview.anim = null;
+}
+
+function startAnimPreview(canvas, anim) {
+  stopAnimPreview();
+  if (!anim.frames.length) return;
+  animPreview.ctx = canvas.getContext("2d");
+  animPreview.anim = anim;
+  animPreview.frame = 0;
+  animPreview.ticksLeft = anim.frames[0].duration;
+  animPreview.lastMs = performance.now();
+  paintAnimFrame(canvas.width);
+  if (state.animPlay) animPreview.raf = requestAnimationFrame(animPreviewLoop);
+}
+
+function paintAnimFrame(sizePx) {
+  const { ctx, anim, frame } = animPreview;
+  drawChecker(ctx, sizePx, sizePx, 0, 0, sizePx / 8);
+  const ms = metaspriteById(anim.frames[frame].metaspriteId);
+  if (ms) drawMetasprite(ctx, ms, sizePx / WORKSPACE);
+}
+
+function animPreviewLoop(nowMs) {
+  const ap = animPreview;
+  if (!ap.anim) return;
+  ap.raf = requestAnimationFrame(animPreviewLoop);
+  const ticks = (nowMs - ap.lastMs) / (1000 / 60);
+  if (ticks < 1) return;
+  ap.lastMs = nowMs;
+  ap.ticksLeft -= ticks;
+  let advanced = false;
+  while (ap.ticksLeft <= 0) {
+    if (ap.frame + 1 >= ap.anim.frames.length && !ap.anim.loop) {
+      cancelAnimationFrame(ap.raf); ap.raf = 0;   // hold on the last frame
+      ap.ticksLeft = 0;
+      return;
+    }
+    ap.frame = (ap.frame + 1) % ap.anim.frames.length;
+    ap.ticksLeft += Math.max(1, ap.anim.frames[ap.frame].duration);
+    advanced = true;
+  }
+  if (advanced) paintAnimFrame(ap.ctx.canvas.width);
+}
+
+function renderAnimationsPanel(root) {
+  const p = state.project;
+  const cols = el("div", "cols");
+
+  /* ---- left: animation list ---- */
+  const lib = el("div", "card col-library");
+  lib.appendChild(el("h2", null, "Animations"));
+
+  if (p.animations.length === 0) {
+    lib.appendChild(el("p", "hint", "No animations yet. Create one to sequence metasprites."));
+  }
+
+  const list = el("div", "anim-list");
+  p.animations.forEach((anim, index) => {
+    const row = el("div", "ms-row" + (anim.id === state.selectedAnimationId ? " selected" : ""));
+    const c = document.createElement("canvas");
+    c.width = 40; c.height = 40;
+    paintMetaspriteThumb(c, anim.frames[0] ? metaspriteById(anim.frames[0].metaspriteId) : null);
+    c.style.border = "1px solid var(--border)";
+    const name = el("span", "ms-name", "#" + index + "  " + anim.name);
+    const meta = el("span", "ms-meta",
+      anim.frames.length + " frame" + (anim.frames.length === 1 ? "" : "s") + (anim.loop ? " · loop" : ""));
+    row.append(c, name, meta);
+    row.addEventListener("click", () => {
+      state.selectedAnimationId = anim.id; state.selectedFrameIndex = -1;
+      state.drawMode = null;   // leaving the drawn frame discards the sketch
+      render();
+    });
+    list.appendChild(row);
+  });
+  lib.appendChild(list);
+
+  // Character sprites are wired to facing directions by name keywords
+  // (the same word-boundary match gbsprite2c.py uses): back/up, front/down,
+  // right, left. Flag partial coverage so a walker isn't missing a facing.
+  if (p.animations.length > 0) {
+    const DIR_KEYWORDS = [
+      ["north", ["back", "up"]], ["south", ["front", "down"]],
+      ["east", ["right"]], ["west", ["left"]],
+    ];
+    const covered = new Set();
+    p.animations.forEach(anim => {
+      const words = anim.name.toLowerCase().split(/[^0-9a-z]+/);
+      DIR_KEYWORDS.forEach(([dir, keys]) => {
+        if (keys.some(k => words.includes(k))) covered.add(dir);
+      });
+    });
+    if (covered.size > 0 && covered.size < 4) {
+      const missing = DIR_KEYWORDS.filter(([d]) => !covered.has(d)).map(([d]) => d);
+      const warn = el("p", "hint", "Facing coverage incomplete: no animation named for " +
+        missing.join(", ") + ". Character sprites need all four " +
+        "(keywords: back/up, front/down, right, left).");
+      warn.style.color = "var(--danger)";
+      lib.appendChild(warn);
+    } else if (covered.size === 4) {
+      lib.appendChild(el("p", "hint", "Facing coverage: all four directions named."));
+    }
+  }
+
+  const libBtns = el("div", "row");
+  libBtns.style.marginTop = "12px";
+  const addBtn = el("button", null, "+ New animation");
+  addBtn.addEventListener("click", () => {
+    snapshot();
+    const anim = { id: genId(), name: "animation", loop: true, frames: [] };
+    p.animations.push(anim);
+    state.selectedAnimationId = anim.id; state.selectedFrameIndex = -1; render();
+  });
+  const dupBtn = el("button", null, "Duplicate");
+  dupBtn.addEventListener("click", () => {
+    const src = selectedAnimation();
+    if (!src) return;
+    snapshot();
+    const anim = { id: genId(), name: src.name + " copy", loop: src.loop, frames: src.frames.map(f => ({ ...f })) };
+    p.animations.push(anim);
+    state.selectedAnimationId = anim.id; state.selectedFrameIndex = -1; render();
+  });
+  const delBtn = el("button", "danger", "Delete");
+  delBtn.addEventListener("click", () => {
+    const anim = selectedAnimation();
+    if (!anim) return;
+    snapshot();
+    p.animations = p.animations.filter(a => a.id !== anim.id);
+    state.selectedAnimationId = p.animations[0] ? p.animations[0].id : null;
+    state.selectedFrameIndex = -1;
+    render();
+  });
+  libBtns.append(addBtn, dupBtn, delBtn);
+  lib.appendChild(libBtns);
+
+  cols.appendChild(lib);
+
+  /* ---- right: draw-on-frame editor takes over while active ---- */
+  if (state.drawMode) {
+    cols.appendChild(buildDrawCard());
+    root.appendChild(cols);
+    return;
+  }
+
+  /* ---- right: animation editor ---- */
+  const ed = el("div", "card col-editor");
+  ed.appendChild(el("h2", null, "Animation editor"));
+
+  const anim = selectedAnimation();
+  if (!anim) { ed.appendChild(el("p", "hint", "Select an animation.")); cols.appendChild(ed); root.appendChild(cols); return; }
+
+  const nameRow = el("div", "row");
+  const nameField = el("div", "field");
+  nameField.appendChild(label("Name"));
+  const nameInput = inputText(anim.name, 160);
+  nameInput.addEventListener("input", () => { anim.name = nameInput.value; });
+  nameField.appendChild(nameInput);
+  nameRow.appendChild(nameField);
+  nameRow.appendChild(toggle("Loop", anim.loop, v => { snapshot(); anim.loop = v; render(); }));
+  const playBtn = el("button", "tiny" + (state.animPlay ? " tool-btn active" : ""), state.animPlay ? "Pause" : "Play");
+  playBtn.addEventListener("click", () => { state.animPlay = !state.animPlay; render(); });
+  nameRow.appendChild(playBtn);
+  ed.appendChild(nameRow);
+  ed.appendChild(spacer(8));
+
+  // Live preview.
+  const preview = document.createElement("canvas");
+  preview.className = "anim-preview";
+  preview.width = WORKSPACE * 4; preview.height = WORKSPACE * 4;
+  ed.appendChild(preview);
+  if (anim.frames.length) {
+    startAnimPreview(preview, anim);
+  } else {
+    drawChecker(preview.getContext("2d"), preview.width, preview.height, 0, 0, preview.width / 8);
+  }
+
+  // Frame strip: thumbnails with the duration (in 60Hz ticks) as the badge.
+  ed.appendChild(spacer(12));
+  ed.appendChild(el("span", "cell-label", "Frames (click to edit; badge = ticks, 60 = 1s)"));
+  ed.appendChild(spacer(6));
+
+  const strip = el("div", "frame-strip");
+  anim.frames.forEach((frame, i) => {
+    const fc = el("button", "frame-cell" + (state.selectedFrameIndex === i ? " selected" : ""));
+    const fcanvas = document.createElement("canvas");
+    fcanvas.width = 42; fcanvas.height = 42;
+    paintMetaspriteThumb(fcanvas, metaspriteById(frame.metaspriteId));
+    fc.appendChild(fcanvas);
+    fc.appendChild(el("span", "fnum", String(frame.duration)));
+    fc.addEventListener("click", () => { state.selectedFrameIndex = i; render(); });
+    strip.appendChild(fc);
+  });
+  const addFrame = el("button", "frame-cell", "+");
+  addFrame.style.fontSize = "20px";
+  addFrame.title = "Add a frame (uses the first metasprite, change it after)";
+  addFrame.disabled = p.metasprites.length === 0;
+  addFrame.addEventListener("click", () => {
+    snapshot();
+    // Repeat the last frame's metasprite when there is one; sequels usually continue.
+    const last = anim.frames[anim.frames.length - 1];
+    anim.frames.push({
+      metaspriteId: last ? last.metaspriteId : p.metasprites[0].id,
+      duration: last ? last.duration : 10,
+    });
+    state.selectedFrameIndex = anim.frames.length - 1;
+    render();
+  });
+  strip.appendChild(addFrame);
+  ed.appendChild(strip);
+
+  // Selected-frame controls.
+  const frame = anim.frames[state.selectedFrameIndex];
+  if (frame) {
+    ed.appendChild(spacer(10));
+    const fRow = el("div", "row");
+
+    const msField = el("div", "field");
+    msField.appendChild(label("Metasprite"));
+    msField.appendChild(selectFrom(
+      p.metasprites.map(m => ({ value: m.id, label: m.name })),
+      frame.metaspriteId,
+      v => { snapshot(); frame.metaspriteId = Number(v); render(); }));
+
+    const durField = el("div", "field");
+    durField.appendChild(label("Duration (ticks)"));
+    const dur = numberInput(frame.duration, 1, 600);
+    dur.addEventListener("change", () => { snapshot(); frame.duration = clampInt(dur.value, 1, 600); render(); });
+    durField.appendChild(dur);
+
+    fRow.append(msField, durField);
+
+    const left = el("button", "tiny", "← Move");
+    left.disabled = state.selectedFrameIndex === 0;
+    left.addEventListener("click", () => {
+      snapshot();
+      const i = state.selectedFrameIndex;
+      [anim.frames[i - 1], anim.frames[i]] = [anim.frames[i], anim.frames[i - 1]];
+      state.selectedFrameIndex = i - 1;
+      render();
+    });
+    const right = el("button", "tiny", "Move →");
+    right.disabled = state.selectedFrameIndex >= anim.frames.length - 1;
+    right.addEventListener("click", () => {
+      snapshot();
+      const i = state.selectedFrameIndex;
+      [anim.frames[i + 1], anim.frames[i]] = [anim.frames[i], anim.frames[i + 1]];
+      state.selectedFrameIndex = i + 1;
+      render();
+    });
+    const delFrame = el("button", "tiny danger", "Delete frame");
+    delFrame.addEventListener("click", () => {
+      snapshot();
+      anim.frames.splice(state.selectedFrameIndex, 1);
+      state.selectedFrameIndex = -1;
+      render();
+    });
+    fRow.append(left, right, delFrame);
+    ed.appendChild(fRow);
+
+    // Free-form drawing on this frame: paint pixels, then bake back into
+    // tiles + a metasprite (see planBake/bakeDrawing).
+    ed.appendChild(spacer(8));
+    const drawBtn = el("button", null, "✎ Draw on frame");
+    drawBtn.title = "Paint directly on this frame; tiles and the metasprite are rebuilt from the drawing";
+    drawBtn.addEventListener("click", () => {
+      const ms = metaspriteById(frame.metaspriteId);
+      state.drawMode = {
+        animId: anim.id,
+        frameIndex: state.selectedFrameIndex,
+        bitmap: ms ? rasterizeMetasprite(ms) : new Uint8Array(WORKSPACE * WORKSPACE),
+        onion: true,
+        grid: true,
+      };
+      render();
+    });
+    ed.appendChild(drawBtn);
+  }
+
+  cols.appendChild(ed);
+  root.appendChild(cols);
+}
+
+/* ---- the draw-on-frame card ---- */
+
+const DRAW_SCALE = 6;
+
+function buildDrawCard() {
+  const dm = state.drawMode;
+  const anim = animationById(dm.animId);
+  const ed = el("div", "card col-editor");
+  ed.appendChild(el("h2", null,
+    "Drawing on frame " + (dm.frameIndex + 1) + " / " + anim.frames.length + " of “" + anim.name + "”"));
+
+  const colors = colorsForPalette(state.displayPaletteId);
+  const cellH = objHeight();
+
+  // Ink picker (0 = transparent) and tools, mirroring the tile editor.
+  const inkRow = el("div", "row");
+  const inks = el("div", "ink-swatches");
+  for (let v = 0; v < 4; v++) {
+    const sw = el("button", "ink-swatch" + (state.ink === v ? " active" : ""));
+    if (v === 0) {
+      sw.style.backgroundImage = "repeating-conic-gradient(#15281c 0% 25%, #0c1c12 0% 50%)";
+      sw.title = "Transparent (eraser)";
+    } else {
+      sw.style.background = colors[v];
+      sw.title = "Pixel value " + v;
+    }
+    sw.appendChild(el("span", "val", v === 0 ? "T" : String(v)));
+    sw.addEventListener("click", () => { state.ink = v; render(); });
+    inks.appendChild(sw);
+  }
+  inkRow.appendChild(el("span", "cell-label", "Ink"));
+  inkRow.appendChild(inks);
+  ["pencil", "fill", "eyedropper"].forEach(name => {
+    const b = el("button", "tool-btn" + (state.tool === name ? " active" : ""), name);
+    b.addEventListener("click", () => { state.tool = name; render(); });
+    inkRow.appendChild(b);
+  });
+  ed.appendChild(inkRow);
+
+  const optRow = el("div", "row");
+  optRow.style.marginTop = "8px";
+  optRow.appendChild(toggle("Onion skin", dm.onion, v => { dm.onion = v; repaint(); }));
+  optRow.appendChild(toggle("8px grid", dm.grid, v => { dm.grid = v; repaint(); }));
+  ed.appendChild(optRow);
+  ed.appendChild(spacer(8));
+
+  // Neighboring frames of this animation, rasterized once for ghosting.
+  const nFrames = anim.frames.length;
+  const wrap = (j) => anim.loop ? (j + nFrames) % nFrames : j;
+  const ghostFor = (j) => {
+    if (j < 0 || j >= nFrames || j === dm.frameIndex) return null;
+    const ms = metaspriteById(anim.frames[j].metaspriteId);
+    return ms ? rasterizeMetasprite(ms) : null;
+  };
+  const prevGhost = nFrames > 1 ? ghostFor(wrap(dm.frameIndex - 1)) : null;
+  const nextGhost = nFrames > 1 ? ghostFor(wrap(dm.frameIndex + 1)) : null;
+
+  const canvas = document.createElement("canvas");
+  canvas.className = "composer-canvas";
+  canvas.style.cursor = "crosshair";
+  canvas.width = WORKSPACE * DRAW_SCALE;
+  canvas.height = WORKSPACE * DRAW_SCALE;
+  const ctx = canvas.getContext("2d");
+
+  const repaint = () => {
+    drawChecker(ctx, canvas.width, canvas.height, 0, 0, TILE_PX * DRAW_SCALE);
+    if (dm.onion) {
+      if (prevGhost) drawGhostBitmap(ctx, prevGhost, DRAW_SCALE, "#e08a5a", 0.30);
+      if (nextGhost) drawGhostBitmap(ctx, nextGhost, DRAW_SCALE, "#5ad6ff", 0.30);
+    }
+    for (let y = 0; y < WORKSPACE; y++) {
+      for (let x = 0; x < WORKSPACE; x++) {
+        const v = dm.bitmap[y * WORKSPACE + x];
+        if (!v) continue;
+        ctx.fillStyle = colors[v];
+        ctx.fillRect(x * DRAW_SCALE, y * DRAW_SCALE, DRAW_SCALE, DRAW_SCALE);
+      }
+    }
+    if (dm.grid) {
+      ctx.strokeStyle = "rgba(224,248,208,0.10)";
+      ctx.lineWidth = 1;
+      for (let i = 0; i <= WORKSPACE; i += TILE_PX) {
+        const q = i * DRAW_SCALE + 0.5;
+        ctx.beginPath(); ctx.moveTo(q, 0); ctx.lineTo(q, canvas.height); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, q); ctx.lineTo(canvas.width, q); ctx.stroke();
+      }
+    }
+  };
+  repaint();
+
+  // Live cost readout so the price of free-form drawing is visible pre-bake.
+  const status = el("p", "hint", "");
+  const updateStatus = () => {
+    const plan = planBake(dm.bitmap);
+    const total = state.project.tiles.length + plan.newTiles.size;
+    status.textContent =
+      "Bake: " + plan.parts.length + " part(s), +" + plan.newTiles.size + " new tile(s), " +
+      plan.reused + " reused (flips count as reuse) · tiles " +
+      state.project.tiles.length + " → " + total +
+      (total > TILE_BUDGET ? "  — over the " + TILE_BUDGET + " budget!" : "");
+  };
+  updateStatus();
+
+  const pixelAt = (ev) => {
+    const x = Math.floor(ev.offsetX / DRAW_SCALE);
+    const y = Math.floor(ev.offsetY / DRAW_SCALE);
+    if (x < 0 || x >= WORKSPACE || y < 0 || y >= WORKSPACE) return null;
+    return { x, y };
+  };
+
+  const floodFill64 = (x, y, ink) => {
+    const target = dm.bitmap[y * WORKSPACE + x];
+    if (target === ink) return;
+    const stack = [[x, y]];
+    while (stack.length) {
+      const [cx, cy] = stack.pop();
+      if (cx < 0 || cx >= WORKSPACE || cy < 0 || cy >= WORKSPACE) continue;
+      if (dm.bitmap[cy * WORKSPACE + cx] !== target) continue;
+      dm.bitmap[cy * WORKSPACE + cx] = ink;
+      stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
+    }
+  };
+
+  const applyAt = (ev) => {
+    const pos = pixelAt(ev);
+    if (!pos) return;
+    if (state.tool === "eyedropper") {
+      state.ink = dm.bitmap[pos.y * WORKSPACE + pos.x];
+      render();
+      return;
+    }
+    if (state.tool === "fill") floodFill64(pos.x, pos.y, state.ink);
+    else dm.bitmap[pos.y * WORKSPACE + pos.x] = state.ink;
+    repaint();
+  };
+
+  let painting = false;
+  canvas.addEventListener("pointerdown", (ev) => {
+    painting = state.tool === "pencil";
+    applyAt(ev);
+    if (!painting) updateStatus();
+  });
+  canvas.addEventListener("pointermove", (ev) => { if (painting) applyAt(ev); });
+  const stop = () => { if (painting) { painting = false; updateStatus(); } };
+  canvas.addEventListener("pointerup", stop);
+  canvas.addEventListener("pointerleave", stop);
+  ed.appendChild(canvas);
+
+  ed.appendChild(spacer(8));
+  ed.appendChild(status);
+  ed.appendChild(el("p", "hint",
+    "Baking never edits shared tiles: matching art (including mirrored) is reused, the rest becomes " +
+    "new tiles, and the metasprite is copied first if other frames still show it. " +
+    "“Delete unused” in the Tiles tab cleans up orphans."));
+
+  const btnRow = el("div", "row");
+  btnRow.style.marginTop = "10px";
+  const bakeBtn = el("button", "primary", "Bake to frame");
+  bakeBtn.addEventListener("click", bakeDrawing);
+  const cancelBtn = el("button", null, "Cancel");
+  cancelBtn.addEventListener("click", () => { state.drawMode = null; render(); });
+  btnRow.append(bakeBtn, cancelBtn);
+  ed.appendChild(btnRow);
+
+  return ed;
+}
+
+/* ============================================================
+   JSON export / import (same modal pattern as the world editor)
+   ============================================================ */
+
+function safeBaseName() {
+  return (state.project.meta.name || "sprites").replace(/[^a-z0-9_-]+/gi, "_");
+}
+
+function projectJson() {
+  state.project._displayPaletteId = state.displayPaletteId;
+  return JSON.stringify(state.project, null, 2);
+}
+
+function exportProject() {
+  const json = projectJson();
+  openModal("Export project", (modal) => {
+    modal.appendChild(el("p", "hint",
+      "Download the .json, or if the download is blocked here, copy the text below into a file."));
+    const btnRow = el("div", "row");
+    btnRow.style.margin = "10px 0";
+    const dl = el("button", "primary", "Download .json");
+    dl.addEventListener("click", () => downloadText(safeBaseName() + ".gbsprite.json", json, "application/json"));
+    const copy = el("button", null, "Copy to clipboard");
+    btnRow.append(dl, copy);
+    modal.appendChild(btnRow);
+
+    const ta = document.createElement("textarea");
+    ta.value = json; ta.readOnly = true;
+    ta.addEventListener("focus", () => ta.select());
+    modal.appendChild(ta);
+
+    copy.addEventListener("click", async () => {
+      const ok = await copyText(json);
+      copy.textContent = ok ? "Copied" : "Press Ctrl/Cmd+C";
+      if (ok) setTimeout(() => copy.textContent = "Copy to clipboard", 1200);
+    });
+  });
+}
+
+function loadProjectFrom(text) {
+  const parsed = JSON.parse(text);
+  if (parsed.tilesets) throw new Error("This looks like a world project (.gbworld.json), not a sprite project.");
+  if (!parsed.tiles || !parsed.palettes) throw new Error("Missing tiles or palettes.");
+  if (parsed.formatVersion !== FORMAT_VERSION) {
+    if (!confirm("This file is format v" + parsed.formatVersion + ", editor is v" + FORMAT_VERSION + ". Try to open anyway?")) return;
+  }
+  // Backfill fields that older exports may lack, so they open cleanly.
+  parsed.metasprites = parsed.metasprites || [];
+  parsed.animations = parsed.animations || [];
+  parsed.meta.spriteMode = parsed.meta.spriteMode === "8x16" ? "8x16" : "8x8";
+  // DMG registers were added in a later revision: default to an identity-ish
+  // OBP0 and give every part OBP0 so older files render unchanged.
+  parsed.dmg = parsed.dmg || { obp0: [1, 2, 3], obp1: [0, 2, 3] };
+  parsed.metasprites.forEach(ms => ms.parts.forEach(part => { part.obp = part.obp === 1 ? 1 : 0; }));
+  state.project = parsed;
+  syncSelectionsToProject();
+  resetHistory();
+  state.activePanel = "tiles";
+  closeModal();
+  render();
+}
+
+function importProject() {
+  openModal("Import project", (modal) => {
+    modal.appendChild(el("p", "hint", "Open a .gbsprite.json file, or paste its contents below."));
+    const fileBtn = el("button", "primary", "Choose file");
+    fileBtn.style.margin = "10px 0";
+    fileBtn.addEventListener("click", () => document.getElementById("file-input").click());
+    modal.appendChild(fileBtn);
+
+    const ta = document.createElement("textarea");
+    ta.placeholder = "Paste project JSON here...";
+    modal.appendChild(ta);
+
+    const loadBtn = el("button", null, "Load pasted JSON");
+    loadBtn.style.marginTop = "10px";
+    loadBtn.addEventListener("click", () => {
+      try { loadProjectFrom(ta.value); }
+      catch (err) { alert("Could not open project: " + err.message); }
+    });
+    modal.appendChild(loadBtn);
+  });
+}
+
+/* ============================================================
+   Wiring (done once; only the panel re-renders afterward)
+   ============================================================ */
+
+document.getElementById("project-name").addEventListener("input", (e) => {
+  state.project.meta.name = e.target.value;
+});
+document.getElementById("dmg-preview").addEventListener("change", (e) => {
+  state.dmgPreview = e.target.checked;
+  render();
+});
+document.getElementById("sprite-mode").addEventListener("change", (e) => {
+  const newMode = e.target.value;
+  const msg = newMode === "8x16"
+    ? "Switch to 8×16 sprites? Every part gains an empty bottom tile slot."
+    : "Switch to 8×8 sprites? Parts with a bottom tile split into two parts.";
+  if (confirm(msg)) convertSpriteMode(newMode);
+  else e.target.value = state.project.meta.spriteMode;
+});
+document.getElementById("btn-new").addEventListener("click", () => {
+  if (!confirm("Start a new project? Unsaved changes are lost. Export first to keep them.")) return;
+  state.project = makeDefaultProject(false);   // empty: no demo placeholder
+  syncSelectionsToProject();
+  resetHistory();
+  state.activePanel = "tiles";
+  render();
+});
+document.getElementById("btn-export").addEventListener("click", exportProject);
+document.getElementById("btn-import").addEventListener("click", importProject);
+document.getElementById("btn-undo").addEventListener("click", undo);
+document.getElementById("btn-redo").addEventListener("click", redo);
+document.getElementById("file-input").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (file) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try { loadProjectFrom(reader.result); }
+      catch (err) { alert("Could not open project: " + err.message); }
+    };
+    reader.readAsText(file);
+  }
+  e.target.value = "";   // allow re-importing the same file
+});
+document.querySelectorAll(".tab").forEach(tab => {
+  tab.addEventListener("click", () => { state.activePanel = tab.dataset.panel; render(); });
+});
+
+// Keyboard undo/redo, but let native text editing keep its own undo in fields.
+document.addEventListener("keydown", (e) => {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  const tag = (document.activeElement && document.activeElement.tagName) || "";
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  const key = e.key.toLowerCase();
+  if (key === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
+  else if ((key === "z" && e.shiftKey) || key === "y") { e.preventDefault(); redo(); }
+});
+
+syncSelectionsToProject();
+render();

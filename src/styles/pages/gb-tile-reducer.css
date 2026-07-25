@@ -1,0 +1,23 @@
+/* Page-specific styling. Shared tokens, controls, and cards live in gb-theme.css. */
+  .budget-ok   { color: var(--muted); }
+  .budget-over { color: var(--danger); font-weight: 700; }
+
+  .drop-zone {
+    border: 1px dashed var(--border);
+    padding: 28px 16px;
+    text-align: center;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .drop-zone:hover, .drop-zone.over { border-color: var(--accent); color: var(--accent); }
+
+  .stats-table { border-collapse: collapse; width: 100%; }
+  .stats-table td { padding: 4px 8px 4px 0; font-size: 12px; }
+  .stats-table td:last-child { text-align: right; color: var(--text); }
+  .stats-table td:first-child { color: var(--muted); }
+
+  .preview-wrap { overflow: auto; max-height: 55vh; border: 1px solid var(--border); background: var(--gb-3); width: max-content; max-width: 100%; }
+  .preview-wrap canvas { display: block; }
+  .preview-label { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; }
+
+  .mode-btn.active { color: var(--accent); border-color: var(--accent); }

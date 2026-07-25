@@ -1,6 +1,7 @@
 # Node
+test-results/
+playwright-report/
 node_modules/
-package-lock.json
 
 # Python
 __pycache__/

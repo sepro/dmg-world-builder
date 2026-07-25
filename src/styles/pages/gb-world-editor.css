@@ -1,0 +1,98 @@
+/* Editor-specific styling. Shared tokens, controls, and the modal live in gb-theme.css. */
+  .budget-ok   { color: var(--muted); }
+  .budget-over { color: var(--danger); font-weight: 700; }
+
+  /* ---- libraries (grids of thumbnails) ---- */
+  .lib-grid { display: grid; grid-template-columns: repeat(auto-fill, 40px); gap: 6px; }
+  .lib-cell {
+    position: relative;
+    width: 40px; height: 40px;
+    border: 1px solid var(--border);
+    background: var(--gb-3);
+    cursor: pointer;
+    padding: 0;
+  }
+  .lib-cell:hover { border-color: var(--muted); }
+  .lib-cell.selected { border-color: var(--accent); outline: 1px solid var(--accent); }
+  .lib-cell .idx {
+    position: absolute; bottom: 0; right: 1px;
+    font-size: 9px; color: var(--accent);
+    background: rgba(8,24,32,0.7); padding: 0 2px; pointer-events: none;
+  }
+
+  .metatile-list { display: flex; flex-direction: column; gap: 4px; }
+  .mt-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px; border: 1px solid var(--border); background: var(--panel-2);
+    cursor: pointer;
+  }
+  .mt-row:hover { border-color: var(--muted); }
+  .mt-row.selected { border-color: var(--accent); }
+  .mt-row .mt-name { flex: 1; }
+  .mt-row .mt-meta { color: var(--muted); font-size: 11px; }
+
+  /* ---- tile editor ---- */
+  .editor-canvas { border: 1px solid var(--border); background: var(--gb-3); touch-action: none; cursor: crosshair; }
+  .ink-swatches { display: flex; gap: 6px; }
+  .ink-swatch {
+    width: 34px; height: 34px; border: 2px solid var(--border); cursor: pointer; position: relative;
+  }
+  .ink-swatch.active { border-color: var(--accent); }
+  .ink-swatch .val { position: absolute; bottom: 0; right: 2px; font-size: 9px; color: var(--accent); }
+  .tool-btn.active { color: var(--accent); border-color: var(--accent); }
+
+  /* ---- tile animation ---- */
+  .anim-badge {
+    position: absolute; top: 0; left: 1px;
+    font-size: 9px; color: var(--gb-3); background: var(--accent);
+    padding: 0 2px; pointer-events: none; font-weight: 700;
+  }
+  .frame-strip { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .frame-cell {
+    position: relative; width: 44px; height: 44px;
+    border: 1px solid var(--border); background: var(--gb-3); cursor: pointer; padding: 0;
+  }
+  .frame-cell:hover { border-color: var(--muted); }
+  .frame-cell.selected { border-color: var(--accent); outline: 1px solid var(--accent); }
+  .frame-cell .fnum {
+    position: absolute; bottom: 0; right: 1px; font-size: 9px; color: var(--accent);
+    background: rgba(8,24,32,0.7); padding: 0 2px; pointer-events: none;
+  }
+  .anim-preview { border: 1px solid var(--border); background: var(--gb-3); }
+
+  /* ---- metatile composer ---- */
+  .composer { display: grid; grid-template-columns: repeat(2, 96px); grid-template-rows: repeat(2, 96px); gap: 2px; background: var(--border); border: 1px solid var(--border); width: max-content; }
+  .composer-cell { width: 96px; height: 96px; background: var(--gb-3); cursor: pointer; padding: 0; border: 2px solid transparent; }
+  .composer-cell.selected { border-color: var(--accent); }
+
+
+  /* ---- map editor ---- */
+  .map-toolbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }
+  .map-toolbar .group { display: flex; align-items: center; gap: 6px; }
+  .map-viewport {
+    position: relative; overflow: auto;
+    width: 100%; height: 60vh; min-height: 360px;
+    border: 1px solid var(--border); background: var(--gb-3);
+    touch-action: none;
+  }
+  .map-canvas { display: block; cursor: crosshair; }
+  .paint-block-preview { width: 34px; height: 34px; border: 1px solid var(--border); background: var(--gb-3); }
+
+  .map-list { display: flex; flex-direction: column; gap: 4px; }
+  .map-row {
+    display: flex; align-items: center; gap: 8px; padding: 7px 8px;
+    border: 1px solid var(--border); background: var(--panel-2); cursor: pointer;
+  }
+  .map-row:hover { border-color: var(--muted); }
+  .map-row.selected { border-color: var(--accent); }
+  .map-row .map-name { flex: 1; }
+  .map-row .map-dims { color: var(--muted); font-size: 11px; }
+
+  .conn-grid {
+    display: grid; grid-template-columns: 1fr 1fr 1fr; grid-template-rows: auto auto auto;
+    gap: 6px; align-items: center; justify-items: center;
+  }
+  .conn-slot { width: 100%; }
+  .conn-slot .cell-label { display: block; text-align: center; margin-bottom: 2px; }
+  .conn-center { color: var(--muted); font-size: 11px; text-align: center; padding: 6px; border: 1px dashed var(--line); width: 100%; }
+  .warn { color: var(--danger); font-size: 11px; margin-top: 6px; }

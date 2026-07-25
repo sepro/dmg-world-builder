@@ -1,0 +1,913 @@
+// @ts-nocheck
+import { el, label, spacer, selectFrom, numberInput, clampInt, toggle, takeImageHandoff, downloadBlob } from "../lib/common.js";
+
+"use strict";
+
+/* ============================================================
+   Constants and state
+   ============================================================ */
+
+const TILE_PX = 8;
+const PIXELS_PER_TILE = TILE_PX * TILE_PX;
+const TILE_BUDGET = 256;            // DMG VRAM ceiling, shown as the reference budget
+const MAX_DIST = 9 * PIXELS_PER_TILE; // max SSD between two 4-shade tiles (3^2 * 64)
+
+// Display/download palettes. Both quantize back to the same four values with
+// the importers' luminance buckets, so the download re-imports losslessly.
+const PALETTES = [
+  { name: "GB Green",  colors: ["#e0f8d0", "#88c070", "#346856", "#081820"] },
+  { name: "Grayscale", colors: ["#ffffff", "#aaaaaa", "#555555", "#000000"] },
+];
+
+const state = {
+  fileName: null,
+  width: 0, height: 0,      // padded to multiples of 8
+  shades: null,             // Uint8Array w*h of values 0..3 (the quantized original)
+  unique: [],               // [{ pixels: Uint8Array(64), count }]
+  tileMap: null,            // Uint16Array: tile position -> index into unique
+
+  mode: "target",           // target | threshold
+  target: TILE_BUDGET,
+  threshold: 40,            // SSD merge distance for threshold mode
+
+  algorithm: "greedy",      // greedy | agglomerative
+  repMode: "hybrid",        // hybrid | most-used | best-fit
+  freqWeight: false,        // Ward factor: frequent tiles resist merging
+  edgeWeight: false,        // border pixels count double in the distance
+  refinePasses: 0,          // k-means style reassignment passes after clustering
+
+  result: null,             // { reps, assign, usedThreshold, reducedShades, changedTiles }
+  paletteIndex: 0,
+  zoom: 0,                  // 0 = auto
+  highlightChanged: true,
+
+  protectedTiles: null,     // Uint8Array per tile position: 1 = must stay exactly as drawn
+  protectTool: "protect",   // protect | erase - brush mode on the original preview
+};
+
+/* ============================================================
+   Quantization and tile slicing
+   ============================================================ */
+
+// Luminance (0..255) -> value 0..3 (lightest = 0), same buckets as the editors.
+function shade4(lum) { return 3 - Math.min(3, Math.floor(lum / 64)); }
+
+// Quantize RGBA data to shades, padding to tile multiples with the lightest
+// shade so no image edge is cropped away.
+function quantizeImage(data, imgW, imgH) {
+  const w = Math.ceil(imgW / TILE_PX) * TILE_PX;
+  const h = Math.ceil(imgH / TILE_PX) * TILE_PX;
+  const shades = new Uint8Array(w * h);          // padding stays 0 (lightest)
+  for (let y = 0; y < imgH; y++) {
+    for (let x = 0; x < imgW; x++) {
+      const i = (y * imgW + x) * 4;
+      // Transparent pixels read as the lightest shade, like the BG importer.
+      const lum = data[i + 3] < 128
+        ? 255
+        : 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      shades[y * w + x] = shade4(lum);
+    }
+  }
+  return { shades, w, h };
+}
+
+// Collect unique tiles and a position -> unique-index map.
+function sliceTiles(shades, w, h) {
+  const tilesX = w / TILE_PX, tilesY = h / TILE_PX;
+  const unique = [];
+  const byKey = new Map();
+  const tileMap = new Uint16Array(tilesX * tilesY);
+  for (let ty = 0; ty < tilesY; ty++) {
+    for (let tx = 0; tx < tilesX; tx++) {
+      const pixels = new Uint8Array(PIXELS_PER_TILE);
+      for (let y = 0; y < TILE_PX; y++)
+        for (let x = 0; x < TILE_PX; x++)
+          pixels[y * TILE_PX + x] = shades[(ty * TILE_PX + y) * w + tx * TILE_PX + x];
+      const key = pixels.join(",");
+      let idx = byKey.get(key);
+      if (idx === undefined) {
+        idx = unique.length;
+        byKey.set(key, idx);
+        unique.push({ pixels, count: 0 });
+      }
+      unique[idx].count++;
+      tileMap[ty * tilesX + tx] = idx;
+    }
+  }
+  return { unique, tileMap };
+}
+
+/* ============================================================
+   Clustering
+   ============================================================
+
+   Two clusterers share the same building blocks:
+
+   - Greedy (fast): one pass over unique tiles from most to least frequent; a
+     tile joins the closest cluster within the threshold or seeds a new one.
+     Frequent tiles seed first, so common art anchors the representatives.
+
+   - Agglomerative (quality): every unique tile starts as its own cluster and
+     the globally cheapest pair merges repeatedly (nearest-neighbor arrays
+     keep this workable up to a few thousand unique tiles). Slower, but every
+     merge is the best one available at that moment.
+
+   Distance is a weighted SSD over the 64 pixels, with two options:
+   - Edge weighting doubles the border pixels (seams between neighboring
+     tiles are where merges get noticed); weights are normalized to an
+     average of 1 so threshold values keep their meaning.
+   - Frequency protection multiplies a merge's cost by the Ward factor
+     n1*n2/(n1+n2): tiles used all over the map resist changing, rare tiles
+     bend toward them.
+
+   The merged tile (a cluster's "representative") is chosen per the rep mode:
+   - hybrid:    per-pixel frequency-weighted mode - synthesized, crisp 0..3
+   - most-used: the most frequent member tile, kept unchanged
+   - best-fit:  the member tile with the least weighted error to the others
+
+   Optional refinement passes then reassign every tile to its nearest final
+   representative and rebuild the representatives, k-means style. */
+
+const AGGLO_MAX = 4096;   // agglomerative is O(n^2); beyond this fall back to greedy
+
+function pixelWeights() {
+  const wv = new Float32Array(PIXELS_PER_TILE).fill(1);
+  if (state.edgeWeight) {
+    for (let y = 0; y < TILE_PX; y++)
+      for (let x = 0; x < TILE_PX; x++)
+        if (x === 0 || x === TILE_PX - 1 || y === 0 || y === TILE_PX - 1)
+          wv[y * TILE_PX + x] = 2;
+    // Normalize to an average weight of 1 so thresholds stay comparable.
+    let sum = 0;
+    for (let i = 0; i < PIXELS_PER_TILE; i++) sum += wv[i];
+    for (let i = 0; i < PIXELS_PER_TILE; i++) wv[i] *= PIXELS_PER_TILE / sum;
+  }
+  return wv;
+}
+
+function wssd(a, b, wv) {
+  let sum = 0;
+  for (let i = 0; i < PIXELS_PER_TILE; i++) {
+    const d = a[i] - b[i];
+    sum += wv[i] * d * d;
+  }
+  return sum;
+}
+
+// Ward-style factor: merging two heavy clusters costs more than folding a
+// rare tile into a common one. Identity when frequency protection is off.
+function mergeFactor(n1, n2) {
+  return state.freqWeight ? (n1 * n2) / (n1 + n2) : 1;
+}
+
+/* ---- cluster bookkeeping shared by both algorithms ---- */
+
+function newCluster() {
+  return {
+    hist: new Uint32Array(PIXELS_PER_TILE * 4),   // per-pixel shade histogram
+    rep: new Uint8Array(PIXELS_PER_TILE),
+    weight: 0,                                     // sum of member tile counts
+    members: [],                                   // indices into unique
+    frozen: false,                                 // protected: rep never changes
+    pinnedIdx: -1,                                 // unique index this cluster pins
+  };
+}
+
+// A frozen cluster pins one protected tile: its rep is that tile's exact
+// pixels, forever. Other tiles may join it (they become copies of the
+// protected art), but nothing can alter the rep.
+function makeFrozenCluster(unique, idx) {
+  const c = newCluster();
+  c.frozen = true;
+  c.pinnedIdx = idx;
+  c.rep = Uint8Array.from(unique[idx].pixels);
+  addTileToCluster(c, unique, idx);
+  return c;
+}
+
+// The hybrid representative: per-pixel frequency-weighted mode. Both
+// algorithms use it as the linkage point even if the final rep mode differs,
+// because it tracks the cluster's content cheaply and stays in 0..3.
+function refreshHybridRep(c) {
+  if (c.frozen) return;   // protected art is immutable
+  for (let i = 0; i < PIXELS_PER_TILE; i++) {
+    let best = 0, bestN = c.hist[i * 4];
+    for (let v = 1; v < 4; v++) {
+      const n = c.hist[i * 4 + v];
+      if (n > bestN) { bestN = n; best = v; }
+    }
+    c.rep[i] = best;
+  }
+}
+
+function addTileToCluster(c, unique, idx) {
+  const tile = unique[idx];
+  for (let i = 0; i < PIXELS_PER_TILE; i++) c.hist[i * 4 + tile.pixels[i]] += tile.count;
+  c.weight += tile.count;
+  c.members.push(idx);
+  refreshHybridRep(c);
+}
+
+// Caller guarantees b is not frozen (a frozen survivor keeps its rep because
+// refreshHybridRep skips frozen clusters; two frozen clusters never merge).
+function mergeClusters(a, b) {
+  for (let i = 0; i < a.hist.length; i++) a.hist[i] += b.hist[i];
+  a.weight += b.weight;
+  a.members.push(...b.members);
+  refreshHybridRep(a);
+}
+
+/* ---- the two clusterers ---- */
+
+function greedyCluster(unique, threshold, wv, pinned) {
+  const order = unique.map((_, i) => i).sort((a, b) => unique[b].count - unique[a].count);
+  const clusters = [];
+  // Protected tiles seed frozen clusters up front so free tiles can merge
+  // into them (adopting the protected art) but never the other way around.
+  for (const idx of pinned) clusters.push(makeFrozenCluster(unique, idx));
+  for (const idx of order) {
+    if (pinned.has(idx)) continue;
+    const tile = unique[idx];
+    let bestC = -1, bestD = threshold;   // only clusters within the threshold qualify
+    for (let c = 0; c < clusters.length; c++) {
+      const d = wssd(clusters[c].rep, tile.pixels, wv) * mergeFactor(clusters[c].weight, tile.count);
+      if (d <= bestD) { bestD = d; bestC = c; }
+    }
+    if (bestC < 0) { bestC = clusters.length; clusters.push(newCluster()); }
+    addTileToCluster(clusters[bestC], unique, idx);
+  }
+  return clusters;
+}
+
+// Merge the globally cheapest pair until the stop condition is reached:
+// stop.target = merge down to a count, stop.threshold = merge while cheap.
+function agglomerativeCluster(unique, wv, stop, pinned) {
+  const clusters = unique.map((_, idx) => {
+    if (pinned.has(idx)) return makeFrozenCluster(unique, idx);
+    const c = newCluster();
+    addTileToCluster(c, unique, idx);
+    return c;
+  });
+  const active = new Array(clusters.length).fill(true);
+  let activeCount = clusters.length;
+
+  // Two frozen clusters can never merge: both reps are untouchable.
+  const cost = (i, j) =>
+    clusters[i].frozen && clusters[j].frozen
+      ? Infinity
+      : wssd(clusters[i].rep, clusters[j].rep, wv) * mergeFactor(clusters[i].weight, clusters[j].weight);
+
+  // Nearest-neighbor arrays: nn[i] is i's cheapest partner, nnd[i] that cost.
+  const nn = new Int32Array(clusters.length).fill(-1);
+  const nnd = new Float64Array(clusters.length).fill(Infinity);
+  const computeNN = (i) => {
+    nn[i] = -1; nnd[i] = Infinity;
+    for (let j = 0; j < clusters.length; j++) {
+      if (j === i || !active[j]) continue;
+      const d = cost(i, j);
+      if (d < nnd[i]) { nnd[i] = d; nn[i] = j; }
+    }
+  };
+  for (let i = 0; i < clusters.length; i++) computeNN(i);
+
+  while (activeCount > 1) {
+    if (stop.target != null && activeCount <= stop.target) break;
+    // The globally cheapest pair is the active cluster with the smallest nnd.
+    let a = -1;
+    for (let i = 0; i < clusters.length; i++) {
+      if (active[i] && (a < 0 || nnd[i] < nnd[a])) a = i;
+    }
+    if (stop.threshold != null && nnd[a] > stop.threshold) break;
+    if (!isFinite(nnd[a])) break;   // only frozen-frozen pairs remain
+    const b = nn[a];
+
+    // A frozen cluster must be the survivor so its rep persists.
+    const survivor = (clusters[b].frozen && !clusters[a].frozen) ? b : a;
+    const absorbed = survivor === a ? b : a;
+    mergeClusters(clusters[survivor], clusters[absorbed]);
+    active[absorbed] = false;
+    activeCount--;
+
+    // Repair the neighbor arrays: the survivor moved, the absorbed vanished.
+    // Anyone pointing at either rescans; everyone else just checks whether
+    // the merged cluster came closer than their current partner.
+    computeNN(survivor);
+    for (let i = 0; i < clusters.length; i++) {
+      if (!active[i] || i === survivor) continue;
+      if (nn[i] === a || nn[i] === b) {
+        computeNN(i);
+      } else {
+        const d = cost(i, survivor);
+        if (d < nnd[i]) { nnd[i] = d; nn[i] = survivor; }
+      }
+    }
+  }
+  return clusters.filter((c, i) => active[i]);
+}
+
+/* ---- representative selection and refinement ---- */
+
+function finalizeReps(clusters, unique, wv) {
+  clusters.forEach(c => {
+    if (c.frozen) return;   // pinned art stays exactly as drawn
+    if (state.repMode === "hybrid" || c.members.length === 1) { refreshHybridRep(c); return; }
+    if (state.repMode === "most-used") {
+      const best = c.members.reduce((a, b) => unique[b].count > unique[a].count ? b : a);
+      c.rep = Uint8Array.from(unique[best].pixels);
+      return;
+    }
+    // best-fit: the member with the least frequency-weighted error to the rest.
+    // For huge clusters an O(m^2) scan is wasteful; approximate by picking the
+    // member closest to the hybrid rep instead.
+    let bestIdx = c.members[0], bestErr = Infinity;
+    if (c.members.length > 256) {
+      refreshHybridRep(c);
+      for (const m of c.members) {
+        const err = wssd(unique[m].pixels, c.rep, wv);
+        if (err < bestErr) { bestErr = err; bestIdx = m; }
+      }
+    } else {
+      for (const m of c.members) {
+        let err = 0;
+        for (const o of c.members) {
+          if (o !== m) err += unique[o].count * wssd(unique[m].pixels, unique[o].pixels, wv);
+        }
+        if (err < bestErr) { bestErr = err; bestIdx = m; }
+      }
+    }
+    c.rep = Uint8Array.from(unique[bestIdx].pixels);
+  });
+}
+
+// K-means style polish: reassign every tile to its nearest final
+// representative, rebuild clusters, recompute representatives. Never grows
+// the cluster count (emptied clusters are dropped), so a target stays met.
+function refineClusters(clusters, unique, wv, passes) {
+  for (let pass = 0; pass < passes; pass++) {
+    const reps = clusters.map(c => c.rep);
+    const next = clusters.map(c => {
+      const n = newCluster();
+      if (c.frozen) {
+        n.frozen = true;
+        n.pinnedIdx = c.pinnedIdx;
+        n.rep = Uint8Array.from(c.rep);
+      }
+      return n;
+    });
+    // Pinned tiles are not free to move: they stay in their frozen cluster.
+    const frozenClusterOf = new Map();
+    clusters.forEach((c, i) => { if (c.frozen) frozenClusterOf.set(c.pinnedIdx, i); });
+    unique.forEach((tile, idx) => {
+      const home = frozenClusterOf.get(idx);
+      if (home !== undefined) { addTileToCluster(next[home], unique, idx); return; }
+      let best = 0, bestD = Infinity;
+      for (let c = 0; c < reps.length; c++) {
+        const d = wssd(tile.pixels, reps[c], wv);
+        if (d < bestD) { bestD = d; best = c; }
+      }
+      addTileToCluster(next[best], unique, idx);
+    });
+    clusters = next.filter(c => c.members.length > 0);
+    finalizeReps(clusters, unique, wv);
+  }
+  return clusters;
+}
+
+function clustersToResult(clusters, unique) {
+  const assign = new Array(unique.length);
+  clusters.forEach((c, ci) => c.members.forEach(m => { assign[m] = ci; }));
+  return { reps: clusters.map(c => c.rep), assign };
+}
+
+// Rebuild the image from cluster representatives and note which tile
+// positions changed, for the preview highlight.
+function rebuildImage(res) {
+  const { width: w, height: h, shades, unique, tileMap } = state;
+  const tilesX = w / TILE_PX;
+  const reduced = new Uint8Array(shades.length);
+  const changedTiles = [];
+  for (let t = 0; t < tileMap.length; t++) {
+    const rep = res.reps[res.assign[tileMap[t]]];
+    const tx = t % tilesX, ty = Math.floor(t / tilesX);
+    let changed = false;
+    for (let y = 0; y < TILE_PX; y++) {
+      for (let x = 0; x < TILE_PX; x++) {
+        const v = rep[y * TILE_PX + x];
+        const pos = (ty * TILE_PX + y) * w + tx * TILE_PX + x;
+        if (shades[pos] !== v) changed = true;
+        reduced[pos] = v;
+      }
+    }
+    if (changed) changedTiles.push(t);
+  }
+  res.reducedShades = reduced;
+  res.changedTiles = changedTiles;
+  return res;
+}
+
+// Unique-tile indices that appear at any protected position. Protection is
+// per unique tile: since the pinned tile occupies a VRAM slot regardless,
+// keeping ALL its copies unchanged costs nothing and loses no budget.
+function pinnedUniqueIndices() {
+  const pinned = new Set();
+  if (!state.protectedTiles) return pinned;
+  for (let t = 0; t < state.tileMap.length; t++) {
+    if (state.protectedTiles[t]) pinned.add(state.tileMap[t]);
+  }
+  return pinned;
+}
+
+function recompute() {
+  if (!state.shades) return;
+  const unique = state.unique;
+  const wv = pixelWeights();
+  const pinned = pinnedUniqueIndices();
+
+  // Agglomerative is O(n^2) in unique tiles; past the cap use greedy and say so.
+  const wantAgglo = state.algorithm === "agglomerative";
+  const useAgglo = wantAgglo && unique.length <= AGGLO_MAX;
+
+  let clusters;
+  let usedThreshold = null;
+  if (state.mode === "target") {
+    // Pinned tiles can't merge with each other, so they set a floor.
+    const target = Math.max(1, state.target, pinned.size);
+    if (unique.length <= target) {
+      clusters = greedyCluster(unique, 0, wv, pinned); // nothing needs merging
+      usedThreshold = 0;
+    } else if (useAgglo) {
+      clusters = agglomerativeCluster(unique, wv, { target }, pinned);
+    } else {
+      // Binary-search the smallest greedy threshold that fits the target. With
+      // frequency protection on, costs scale up by the Ward factor, so the
+      // search ceiling scales with the heaviest tile.
+      const maxCount = unique.reduce((m, t) => Math.max(m, t.count), 1);
+      let lo = 1;
+      let hi = Math.ceil(MAX_DIST * (state.freqWeight ? Math.max(1, maxCount / 2) : 1));
+      let best = null;
+      while (lo <= hi) {
+        const mid = Math.floor((lo + hi) / 2);
+        const res = greedyCluster(unique, mid, wv, pinned);
+        if (res.length <= target) { best = res; usedThreshold = mid; hi = mid - 1; }
+        else lo = mid + 1;
+      }
+      clusters = best;   // the ceiling always fits (everything joins the pinned tiles)
+    }
+  } else {
+    clusters = useAgglo
+      ? agglomerativeCluster(unique, wv, { threshold: state.threshold }, pinned)
+      : greedyCluster(unique, state.threshold, wv, pinned);
+    usedThreshold = state.threshold;
+  }
+
+  finalizeReps(clusters, unique, wv);
+  if (state.refinePasses > 0) clusters = refineClusters(clusters, unique, wv, state.refinePasses);
+
+  const res = clustersToResult(clusters, unique);
+  res.usedThreshold = usedThreshold;
+  res.aggloFellBack = wantAgglo && !useAgglo;
+  res.pinnedCount = pinned.size;
+  state.result = rebuildImage(res);
+}
+
+/* ============================================================
+   Image loading
+   ============================================================ */
+
+// Quantize a decoded image and reset the tool around it. Shared by file
+// loading and the cross-tool handoff (e.g. "Send to Reducer" in the Pixelizer).
+function ingestImage(img, name) {
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = img.width; canvas.height = img.height;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0);
+    const data = ctx.getImageData(0, 0, img.width, img.height).data;
+
+    const { shades, w, h } = quantizeImage(data, img.width, img.height);
+    const { unique, tileMap } = sliceTiles(shades, w, h);
+    state.fileName = name;
+    state.width = w; state.height = h;
+    state.shades = shades;
+    state.unique = unique;
+    state.tileMap = tileMap;
+    state.protectedTiles = new Uint8Array(tileMap.length);   // protection resets per image
+    recompute();
+    render();
+  } catch (err) {
+    alert("Could not load image: " + err.message);
+  }
+}
+
+function loadImageFile(file) {
+  const img = new Image();
+  img.onload = () => {
+    ingestImage(img, file.name);
+    URL.revokeObjectURL(img.src);
+  };
+  img.onerror = () => alert("Could not read that file as an image.");
+  img.src = URL.createObjectURL(file);
+}
+
+// Pick up an image handed over by another tool (read-and-removed, so a
+// reload of this page goes back to the normal drop zone).
+function loadHandoffImage(handoff) {
+  const img = new Image();
+  img.onload = () => ingestImage(img, handoff.name || "handoff.png");
+  img.onerror = () => alert("Could not read the handed-over image.");
+  img.src = handoff.dataUrl;
+}
+
+/* ============================================================
+   Rendering
+   ============================================================ */
+
+function autoZoom() {
+  // Pick the largest integer zoom that keeps the preview around 480px wide.
+  return Math.max(1, Math.min(4, Math.floor(480 / state.width)));
+}
+
+function paintShades(canvas, shades, zoom, colors) {
+  const { width: w, height: h } = state;
+  // Build the image once at 1x via ImageData, then blit scaled: much faster
+  // than per-pixel fillRect, and stays crisp thanks to image-rendering: pixelated.
+  const rgb = colors.map(c => [
+    parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16),
+  ]);
+  const src = document.createElement("canvas");
+  src.width = w; src.height = h;
+  const sctx = src.getContext("2d");
+  const img = sctx.createImageData(w, h);
+  for (let i = 0; i < shades.length; i++) {
+    const [r, g, b] = rgb[shades[i]];
+    img.data[i * 4] = r; img.data[i * 4 + 1] = g; img.data[i * 4 + 2] = b;
+    img.data[i * 4 + 3] = 255;
+  }
+  sctx.putImageData(img, 0, 0);
+
+  canvas.width = w * zoom; canvas.height = h * zoom;
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(src, 0, 0, canvas.width, canvas.height);
+  return ctx;
+}
+
+const PROTECT_COLOR = "#4fae7a";   // protected-tile overlay (both previews)
+
+function outlineTile(ctx, t, tilesX, zoom) {
+  ctx.strokeRect(
+    (t % tilesX) * TILE_PX * zoom + 0.5,
+    Math.floor(t / tilesX) * TILE_PX * zoom + 0.5,
+    TILE_PX * zoom - 1, TILE_PX * zoom - 1);
+}
+
+function drawProtectedOverlay(ctx, zoom, fill) {
+  if (!state.protectedTiles) return;
+  const tilesX = state.width / TILE_PX;
+  ctx.strokeStyle = PROTECT_COLOR;
+  ctx.fillStyle = "rgba(79, 174, 122, 0.28)";
+  ctx.lineWidth = 1;
+  for (let t = 0; t < state.protectedTiles.length; t++) {
+    if (!state.protectedTiles[t]) continue;
+    if (fill) {
+      ctx.fillRect(
+        (t % tilesX) * TILE_PX * zoom, Math.floor(t / tilesX) * TILE_PX * zoom,
+        TILE_PX * zoom, TILE_PX * zoom);
+    }
+    outlineTile(ctx, t, tilesX, zoom);
+  }
+}
+
+function render() {
+  document.getElementById("btn-download").disabled = !state.result;
+  const panel = document.getElementById("panel");
+  panel.innerHTML = "";
+
+  if (!state.shades) {
+    const card = el("div", "card");
+    card.appendChild(el("h2", null, "Load an image"));
+    const drop = el("div", "drop-zone",
+      "Click to choose a PNG, or drop one here. It will be quantized to the four " +
+      "DMG shades and sliced into 8×8 tiles.");
+    drop.addEventListener("click", () => document.getElementById("file-input").click());
+    drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+    drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+    drop.addEventListener("drop", (e) => {
+      e.preventDefault();
+      drop.classList.remove("over");
+      const file = e.dataTransfer.files[0];
+      if (file) loadImageFile(file);
+    });
+    card.appendChild(drop);
+    panel.appendChild(card);
+    return;
+  }
+
+  const res = state.result;
+  const cols = el("div", "cols");
+
+  /* ---- left: controls + stats ---- */
+  const ctl = el("div", "card col-library");
+  ctl.appendChild(el("h2", null, "Reduction"));
+
+  const modeRow = el("div", "row");
+  [["target", "Target count"], ["threshold", "Threshold"]].forEach(([mode, lbl]) => {
+    const b = el("button", "mode-btn" + (state.mode === mode ? " active" : ""), lbl);
+    b.addEventListener("click", () => { state.mode = mode; recompute(); render(); });
+    modeRow.appendChild(b);
+  });
+  ctl.appendChild(modeRow);
+  ctl.appendChild(spacer(10));
+
+  const algoField = el("div", "field");
+  algoField.appendChild(label("Algorithm"));
+  algoField.appendChild(selectFrom(
+    [{ value: "greedy", label: "Greedy (fast)" },
+     { value: "agglomerative", label: "Agglomerative (quality)" }],
+    state.algorithm, v => { state.algorithm = v; recompute(); render(); }));
+  ctl.appendChild(algoField);
+  if (state.algorithm === "agglomerative") {
+    ctl.appendChild(el("p", "hint", state.result && state.result.aggloFellBack
+      ? "Over " + AGGLO_MAX + " unique tiles — fell back to greedy for this image."
+      : "Merges the globally cheapest pair each step. Can take a few seconds on very detailed images."));
+  }
+  ctl.appendChild(spacer(10));
+
+  if (state.mode === "target") {
+    const tField = el("div", "field");
+    tField.appendChild(label("Target unique tiles"));
+    const tIn = numberInput(state.target, 1, 2048);
+    tIn.addEventListener("change", () => {
+      state.target = clampInt(tIn.value, 1, 2048);
+      recompute(); render();
+    });
+    tField.appendChild(tIn);
+    ctl.appendChild(tField);
+    ctl.appendChild(el("p", "hint", res.usedThreshold != null
+      ? "Finds the gentlest merge that fits the target (used threshold: " + res.usedThreshold + ")."
+      : "Merges the cheapest pair until the count fits the target."));
+    if (res.pinnedCount > Math.max(1, state.target)) {
+      ctl.appendChild(el("p", "hint",
+        res.pinnedCount + " protected tiles can't merge with each other, so they set the floor."));
+    }
+  } else {
+    const sField = el("div", "field");
+    sField.appendChild(label("Merge distance (0 = exact only, " + MAX_DIST + " = everything)"));
+    const slider = document.createElement("input");
+    slider.type = "range"; slider.min = 0; slider.max = 600; slider.value = state.threshold;
+    slider.addEventListener("change", () => {
+      state.threshold = Number(slider.value);
+      recompute(); render();
+    });
+    sField.appendChild(slider);
+    sField.appendChild(el("span", "hint", "Distance ≤ " + state.threshold));
+    ctl.appendChild(sField);
+  }
+
+  /* ---- merge behavior options ---- */
+  ctl.appendChild(spacer(12));
+  const repField = el("div", "field");
+  repField.appendChild(label("Merged tile becomes"));
+  repField.appendChild(selectFrom(
+    [{ value: "hybrid", label: "Hybrid (synthesized)" },
+     { value: "most-used", label: "Most-used member tile" },
+     { value: "best-fit", label: "Best-fit member tile" }],
+    state.repMode, v => { state.repMode = v; recompute(); render(); }));
+  ctl.appendChild(repField);
+  ctl.appendChild(el("p", "hint",
+    state.repMode === "hybrid"
+      ? "Builds a new tile from the per-pixel majority of the merged tiles."
+      : state.repMode === "most-used"
+        ? "Keeps the most frequent original tile; no synthesized art."
+        : "Keeps the original tile with the least total error to the others."));
+
+  ctl.appendChild(spacer(6));
+  ctl.appendChild(toggle("Protect frequent tiles", state.freqWeight,
+    v => { state.freqWeight = v; recompute(); render(); }));
+  ctl.appendChild(el("p", "hint",
+    "Weighs merges by how often tiles are used, so common art resists changing."));
+  ctl.appendChild(spacer(6));
+  ctl.appendChild(toggle("Weight tile edges 2×", state.edgeWeight,
+    v => { state.edgeWeight = v; recompute(); render(); }));
+  ctl.appendChild(el("p", "hint",
+    "Border pixels count double: seams between neighboring tiles stay cleaner."));
+
+  ctl.appendChild(spacer(6));
+  const refField = el("div", "field");
+  refField.appendChild(label("Refinement passes (0-3)"));
+  const refIn = numberInput(state.refinePasses, 0, 3);
+  refIn.addEventListener("change", () => {
+    state.refinePasses = clampInt(refIn.value, 0, 3);
+    recompute(); render();
+  });
+  refField.appendChild(refIn);
+  ctl.appendChild(refField);
+  ctl.appendChild(el("p", "hint",
+    "Re-matches every tile to its nearest merged tile afterward (k-means style polish)."));
+
+  ctl.appendChild(spacer(12));
+  const before = state.unique.length;
+  const after = res.reps.length;
+  const table = document.createElement("table");
+  table.className = "stats-table";
+  const trow = (k, v) => {
+    const tr = document.createElement("tr");
+    tr.appendChild(el("td", null, k));
+    tr.appendChild(el("td", null, v));
+    table.appendChild(tr);
+  };
+  trow("Image", state.fileName + " (" + state.width + "×" + state.height + ")");
+  trow("Tile positions", String(state.tileMap.length));
+  trow("Unique tiles before", String(before));
+  trow("Unique tiles after", String(after));
+  trow("Algorithm", res.aggloFellBack ? "greedy (fallback)" : state.algorithm);
+  trow("Tiles changed", res.changedTiles.length + " / " + state.tileMap.length);
+  const protectedCount = state.protectedTiles.reduce((s, v) => s + v, 0);
+  trow("Protected", protectedCount + " positions (" + res.pinnedCount + " tiles pinned)");
+  ctl.appendChild(table);
+
+  const fits = after <= TILE_BUDGET;
+  ctl.appendChild(el("p", fits ? "budget-ok" : "budget-over",
+    after + " / " + TILE_BUDGET + " VRAM budget" + (fits ? "" : "  (still over)")));
+
+  ctl.appendChild(spacer(12));
+  const viewRow = el("div", "row");
+  const palField = el("div", "field");
+  palField.appendChild(label("Palette"));
+  palField.appendChild(selectFrom(
+    PALETTES.map((p, i) => ({ value: i, label: p.name })),
+    state.paletteIndex, v => { state.paletteIndex = Number(v); render(); }));
+  const zoomField = el("div", "field");
+  zoomField.appendChild(label("Zoom"));
+  zoomField.appendChild(selectFrom(
+    [{ value: 0, label: "auto" }, 1, 2, 3, 4],
+    state.zoom, v => { state.zoom = Number(v); render(); }));
+  viewRow.append(palField, zoomField);
+  ctl.appendChild(viewRow);
+  ctl.appendChild(spacer(6));
+  ctl.appendChild(toggle("Highlight changed tiles", state.highlightChanged,
+    v => { state.highlightChanged = v; render(); }));
+
+  ctl.appendChild(spacer(12));
+  const loadOther = el("button", null, "Load another PNG");
+  loadOther.addEventListener("click", () => document.getElementById("file-input").click());
+  ctl.appendChild(loadOther);
+
+  cols.appendChild(ctl);
+
+  /* ---- right: before / after previews ---- */
+  const zoom = state.zoom || autoZoom();
+  const colors = PALETTES[state.paletteIndex].colors;
+
+  const beforeCard = el("div", "card col-editor");
+  beforeCard.appendChild(el("h2", null, "Original (quantized) — " + before + " tiles"));
+
+  /* Protect brush: paint tiles that must come through the reduction
+     untouched. Click/drag paints single tiles; Shift-drag marks a rectangle. */
+  const toolRow = el("div", "row");
+  [["protect", "Protect"], ["erase", "Erase"]].forEach(([tool, lbl]) => {
+    const b = el("button", "mode-btn" + (state.protectTool === tool ? " active" : ""), lbl);
+    b.addEventListener("click", () => { state.protectTool = tool; render(); });
+    toolRow.appendChild(b);
+  });
+  const clearBtn = el("button", null, "Clear");
+  clearBtn.addEventListener("click", () => {
+    state.protectedTiles.fill(0);
+    recompute(); render();
+  });
+  toolRow.appendChild(clearBtn);
+  beforeCard.appendChild(toolRow);
+  beforeCard.appendChild(el("p", "hint",
+    "Drag to mark tiles that must not change (faces, text). Shift-drag for a rectangle."));
+
+  const beforeWrap = el("div", "preview-wrap");
+  const beforeCanvas = document.createElement("canvas");
+  beforeCanvas.style.cursor = "crosshair";
+  beforeCanvas.style.touchAction = "none";
+  const tilesX = state.width / TILE_PX, tilesY = state.height / TILE_PX;
+
+  const repaintBefore = (pendingRect) => {
+    const ctx = paintShades(beforeCanvas, state.shades, zoom, colors);
+    drawProtectedOverlay(ctx, zoom, true);
+    if (pendingRect) {
+      ctx.strokeStyle = PROTECT_COLOR;
+      ctx.lineWidth = 1;
+      const x0 = Math.min(pendingRect.a.tx, pendingRect.b.tx), x1 = Math.max(pendingRect.a.tx, pendingRect.b.tx);
+      const y0 = Math.min(pendingRect.a.ty, pendingRect.b.ty), y1 = Math.max(pendingRect.a.ty, pendingRect.b.ty);
+      ctx.strokeRect(
+        x0 * TILE_PX * zoom + 0.5, y0 * TILE_PX * zoom + 0.5,
+        (x1 - x0 + 1) * TILE_PX * zoom - 1, (y1 - y0 + 1) * TILE_PX * zoom - 1);
+    }
+  };
+  repaintBefore(null);
+
+  const tileAt = (e) => {
+    const r = beforeCanvas.getBoundingClientRect();
+    const tx = Math.floor((e.clientX - r.left) / (TILE_PX * zoom));
+    const ty = Math.floor((e.clientY - r.top) / (TILE_PX * zoom));
+    if (tx < 0 || ty < 0 || tx >= tilesX || ty >= tilesY) return null;
+    return { tx, ty };
+  };
+  const brushValue = () => state.protectTool === "protect" ? 1 : 0;
+
+  // Painting only touches state.protectedTiles + the local overlay; the
+  // (potentially slow) recompute runs once, on pointerup.
+  let painting = false, rectAnchor = null, dirty = false;
+  const paintTile = (cell) => {
+    const i = cell.ty * tilesX + cell.tx;
+    if (state.protectedTiles[i] !== brushValue()) {
+      state.protectedTiles[i] = brushValue();
+      dirty = true;
+    }
+  };
+  beforeCanvas.addEventListener("pointerdown", (e) => {
+    const cell = tileAt(e);
+    if (!cell) return;
+    beforeCanvas.setPointerCapture(e.pointerId);
+    if (e.shiftKey) {
+      rectAnchor = cell;
+      repaintBefore({ a: rectAnchor, b: cell });
+    } else {
+      painting = true;
+      paintTile(cell);
+      repaintBefore(null);
+    }
+  });
+  beforeCanvas.addEventListener("pointermove", (e) => {
+    const cell = tileAt(e);
+    if (!cell) return;
+    if (rectAnchor) repaintBefore({ a: rectAnchor, b: cell });
+    else if (painting) { paintTile(cell); repaintBefore(null); }
+  });
+  beforeCanvas.addEventListener("pointerup", (e) => {
+    if (rectAnchor) {
+      const cell = tileAt(e) || rectAnchor;
+      const x0 = Math.min(rectAnchor.tx, cell.tx), x1 = Math.max(rectAnchor.tx, cell.tx);
+      const y0 = Math.min(rectAnchor.ty, cell.ty), y1 = Math.max(rectAnchor.ty, cell.ty);
+      for (let ty = y0; ty <= y1; ty++)
+        for (let tx = x0; tx <= x1; tx++)
+          paintTile({ tx, ty });
+    }
+    painting = false;
+    rectAnchor = null;
+    if (dirty) { recompute(); render(); }
+    else repaintBefore(null);
+  });
+
+  beforeWrap.appendChild(beforeCanvas);
+  beforeCard.appendChild(beforeWrap);
+  cols.appendChild(beforeCard);
+
+  const afterCard = el("div", "card col-editor");
+  afterCard.appendChild(el("h2", null, "Reduced — " + after + " tiles"));
+  const afterWrap = el("div", "preview-wrap");
+  const afterCanvas = document.createElement("canvas");
+  const actx = paintShades(afterCanvas, res.reducedShades, zoom, colors);
+  if (state.highlightChanged) {
+    actx.strokeStyle = "#e08a5a";
+    actx.lineWidth = 1;
+    res.changedTiles.forEach(t => outlineTile(actx, t, tilesX, zoom));
+  }
+  drawProtectedOverlay(actx, zoom, false);   // confirm the protected art came through
+  afterWrap.appendChild(afterCanvas);
+  afterCard.appendChild(afterWrap);
+  cols.appendChild(afterCard);
+
+  panel.appendChild(cols);
+}
+
+/* ============================================================
+   Download
+   ============================================================ */
+
+function downloadReduced() {
+  if (!state.result) return;
+  const canvas = document.createElement("canvas");
+  // 1x scale so the file re-imports directly as tiles.
+  paintShades(canvas, state.result.reducedShades, 1, PALETTES[state.paletteIndex].colors);
+  const base = (state.fileName || "image").replace(/\.[^.]*$/, "").replace(/[^a-z0-9_-]+/gi, "_");
+  canvas.toBlob(blob => {
+    if (blob) downloadBlob(base + "-reduced.png", blob);
+    else alert("Could not encode the PNG.");
+  }, "image/png");
+}
+
+/* ============================================================
+   Wiring
+   ============================================================ */
+
+document.getElementById("btn-load").addEventListener("click", () =>
+  document.getElementById("file-input").click());
+document.getElementById("btn-download").addEventListener("click", downloadReduced);
+document.getElementById("file-input").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (file) loadImageFile(file);
+  e.target.value = "";   // allow reloading the same file
+});
+
+render();
+
+// If another tool navigated here with an image (Pixelizer's "Send to
+// Reducer"), load it now; the drop zone shows until the image decodes.
+const handoff = takeImageHandoff();
+if (handoff) loadHandoffImage(handoff);

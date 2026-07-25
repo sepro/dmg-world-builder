@@ -1,35 +1,26 @@
 {
-  "name": "Proost Slide Decks",
-  // Recent Python base image; the Node feature adds npm for Claude Code + tooling.
+  "name": "GB Tool Suite",
   "image": "mcr.microsoft.com/devcontainers/python:3.12",
   "features": {
     "ghcr.io/devcontainers/features/node:1": {
       "version": "lts"
     }
   },
-
-  // Installed once when the container is created:
-  //  - Claude Code CLI (the `claude` command, used to drive deck generation)
-  //  - python-pptx so the frontend-slides PPTX import script works
-  //  - playwright (optional) for the skill's PDF export script
-  "postCreateCommand": "npm install -g @anthropic-ai/claude-code && pip install --user pip pillow",
-
+  "postCreateCommand": "npm ci && npx playwright install --with-deps chromium",
   "customizations": {
     "vscode": {
       "extensions": [
-        "anthropic.claude-code",
-        "ms-python.python",
-        "ms-vscode.live-server"
+        "svelte.svelte-vscode",
+        "dbaeumer.vscode-eslint"
       ],
       "settings": {
         "editor.formatOnSave": true
       }
     }
   },
-
-  // Live-server / preview port for opening built decks in the browser.
-  "forwardPorts": [5500],
-
-  // Friendly note for whoever opens the container.
-  "postAttachCommand": "echo 'Ready'"
+  "forwardPorts": [
+    5173,
+    4173
+  ],
+  "postAttachCommand": "echo GB Tool Suite ready \u2014 run npm run dev"
 }

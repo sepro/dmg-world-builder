@@ -1,0 +1,41 @@
+/* Landing-page-specific styling. Shared tokens live in gb-theme.css. */
+
+  .hero { text-align: center; padding: 48px 16px 24px; }
+  .hero h1 {
+    margin: 0 0 6px;
+    color: var(--accent);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    font-size: 22px;
+  }
+  .hero p { margin: 0; color: var(--muted); }
+
+  .tools {
+    display: flex;
+    gap: 20px;
+    justify-content: center;
+    flex-wrap: wrap;
+    padding: 24px 16px 48px;
+  }
+  .tool-card {
+    display: block;
+    text-decoration: none;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    padding: 20px;
+    width: 340px;
+  }
+  .tool-card:hover { border-color: var(--accent); }
+  .tool-card:hover h2 { color: var(--accent); }
+  .tool-card h2 {
+    margin: 12px 0 8px;
+    font-size: 14px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+  .tool-card p { margin: 0 0 12px; color: var(--muted); font-size: 12px; }
+  .tool-card .go { color: var(--accent); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; }
+  .tool-card canvas { width: 100%; height: 96px; border: 1px solid var(--line); background: var(--gb-3); }
+
+  footer { text-align: center; color: var(--muted); font-size: 11px; padding-bottom: 24px; }

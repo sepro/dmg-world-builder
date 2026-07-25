@@ -1,0 +1,3699 @@
+// @ts-nocheck
+import { el, label, spacer, inputText, selectFrom, numberInput, clampInt, toggle, openModal, closeModal, downloadBlob, downloadText, copyText } from "../lib/common.js";
+
+"use strict";
+
+/* ============================================================
+   Project model
+   ============================================================ */
+
+const FORMAT_VERSION = 1;
+const TILE_PX = 8;          // tile is always 8x8 pixels on Game Boy
+const PIXELS_PER_TILE = TILE_PX * TILE_PX;
+
+// Default behavior types. Direction is folded into the name (ledge_down rather
+// than a separate stored direction) so the metatile needs no behavior payload.
+const DEFAULT_BEHAVIORS = [
+  "normal", "tall_grass", "water",
+  "ledge_up", "ledge_down", "ledge_left", "ledge_right",
+  "warp", "door", "counter",
+];
+
+const COLLISION_OPTIONS = ["walk", "solid"];
+// Ledge behaviors, in the order their brushes appear in the collision
+// toolbar. The name is the direction the player travels when jumping it.
+const LEDGE_OPTIONS = ["ledge_up", "ledge_down", "ledge_left", "ledge_right"];
+
+// Per-edge borders. A border blocks movement across that edge of the
+// metatile in both directions — you can neither leave nor enter through it —
+// while the unbordered edges stay open. They combine freely with each other
+// and with any behavior, so they live in their own array rather than in the
+// single-valued behavior field. Brush names are prefixed to keep one flat
+// brush namespace in the collision toolbar.
+const BORDER_OPTIONS = ["up", "down", "left", "right"];
+const BORDER_BRUSHES = BORDER_OPTIONS.map(s => "border_" + s);
+const BORDER_CLEAR_BRUSH = "border_none";
+const BORDER_GLYPHS = { up: "↑", down: "↓", left: "←", right: "→" };
+
+// Surface: what the ground under the player is made of, as opposed to what
+// movement does there. Snow is the only one so far — the engine presses
+// footprints into it — and like borders it is orthogonal to collision and to
+// the single-valued behavior field, so a snowy ledge or snowy tall grass is
+// expressible. Stored as a plain boolean on the metatile (absent = false, so
+// older project files import unchanged).
+const SNOW_BRUSH = "snow";
+const SNOW_CLEAR_BRUSH = "snow_none";
+
+// A metatile's borders, normalized: always a fresh array, only known sides,
+// in BORDER_OPTIONS order so comparisons and keys are stable.
+function bordersOf(m) {
+  const have = Array.isArray(m.borders) ? m.borders : [];
+  return BORDER_OPTIONS.filter(s => have.includes(s));
+}
+
+// The {collision, behavior, borders, snow} a collision-mode brush would leave
+// on metatile `src`:
+//   • a border brush adds that one edge, leaving collision/behavior alone;
+//   • "no border" clears all four edges;
+//   • the snow brushes set or clear the surface flag and touch nothing else;
+//   • a ledge brush sets the behavior and keeps the collision value (the
+//     engine blocks a ledge from every direction but the jump anyway);
+//   • walk/solid clears a ledge — so those double as the ledge eraser — but
+//     leaves any other behavior (tall grass, water, warp) untouched.
+// Borders and snow survive every brush that is not their own: they are
+// orthogonal to what the rest of the collision data says.
+function brushEdit(brush, src) {
+  const base = {
+    collision: src.collision, behavior: src.behavior,
+    borders: bordersOf(src), snow: !!src.snow,
+  };
+  if (brush === SNOW_BRUSH) return { ...base, snow: true };
+  if (brush === SNOW_CLEAR_BRUSH) return { ...base, snow: false };
+  if (brush === BORDER_CLEAR_BRUSH) return { ...base, borders: [] };
+  if (BORDER_BRUSHES.includes(brush)) {
+    const side = brush.slice("border_".length);
+    return { ...base, borders: BORDER_OPTIONS.filter(s => s === side || base.borders.includes(s)) };
+  }
+  if (LEDGE_OPTIONS.includes(brush)) return { ...base, behavior: brush };
+  return {
+    ...base,
+    collision: brush,
+    behavior: LEDGE_OPTIONS.includes(src.behavior) ? "normal" : src.behavior,
+  };
+}
+
+// True when a metatile already matches what the brush would write, so a
+// drag stroke can skip it instead of churning variants.
+function brushMatches(m, brush) {
+  const e = brushEdit(brush, m);
+  return m.collision === e.collision && m.behavior === e.behavior &&
+         !!m.snow === e.snow &&
+         bordersOf(m).join(",") === e.borders.join(",");
+}
+// Overlay coverage: "full" hides the whole sprite (canopy, archway),
+// "bottom" hides only the lower half (tall grass -- feet sink in).
+const OVERLAY_MODE_OPTIONS = [
+  { value: "full", label: "Full sprite" },
+  { value: "bottom", label: "Bottom half (tall grass)" },
+];
+
+// Event types live on a map at metatile (16px) resolution, which is the grid the
+// player actually moves on. Each carries a letter and an editor-only marker color.
+const EVENT_TYPES = {
+  spawn:   { label: "Spawn",   letter: "P", color: "#6ade8f" },
+  warp:    { label: "Warp",    letter: "W", color: "#5ad6ff" },
+  sign:    { label: "Sign",    letter: "S", color: "#ffd23f" },
+  item:    { label: "Item",    letter: "I", color: "#ff9f45" },
+  npc:     { label: "NPC",     letter: "N", color: "#e06ad6" },
+  trigger: { label: "Trigger", letter: "T", color: "#e0563f" },
+  dialog:  { label: "Dialog",  letter: "D", color: "#b9a0ff" },
+};
+const EVENT_ORDER = ["spawn", "warp", "sign", "item", "npc", "trigger", "dialog"];
+// The in-game dialog box shows 2 rows of 18 characters.
+const DIALOG_MAX_CHARS = 18;
+// How an NPC moves. "static" holds its tile (facing is authored separately).
+// "walk_path" patrols a list of waypoints there-and-back (ping-pong); once at
+// the last waypoint it retraces the route to the first. "walk_path_loop"
+// closes the route into a cycle, walking last -> first straight back to the
+// start. Every path segment must be axis-aligned (a straight run of tiles).
+const NPC_MOVEMENTS = ["static", "walk_path", "walk_path_loop"];
+// What a walking NPC does when something (not the player) blocks its next tile.
+// "stop" waits and resumes when the way clears; "reverse" turns around and runs
+// the route the other way. The player blocking always forces a stop regardless.
+const NPC_ONBLOCK = ["stop", "reverse"];
+// Most waypoints a walking NPC may have, counting the spawn cell as the first.
+// Matches OW_NPC_PATH_MAX in the engine; the converter warns past it too.
+const NPC_PATH_MAX = 8;
+// Which way a static NPC faces. "player" is the default: it always turns to
+// face the player. A compass direction pins the facing until it is spoken to,
+// when it turns to meet the player, then reverts once the box closes. Only
+// meaningful for "static" -- a walking NPC faces its direction of travel.
+const NPC_FACINGS = ["player", "down", "up", "left", "right"];
+// Facing direction the player starts in at a spawn point.
+const FACINGS = ["down", "up", "left", "right"];
+// How a warp is presented by the engine (door fade, stair slide, fall, plain teleport).
+const WARP_TYPES = ["transport", "door", "stairs", "fall"];
+// Facing after the warp; "same" keeps the direction the player walked in with.
+const WARP_FACINGS = ["same", "up", "down", "left", "right"];
+
+// Build a fresh event with sensible per-type defaults.
+function makeEvent(type, x, y) {
+  const e = { id: 0, type, x, y };   // id is filled in by the caller via genId()
+  if (type === "spawn") { e.facing = "down"; e.isDefault = false; }
+  else if (type === "warp") { e.toMap = null; e.toX = 0; e.toY = 0; e.warpType = "transport"; e.facing = "same"; }
+  else if (type === "sign") { e.text = ""; }
+  else if (type === "item") { e.item = ""; e.qty = 1; e.flag = ""; }
+  else if (type === "npc") { e.sprite = ""; e.movement = "static"; e.facing = "player"; e.onBlock = "stop"; e.path = []; e.script = ""; }
+  else if (type === "trigger") { e.script = ""; }
+  else if (type === "dialog") { e.w = 1; e.h = 1; e.text = ""; }
+  return e;
+}
+
+// Dialog zones cover a w×h rectangle of cells; every other event is one cell.
+function eventContains(e, x, y) {
+  if (e.type === "dialog")
+    return x >= e.x && x < e.x + (e.w || 1) && y >= e.y && y < e.y + (e.h || 1);
+  return e.x === x && e.y === y;
+}
+
+function makeDefaultProject() {
+  // nextId hands out unique, stable ids so references survive reordering and
+  // deletion. Array position is only used later when emitting C indices.
+  const project = {
+    formatVersion: FORMAT_VERSION,
+    meta: { name: "Untitled World", target: "GBC, DMG-compatible", tileSize: TILE_PX },
+    nextId: 1,
+    behaviors: [...DEFAULT_BEHAVIORS],
+    palettes: [],
+    tilesets: [],
+    maps: [],
+  };
+
+  const id = () => project.nextId++;
+
+  project.palettes.push(
+    { id: id(), name: "GB Green",  colors: ["#e0f8d0", "#88c070", "#346856", "#081820"] },
+    { id: id(), name: "Grayscale", colors: ["#ffffff", "#aaaaaa", "#555555", "#000000"] },
+  );
+  const pal = project.palettes[0].id;        // demo art uses the GB Green palette
+
+  const tileset = {
+    id: id(),
+    name: "main",
+    tileBudget: 176,                 // VRAM tiles the engine can take (the Wispbound
+                                     // engine reserves BG slots 0-79 for font/UI, so
+                                     // the world gets slots 80-255 = 176; adjust per
+                                     // target -- the absolute DMG BG limit is 256)
+    tiles: [],
+    metatiles: [],
+    blocks: [],
+  };
+  project.tilesets.push(tileset);
+
+  seedDemoContent(project, tileset, pal, id);
+
+  // Remember which palette the tile editor renders with by default.
+  project._displayPaletteId = pal;
+  return project;
+}
+
+// Turn 8 strings of "0".."3" into a flat 64-value pixel array, so the demo art
+// below stays readable as a little picture in the source.
+function rows(...r) { return r.join("").split("").map(Number); }
+
+// Fill a fresh project with a tiny overworld set so the editor is explorable
+// immediately. Nothing here is special; it is ordinary authored content.
+function seedDemoContent(project, ts, pal, id) {
+  const addTile = (name, pixels) => {
+    const tile = { id: id(), name, pixels };
+    ts.tiles.push(tile);
+    return tile.id;
+  };
+
+  // Pixel values map through the GB Green palette: 0 lightest, 3 darkest.
+  const blank = addTile("blank", new Array(PIXELS_PER_TILE).fill(0));
+  const grass = addTile("grass", rows(
+    "11111111", "11121111", "11111111", "11111112",
+    "11111111", "12111111", "11111111", "11111121"));
+  const flower = addTile("flower", rows(
+    "11111111", "11111111", "11000111", "11030111",
+    "11000111", "11111111", "11211111", "11111111"));
+  const water = addTile("water", rows(
+    "22222222", "21122112", "22222222", "22222222",
+    "22211222", "22222222", "21122112", "22222222"));
+  // Animate the water: the wave pattern scrolls down one row per frame.
+  const waterTile = ts.tiles.find(t => t.id === water);
+  waterTile.frameRate = 14;
+  waterTile.frames = [
+    rows("22222222", "22222222", "21122112", "22222222",
+         "22222222", "22211222", "22222222", "21122112"),
+    rows("21122112", "22222222", "22222222", "21122112",
+         "22222222", "22222222", "22211222", "22222222"),
+  ];
+  const tree = addTile("tree", rows(
+    "11333111", "13333311", "33333331", "33333331",
+    "13333311", "11313111", "11313111", "11111111"));
+  const path = addTile("path", rows(
+    "00000000", "00010000", "00000000", "00000100",
+    "00000000", "01000000", "00000000", "00001000"));
+  const wall = addTile("wall", rows(
+    "33333333", "32222223", "32222223", "32222223",
+    "32222223", "32222223", "32222223", "33333333"));
+
+  // Metatiles: 4 tile ids (tl, tr, bl, br), a palette per cell, collision, behavior.
+  const mt = (name, tiles, collision, behavior) => {
+    const m = {
+      id: id(), name,
+      tiles,
+      cellPalettes: [pal, pal, pal, pal],
+      collision, behavior,
+    };
+    ts.metatiles.push(m);
+    return m.id;
+  };
+  const mGrass   = mt("grass",   [grass, grass, grass, grass],     "walk", "normal");
+  const mFlowers = mt("flowers", [grass, flower, flower, grass],   "walk", "tall_grass");
+  const mWater   = mt("water",   [water, water, water, water],     "solid", "water");
+  const mForest  = mt("forest",  [tree, tree, tree, tree],         "solid", "normal");
+  const mPath    = mt("path",    [path, path, path, path],         "walk", "normal");
+  const mWall    = mt("wall",    [wall, wall, wall, wall],         "solid", "normal");
+
+  // Blocks: 4 metatile ids (tl, tr, bl, br).
+  const bl = (name, metatiles) => {
+    const b = { id: id(), name, metatiles };
+    ts.blocks.push(b);
+    return b.id;
+  };
+  const bGrass  = bl("grass field", [mGrass, mGrass, mGrass, mGrass]);
+  const bFlower = bl("flower patch", [mGrass, mFlowers, mFlowers, mGrass]);
+  const bPond   = bl("pond",        [mWater, mWater, mWater, mWater]);
+  const bForest = bl("forest",      [mForest, mForest, mForest, mForest]);
+  const bPath   = bl("path",        [mPath, mPath, mPath, mPath]);
+  const bWall   = bl("wall",        [mWall, mWall, mWall, mWall]);
+
+  // A painted 16x16 demo map: grass field, a forest rim, a pond, a path, flowers.
+  const W = 16, H = 16;
+  const grid = new Array(W * H).fill(bGrass);
+  const set = (x, y, b) => { if (x >= 0 && x < W && y >= 0 && y < H) grid[y * W + x] = b; };
+
+  for (let x = 0; x < W; x++) { set(x, 0, bForest); set(x, H - 1, bForest); }
+  for (let y = 0; y < H; y++) { set(0, y, bForest); set(W - 1, y, bForest); }
+  for (let y = 3; y <= 6; y++) for (let x = 9; x <= 12; x++) set(x, y, bPond); // pond
+  for (let y = 1; y < H - 1; y++) set(4, y, bPath);                            // path
+  set(7, 9, bFlower); set(8, 10, bFlower); set(6, 11, bFlower);               // flowers
+  set(2, 13, bWall);  set(3, 13, bWall);                                      // a bit of wall
+
+  project.maps.push({
+    id: id(),
+    name: "demo map",
+    tilesetId: ts.id,
+    width: W, height: H,
+    blockGrid: grid,
+    connections: { north: null, south: null, east: null, west: null },
+    borderBlock: null,
+    events: [],
+  });
+
+  void blank; // kept as tile 0 by convention even though the demo map omits it
+}
+
+/* ============================================================
+   App state (selections and tool, kept separate from the saved project)
+   ============================================================ */
+
+const state = {
+  project: makeDefaultProject(),
+  activePanel: "tiles",
+  displayPaletteId: null,
+  selectedTilesetId: null,
+  selectedTileId: null,
+  selectedMetatileId: null,
+  selectedBlockId: null,
+  selectedCell: 0,        // 0..3 within the metatile / block composer
+
+  // Map editor state.
+  selectedMapId: null,
+  paintBlockId: null,     // which block the brush paints
+  mapTool: "paint",       // paint | erase | fill
+  mapZoom: 32,            // pixels per block in the map canvas
+  autoScroll: true,       // scroll the viewport when painting near its edge
+  showMapGrid: true,
+  showCollision: false,   // tint each metatile by collision/behavior on the map
+  showWarpTargets: true,  // in events mode, mark where warps (incl. from other maps) land here
+  mapScroll: { left: 0, top: 0 }, // preserved across re-renders
+  mapMode: "blocks",      // blocks | events | collision
+  eventTool: "warp",      // which event type a click places
+  collisionTool: "solid", // which collision value the collision brush paints
+  collisionDuplicate: false, // duplicate shared metatiles/blocks so the paint stays local
+  selectedEventId: null,
+  pathEdit: null,         // id of the NPC event whose waypoint path is being
+                          // placed by clicking the map (events mode); null off
+  ink: 3,                 // current pixel value to paint (0..3)
+  tool: "pencil",         // pencil | fill | eyedropper
+  selectedFrame: 0,       // which animation frame the tile editor edits (0 = base)
+  animPlay: true,         // global animation playback toggle (Tiles panel)
+  animMetatiles: true,    // play tile animations on the Metatiles panel
+  animBlocks: true,       // play tile animations on the Blocks panel
+  animMaps: true,         // play tile animations on the Maps panel
+};
+
+function syncSelectionsToProject() {
+  // Point selections at valid objects after a New or Import.
+  const p = state.project;
+  state.displayPaletteId = p._displayPaletteId ?? (p.palettes[0] && p.palettes[0].id);
+  state.selectedTilesetId = p.tilesets[0] ? p.tilesets[0].id : null;
+  const ts = activeTileset();
+  state.selectedTileId = ts && ts.tiles[0] ? ts.tiles[0].id : null;
+  state.selectedMetatileId = ts && ts.metatiles[0] ? ts.metatiles[0].id : null;
+  state.selectedBlockId = ts && ts.blocks[0] ? ts.blocks[0].id : null;
+  state.selectedCell = 0;
+  state.selectedMapId = p.maps[0] ? p.maps[0].id : null;
+  state.paintBlockId = ts && ts.blocks[0] ? ts.blocks[0].id : null;
+}
+
+/* ============================================================
+   Undo / redo history
+
+   Snapshots are full JSON copies of the project. A discrete edit calls
+   snapshot() before mutating; a paint or fill stroke calls it once at
+   pointerdown, so the whole stroke collapses into a single undo step.
+   ============================================================ */
+
+const history = { undo: [], redo: [], limit: 60 };
+
+function currentJson() {
+  state.project._displayPaletteId = state.displayPaletteId;
+  return JSON.stringify(state.project);
+}
+
+// Capture the pre-edit state. Call this immediately before a mutation.
+function snapshot() {
+  history.undo.push(currentJson());
+  if (history.undo.length > history.limit) history.undo.shift();
+  history.redo.length = 0;            // a fresh edit invalidates the redo path
+  updateHistoryButtons();
+}
+
+function restoreFrom(json) {
+  state.project = JSON.parse(json);
+  state.displayPaletteId = state.project._displayPaletteId
+    ?? (state.project.palettes[0] && state.project.palettes[0].id);
+  validateSelections();              // selected ids may have vanished in the restore
+}
+
+function undo() {
+  if (!history.undo.length) return;
+  history.redo.push(currentJson());
+  restoreFrom(history.undo.pop());
+  render();
+}
+function redo() {
+  if (!history.redo.length) return;
+  history.undo.push(currentJson());
+  restoreFrom(history.redo.pop());
+  render();
+}
+
+function resetHistory() {
+  history.undo.length = 0;
+  history.redo.length = 0;
+  updateHistoryButtons();
+}
+
+function updateHistoryButtons() {
+  const u = document.getElementById("btn-undo");
+  const r = document.getElementById("btn-redo");
+  if (u) u.disabled = history.undo.length === 0;
+  if (r) r.disabled = history.redo.length === 0;
+}
+
+// After an undo/redo, keep selections pointing at things that still exist,
+// without yanking the user to a different panel.
+function validateSelections() {
+  const p = state.project;
+  const has = (arr, id) => arr.some(x => x.id === id);
+  if (!has(p.palettes, state.displayPaletteId)) state.displayPaletteId = p.palettes[0] && p.palettes[0].id;
+  if (!has(p.tilesets, state.selectedTilesetId)) state.selectedTilesetId = p.tilesets[0] && p.tilesets[0].id;
+  const ts = activeTileset();
+  if (ts) {
+    if (!has(ts.tiles, state.selectedTileId)) state.selectedTileId = ts.tiles[0] ? ts.tiles[0].id : null;
+    if (!has(ts.metatiles, state.selectedMetatileId)) state.selectedMetatileId = ts.metatiles[0] ? ts.metatiles[0].id : null;
+    if (!has(ts.blocks, state.selectedBlockId)) state.selectedBlockId = ts.blocks[0] ? ts.blocks[0].id : null;
+    if (!has(ts.blocks, state.paintBlockId)) state.paintBlockId = ts.blocks[0] ? ts.blocks[0].id : null;
+  }
+  if (!has(p.maps, state.selectedMapId)) state.selectedMapId = p.maps[0] ? p.maps[0].id : null;
+  const selMap = p.maps.find(m => m.id === state.selectedMapId);
+  if (selMap && !(selMap.events || []).some(e => e.id === state.selectedEventId)) state.selectedEventId = null;
+  if (state.selectedCell < 0 || state.selectedCell > 3) state.selectedCell = 0;
+}
+
+/* ============================================================
+   Lookups
+   ============================================================ */
+
+const genId = () => state.project.nextId++;
+const activeTileset = () => state.project.tilesets.find(t => t.id === state.selectedTilesetId) || null;
+const paletteById = (id) => state.project.palettes.find(p => p.id === id) || null;
+const colorsForPalette = (id) => {
+  const pal = paletteById(id);
+  return pal ? pal.colors : ["#000000", "#000000", "#000000", "#000000"];
+};
+const tileById = (ts, id) => ts.tiles.find(t => t.id === id) || null;
+const metatileById = (ts, id) => ts.metatiles.find(m => m.id === id) || null;
+const blockById = (ts, id) => ts.blocks.find(b => b.id === id) || null;
+
+// How many metatiles reference a given tile (used to guard deletion).
+function countTileReferences(ts, tileId) {
+  return ts.metatiles.reduce((n, m) => n + m.tiles.filter(t => t === tileId).length, 0);
+}
+
+// How many blocks reference a given metatile (guards metatile deletion).
+function countMetatileReferences(ts, metatileId) {
+  return ts.blocks.reduce((n, b) => n + b.metatiles.filter(mt => mt === metatileId).length, 0);
+}
+
+// How many map cells reference a given block (guards block deletion). Maps are
+// authored in a later pass, so this is zero for now but stays correct once they exist.
+function countBlockReferences(blockId) {
+  return state.project.maps.reduce(
+    (n, map) => n + (map.blockGrid ? map.blockGrid.filter(b => b === blockId).length : 0), 0);
+}
+
+// What pruning a tileset would remove: blocks no map on this tileset paints
+// (or uses as border block), then metatiles no surviving block references,
+// then tiles no surviving metatile references. Pure query -- the caller
+// filters the arrays after confirming. Usage is counted across *every* map
+// sharing the tileset, so pruning from one map can never strand a sibling.
+// Everything references by id and export order is array order, so dropping
+// entries is also the reindex.
+function pruneTilesetDeadEntries(ts) {
+  const maps = state.project.maps.filter(m => m.tilesetId === ts.id);
+  const usedBlocks = new Set();
+  maps.forEach(m => {
+    m.blockGrid.forEach(b => { if (b != null) usedBlocks.add(b); });
+    if (m.borderBlock != null) usedBlocks.add(m.borderBlock);
+  });
+  const usedMetatiles = new Set();
+  ts.blocks.forEach(b => {
+    if (usedBlocks.has(b.id)) b.metatiles.forEach(mt => { if (mt != null) usedMetatiles.add(mt); });
+  });
+  const usedTiles = new Set();
+  ts.metatiles.forEach(m => {
+    if (usedMetatiles.has(m.id)) m.tiles.forEach(t => { if (t != null) usedTiles.add(t); });
+  });
+  return {
+    numMaps: maps.length,
+    blocks: ts.blocks.filter(b => !usedBlocks.has(b.id)),
+    metatiles: ts.metatiles.filter(m => !usedMetatiles.has(m.id)),
+    tiles: ts.tiles.filter(t => !usedTiles.has(t.id)),
+  };
+}
+
+const mapById = (id) => state.project.maps.find(m => m.id === id) || null;
+const tilesetForMap = (map) => state.project.tilesets.find(t => t.id === map.tilesetId) || null;
+
+const DIRECTIONS = ["north", "south", "east", "west"];
+const OPPOSITE = { north: "south", south: "north", east: "west", west: "east" };
+
+function createMap(name, tilesetId, width, height) {
+  return {
+    id: genId(),
+    name,
+    tilesetId,
+    width,
+    height,
+    blockGrid: new Array(width * height).fill(null), // row-major, null = empty
+    connections: { north: null, south: null, east: null, west: null }, // {mapId, offset}
+    borderBlock: null,   // block id drawn past unconnected edges; null = repeat edge metatiles
+    events: [],                                       // authored in a later pass
+  };
+}
+
+// Resize a map, anchoring existing content to the top-left so painted work survives.
+function resizeMap(map, newW, newH) {
+  const next = new Array(newW * newH).fill(null);
+  for (let y = 0; y < Math.min(map.height, newH); y++) {
+    for (let x = 0; x < Math.min(map.width, newW); x++) {
+      next[y * newW + x] = map.blockGrid[y * map.width + x];
+    }
+  }
+  map.blockGrid = next;
+  map.width = newW;
+  map.height = newH;
+  // Drop events that now fall outside the map (coords are in metatile cells).
+  map.events = (map.events || []).filter(e => e.x < newW * 2 && e.y < newH * 2);
+}
+
+// Which other maps connect to this one (so deletion can clean up dangling links).
+function mapsConnectingTo(mapId) {
+  return state.project.maps.filter(m =>
+    DIRECTIONS.some(d => m.connections[d] && m.connections[d].mapId === mapId));
+}
+
+/* ============================================================
+   Drawing helpers
+   ============================================================ */
+
+// Paint an 8x8 pixel array onto a context using a 4-color palette, one filled
+// rect per pixel. This stays crisp at any integer scale without smoothing.
+function drawPixels(ctx, pixels, colors, scale, ox = 0, oy = 0) {
+  for (let y = 0; y < TILE_PX; y++) {
+    for (let x = 0; x < TILE_PX; x++) {
+      ctx.fillStyle = colors[pixels[y * TILE_PX + x]];
+      ctx.fillRect(ox + x * scale, oy + y * scale, scale, scale);
+    }
+  }
+}
+
+// Draw one tile. `anim` selects what composite previews show:
+//   false  — static base frame (frame 0),
+//   true   — current animation frame, registered so the animator keeps it moving,
+//   "live" — current animation frame only; the caller owns the repaint (used by
+//            the map canvas, whose cells carry grid/event overlays).
+function drawTile(ctx, tile, colors, scale, ox = 0, oy = 0, anim = false) {
+  const live = anim && isAnimated(tile);
+  const idx = live ? currentFrameIndex(tile) : 0;
+  drawPixels(ctx, tileFrames(tile)[idx], colors, scale, ox, oy);
+  if (live && anim !== "live") animator.targets.push({ ctx, tile, colors, scale, ox, oy, last: idx });
+}
+
+/* ---- tile animation ----
+   A tile's pixels are frame 0; tile.frames holds any extra frames. frameRate is
+   how many 60Hz ticks each frame is shown. The animator redraws registered
+   standalone tile canvases (library, pickers, editor preview) in sync. */
+
+function frameCountFor(tile) { return 1 + (tile.frames ? tile.frames.length : 0); }
+function tileFrames(tile) { return [tile.pixels].concat(tile.frames || []); }
+function isAnimated(tile) { return frameCountFor(tile) > 1; }
+
+// Whether any tile cell inside the block animates (map cells with such blocks
+// need repainting as frames advance).
+function blockUsesAnimatedTile(ts, block) {
+  return block.metatiles.some(mid => {
+    const m = mid != null ? metatileById(ts, mid) : null;
+    return m && m.tiles.some(tid => {
+      const t = tid != null ? tileById(ts, tid) : null;
+      return t && isAnimated(t);
+    });
+  });
+}
+
+function currentFrameIndex(tile) {
+  const n = frameCountFor(tile);
+  if (n <= 1) return 0;
+  const ticks = performance.now() / (1000 / 60);
+  const rate = Math.max(1, tile.frameRate || 15);
+  return Math.floor(ticks / rate) % n;
+}
+
+// Targets come in two shapes, both registered during a render and rebuilt on
+// the next one:
+//   { ctx, tile, colors, scale, ox, oy, last }  — one tile cell the animator
+//     repaints in place when its frame index changes;
+//   { tiles, redraw, last }                     — a composite canvas (the map)
+//     whose `redraw` callback runs when any listed tile changes frame, so the
+//     owner can restore its own overlays (grid lines, event markers).
+const animator = { targets: [], raf: 0 };
+
+// Draw a tile into a standalone canvas, cycling frames if it is animated and
+// playback is on. Registers the canvas so the animator keeps it moving.
+function paintTileCanvas(canvas, tile, colors, scale) {
+  drawTile(canvas.getContext("2d"), tile, colors, scale, 0, 0, state.animPlay);
+}
+
+function compositeFrameSig(tiles) { return tiles.map(currentFrameIndex).join(","); }
+
+function animLoop() {
+  animator.raf = 0;
+  let stillAnimating = false;
+  for (const t of animator.targets) {
+    if (t.redraw) {
+      if (!t.tiles.some(isAnimated)) continue;
+      stillAnimating = true;
+      const sig = compositeFrameSig(t.tiles);
+      if (sig !== t.last) { t.last = sig; t.redraw(); }
+    } else {
+      if (!isAnimated(t.tile)) continue;
+      stillAnimating = true;
+      const idx = currentFrameIndex(t.tile);
+      if (idx !== t.last) {
+        t.last = idx;
+        drawPixels(t.ctx, tileFrames(t.tile)[idx], t.colors, t.scale, t.ox, t.oy);
+      }
+    }
+  }
+  if (stillAnimating) animator.raf = requestAnimationFrame(animLoop);
+}
+function startAnimator() {
+  if (animator.raf || animator.targets.length === 0) return;
+  animator.raf = requestAnimationFrame(animLoop);
+}
+function stopAnimator() {
+  if (animator.raf) { cancelAnimationFrame(animator.raf); animator.raf = 0; }
+}
+
+// A small checker pattern signals an empty (unassigned) metatile cell.
+function drawEmptyCell(ctx, size, ox = 0, oy = 0) {
+  const step = size / 4;
+  for (let y = 0; y < 4; y++) {
+    for (let x = 0; x < 4; x++) {
+      ctx.fillStyle = (x + y) % 2 === 0 ? "#15281c" : "#0c1c12";
+      ctx.fillRect(ox + x * step, oy + y * step, step, step);
+    }
+  }
+}
+
+// Render a complete metatile (its 4 tile cells, each with its own palette).
+function drawMetatile(ctx, ts, metatile, scale, ox = 0, oy = 0, anim = false) {
+  const offsets = [[0, 0], [1, 0], [0, 1], [1, 1]]; // tl, tr, bl, br
+  for (let i = 0; i < 4; i++) {
+    const [cx, cy] = offsets[i];
+    const px = ox + cx * TILE_PX * scale;
+    const py = oy + cy * TILE_PX * scale;
+    const tileId = metatile.tiles[i];
+    const tile = tileId != null ? tileById(ts, tileId) : null;
+    if (tile) {
+      drawTile(ctx, tile, colorsForPalette(metatile.cellPalettes[i]), scale, px, py, anim);
+    } else {
+      drawEmptyCell(ctx, TILE_PX * scale, px, py);
+    }
+  }
+}
+
+// Render a complete block (its 4 metatile cells). One metatile spans 2 tiles,
+// so each cell is offset by 2 * TILE_PX at the given per-tile-pixel scale.
+function drawBlock(ctx, ts, block, scale, ox = 0, oy = 0, anim = false) {
+  const offsets = [[0, 0], [1, 0], [0, 1], [1, 1]]; // tl, tr, bl, br
+  const cellPx = 2 * TILE_PX * scale; // a metatile is 16 px wide
+  for (let i = 0; i < 4; i++) {
+    const [cx, cy] = offsets[i];
+    const px = ox + cx * cellPx;
+    const py = oy + cy * cellPx;
+    const metatileId = block.metatiles[i];
+    const metatile = metatileId != null ? metatileById(ts, metatileId) : null;
+    if (metatile) {
+      drawMetatile(ctx, ts, metatile, scale, px, py, anim);
+    } else {
+      drawEmptyCell(ctx, cellPx, px, py);
+    }
+  }
+}
+
+/* ============================================================
+   Rendering: top bar and tabs
+   ============================================================ */
+
+function renderTopBar() {
+  document.getElementById("project-name").value = state.project.meta.name;
+  document.getElementById("target-tag").textContent = state.project.meta.target;
+  updateHistoryButtons();
+}
+
+function renderTabs() {
+  document.querySelectorAll(".tab").forEach(tab => {
+    tab.classList.toggle("active", tab.dataset.panel === state.activePanel);
+  });
+}
+
+function render() {
+  stopAnimator();
+  animator.targets = [];   // rebuilt as panels draw their animated tile canvases
+  renderTopBar();
+  renderTabs();
+  const panel = document.getElementById("panel");
+  panel.innerHTML = "";
+  if (state.activePanel === "palettes") renderPalettesPanel(panel);
+  else if (state.activePanel === "tiles") renderTilesPanel(panel);
+  else if (state.activePanel === "metatiles") renderMetatilesPanel(panel);
+  else if (state.activePanel === "blocks") renderBlocksPanel(panel);
+  else if (state.activePanel === "maps") renderMapsPanel(panel);
+  startAnimator();
+}
+
+/* ============================================================
+   Panel: Palettes
+   ============================================================ */
+
+function renderPalettesPanel(root) {
+  const card = el("div", "card");
+  card.appendChild(el("h2", null, "Palettes"));
+  card.appendChild(el("p", "hint",
+    "On GBC each metatile cell picks one of these. On DMG color is ignored and " +
+    "pixel values 0-3 map to the four grays, so layout looks identical on both."));
+
+  state.project.palettes.forEach(pal => {
+    const row = el("div", "row");
+    row.style.marginTop = "12px";
+
+    // Live preview of the four shades.
+    const preview = document.createElement("canvas");
+    preview.width = 4 * 18; preview.height = 18;
+    const pctx = preview.getContext("2d");
+    const paintPreview = () => {
+      pal.colors.forEach((c, i) => { pctx.fillStyle = c; pctx.fillRect(i * 18, 0, 18, 18); });
+    };
+    paintPreview();
+    preview.style.border = "1px solid var(--border)";
+
+    const nameInput = inputText(pal.name, 140);
+    nameInput.addEventListener("input", () => { pal.name = nameInput.value; });
+
+    const colorInputs = pal.colors.map((c, i) => {
+      const ci = document.createElement("input");
+      ci.type = "color"; ci.value = c;
+      ci.title = "Pixel value " + i;
+      ci.addEventListener("input", () => { pal.colors[i] = ci.value; paintPreview(); });
+      return ci;
+    });
+
+    const useBtn = el("button", "tiny", state.displayPaletteId === pal.id ? "Editing with this" : "Edit with this");
+    useBtn.addEventListener("click", () => {
+      state.displayPaletteId = pal.id;
+      state.project._displayPaletteId = pal.id;
+      render();
+    });
+
+    const delBtn = el("button", "tiny danger", "Delete");
+    delBtn.addEventListener("click", () => {
+      if (state.project.palettes.length <= 1) { alert("Keep at least one palette."); return; }
+      snapshot();
+      state.project.palettes = state.project.palettes.filter(p => p.id !== pal.id);
+      // Repoint any cell that referenced the removed palette.
+      const fallback = state.project.palettes[0].id;
+      state.project.tilesets.forEach(ts => ts.metatiles.forEach(m => {
+        m.cellPalettes = m.cellPalettes.map(pid => paletteById(pid) ? pid : fallback);
+      }));
+      if (state.displayPaletteId === pal.id) state.displayPaletteId = fallback;
+      render();
+    });
+
+    row.append(preview, nameInput, ...colorInputs, useBtn, delBtn);
+    card.appendChild(row);
+  });
+
+  const addBtn = el("button", null, "+ Add palette");
+  addBtn.style.marginTop = "16px";
+  addBtn.addEventListener("click", () => {
+    snapshot();
+    state.project.palettes.push({
+      id: genId(), name: "Palette " + (state.project.palettes.length + 1),
+      colors: ["#e0f8d0", "#88c070", "#346856", "#081820"],
+    });
+    render();
+  });
+  card.appendChild(addBtn);
+
+  root.appendChild(card);
+}
+
+/* ============================================================
+   Panel: Tiles
+   ============================================================ */
+
+const EDIT_SCALE = 40;  // pixels per tile-pixel in the big editing canvas
+
+/* ---- tileset switcher ----
+   The Tiles/Metatiles/Blocks panels all edit the active tileset; this shared
+   bar switches it and manages the tileset list itself. */
+
+// Point the per-tileset selections at the newly active tileset's contents.
+function selectTileset(id) {
+  state.selectedTilesetId = id;
+  const ts = activeTileset();
+  state.selectedTileId = ts && ts.tiles[0] ? ts.tiles[0].id : null;
+  state.selectedMetatileId = ts && ts.metatiles[0] ? ts.metatiles[0].id : null;
+  state.selectedBlockId = ts && ts.blocks[0] ? ts.blocks[0].id : null;
+  state.paintBlockId = ts && ts.blocks[0] ? ts.blocks[0].id : null;
+  state.selectedCell = 0;
+  state.selectedFrame = 0;
+}
+
+function createTileset(name) {
+  return {
+    id: genId(),
+    name,
+    tileBudget: 176,
+    // Start with one blank tile so the tile editor has a selection to show.
+    tiles: [{ id: genId(), pixels: new Array(PIXELS_PER_TILE).fill(0) }],
+    metatiles: [],
+    blocks: [],
+  };
+}
+
+function renderTilesetBar(root) {
+  const bar = el("div", "card");
+  const row = el("div", "row");
+  row.appendChild(el("span", "cell-label", "Tileset"));
+
+  const select = document.createElement("select");
+  state.project.tilesets.forEach(t => {
+    const opt = document.createElement("option");
+    opt.value = t.id; opt.textContent = t.name;
+    if (t.id === state.selectedTilesetId) opt.selected = true;
+    select.appendChild(opt);
+  });
+  select.addEventListener("change", () => {
+    selectTileset(Number(select.value));
+    render();
+  });
+  row.appendChild(select);
+
+  const renameBtn = el("button", null, "Rename");
+  renameBtn.addEventListener("click", () => {
+    const ts = activeTileset();
+    if (!ts) return;
+    const name = prompt("Tileset name:", ts.name);
+    if (!name || name === ts.name) return;
+    snapshot();
+    ts.name = name;
+    render();
+  });
+  row.appendChild(renameBtn);
+
+  const addBtn = el("button", null, "+ New tileset");
+  addBtn.addEventListener("click", () => {
+    const name = prompt("Name for the new tileset:", "tileset " + (state.project.tilesets.length + 1));
+    if (!name) return;
+    snapshot();
+    const ts = createTileset(name);
+    state.project.tilesets.push(ts);
+    selectTileset(ts.id);
+    render();
+  });
+  row.appendChild(addBtn);
+
+  const delBtn = el("button", "danger", "Delete tileset");
+  delBtn.addEventListener("click", () => {
+    const ts = activeTileset();
+    if (!ts) return;
+    if (state.project.tilesets.length <= 1) { alert("Keep at least one tileset."); return; }
+    const users = state.project.maps.filter(m => m.tilesetId === ts.id);
+    if (users.length > 0) {
+      alert("This tileset is used by " + users.length + " map(s): " +
+        users.map(m => m.name).join(", ") + ". Point them at another tileset first.");
+      return;
+    }
+    if (!confirm("Delete tileset \"" + ts.name + "\" and all its tiles, metatiles and blocks?")) return;
+    snapshot();
+    state.project.tilesets = state.project.tilesets.filter(t => t.id !== ts.id);
+    selectTileset(state.project.tilesets[0].id);
+    render();
+  });
+  row.appendChild(delBtn);
+
+  bar.appendChild(row);
+  root.appendChild(bar);
+}
+
+function renderTilesPanel(root) {
+  renderTilesetBar(root);
+  const ts = activeTileset();
+  if (!ts) { root.appendChild(el("p", "hint", "No tileset.")); return; }
+
+  const cols = el("div", "cols");
+
+  /* ---- left: tile library ---- */
+  const lib = el("div", "card col-library");
+  lib.appendChild(el("h2", null, "Tiles in " + ts.name));
+
+  const used = ts.tiles.length;
+  const budget = el("p", used > ts.tileBudget ? "budget-over" : "budget-ok",
+    used + " / " + ts.tileBudget + " tiles" + (used > ts.tileBudget ? "  (over VRAM budget)" : ""));
+  lib.appendChild(budget);
+
+  // The budget is per target: engines usually reserve VRAM slots for font/UI
+  // and sprites, so the usable count is often well below the raw 256 limit.
+  const budgetRow = el("div", "row");
+  budgetRow.appendChild(el("span", "cell-label", "Budget"));
+  const budgetInput = numberInput(ts.tileBudget, 1, 256);
+  budgetInput.addEventListener("change", () => {
+    snapshot();
+    ts.tileBudget = clampInt(budgetInput.value, 1, 256);
+    render();
+  });
+  budgetRow.appendChild(budgetInput);
+  lib.appendChild(budgetRow);
+
+  const grid = el("div", "lib-grid");
+  ts.tiles.forEach((tile, index) => {
+    const cell = document.createElement("button");
+    cell.className = "lib-cell" + (tile.id === state.selectedTileId ? " selected" : "");
+    const c = document.createElement("canvas");
+    c.width = 38; c.height = 38;
+    paintTileCanvas(c, tile, colorsForPalette(state.displayPaletteId), 38 / TILE_PX);
+    cell.appendChild(c);
+    if (isAnimated(tile)) cell.appendChild(el("span", "anim-badge", "\u25B6" + frameCountFor(tile)));
+    cell.appendChild(el("span", "idx", String(index)));
+    cell.addEventListener("click", () => { state.selectedTileId = tile.id; state.selectedFrame = 0; render(); });
+    grid.appendChild(cell);
+  });
+  lib.appendChild(grid);
+
+  const libBtns = el("div", "row");
+  libBtns.style.marginTop = "12px";
+  const addBtn = el("button", null, "+ New tile");
+  addBtn.addEventListener("click", () => {
+    snapshot();
+    const t = { id: genId(), pixels: new Array(PIXELS_PER_TILE).fill(0) };
+    ts.tiles.push(t); state.selectedTileId = t.id; state.selectedFrame = 0; render();
+  });
+  const dupBtn = el("button", null, "Duplicate");
+  dupBtn.addEventListener("click", () => {
+    const src = tileById(ts, state.selectedTileId);
+    if (!src) return;
+    snapshot();
+    const t = { id: genId(), pixels: [...src.pixels] };
+    if (src.frames) { t.frames = src.frames.map(f => [...f]); t.frameRate = src.frameRate; }
+    ts.tiles.push(t); state.selectedTileId = t.id; state.selectedFrame = 0; render();
+  });
+  const delBtn = el("button", "danger", "Delete");
+  delBtn.addEventListener("click", () => {
+    const tile = tileById(ts, state.selectedTileId);
+    if (!tile) return;
+    if (ts.tiles.length <= 1) { alert("Keep at least one tile."); return; }
+    const refs = countTileReferences(ts, tile.id);
+    if (refs > 0) { alert("This tile is used by " + refs + " metatile cell(s). Clear it there first."); return; }
+    snapshot();
+    ts.tiles = ts.tiles.filter(t => t.id !== tile.id);
+    state.selectedTileId = ts.tiles[0].id; render();
+  });
+  libBtns.append(addBtn, dupBtn, delBtn);
+  lib.appendChild(libBtns);
+
+  // PNG round-trip: import a 2-bit sheet as tiles, export all tiles as a sheet.
+  const pngBtns = el("div", "row");
+  pngBtns.style.marginTop = "8px";
+  const importPngBtn = el("button", null, "Import PNG");
+  importPngBtn.addEventListener("click", () => importTilesFromPng(ts));
+  const exportPngBtn = el("button", null, "Export PNG");
+  exportPngBtn.addEventListener("click", () => exportTilesToPng(ts));
+  pngBtns.append(importPngBtn, exportPngBtn);
+  lib.appendChild(pngBtns);
+
+  cols.appendChild(lib);
+
+  /* ---- right: pixel editor ---- */
+  const ed = el("div", "card col-editor");
+  ed.appendChild(el("h2", null, "Tile editor"));
+
+  const tile = tileById(ts, state.selectedTileId);
+  if (!tile) { ed.appendChild(el("p", "hint", "Select a tile.")); cols.appendChild(ed); root.appendChild(cols); return; }
+
+  const colors = colorsForPalette(state.displayPaletteId);
+
+  // The editor edits one frame at a time. Frame 0 is the tile's base pixels.
+  const frameCount = frameCountFor(tile);
+  if (state.selectedFrame >= frameCount) state.selectedFrame = 0;
+  const editPixels = () => state.selectedFrame === 0 ? tile.pixels : tile.frames[state.selectedFrame - 1];
+
+  // Ink picker: four swatches drawn in the current display palette.
+  const inkRow = el("div", "row");
+  const inks = el("div", "ink-swatches");
+  for (let v = 0; v < 4; v++) {
+    const sw = el("button", "ink-swatch" + (state.ink === v ? " active" : ""));
+    sw.style.background = colors[v];
+    sw.appendChild(el("span", "val", String(v)));
+    sw.title = "Pixel value " + v;
+    sw.addEventListener("click", () => { state.ink = v; render(); });
+    inks.appendChild(sw);
+  }
+  inkRow.appendChild(el("span", "cell-label", "Ink"));
+  inkRow.appendChild(inks);
+  ed.appendChild(inkRow);
+
+  // Tools.
+  const toolRow = el("div", "row");
+  toolRow.style.marginTop = "10px";
+  ["pencil", "fill", "eyedropper"].forEach(name => {
+    const b = el("button", "tool-btn" + (state.tool === name ? " active" : ""), name);
+    b.addEventListener("click", () => { state.tool = name; render(); });
+    toolRow.appendChild(b);
+  });
+  const clearBtn = el("button", "danger", "Clear");
+  clearBtn.addEventListener("click", () => { snapshot(); editPixels().fill(0); render(); });
+  toolRow.appendChild(clearBtn);
+  ed.appendChild(toolRow);
+
+  ed.appendChild(spacer(8));
+  ed.appendChild(el("span", "cell-label",
+    "Editing " + (state.selectedFrame === 0 ? "base frame" : "frame " + state.selectedFrame)));
+
+  // The drawing surface. Internal size matches CSS size so offsetX maps directly.
+  const canvas = document.createElement("canvas");
+  canvas.className = "editor-canvas";
+  canvas.width = TILE_PX * EDIT_SCALE;
+  canvas.height = TILE_PX * EDIT_SCALE;
+  canvas.style.marginTop = "8px";
+  const ctx = canvas.getContext("2d");
+
+  const repaintEditor = () => {
+    drawPixels(ctx, editPixels(), colors, EDIT_SCALE);
+    // Pixel grid for orientation.
+    ctx.strokeStyle = "rgba(224,248,208,0.12)";
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= TILE_PX; i++) {
+      const p = i * EDIT_SCALE + 0.5;
+      ctx.beginPath(); ctx.moveTo(p, 0); ctx.lineTo(p, canvas.height); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, p); ctx.lineTo(canvas.width, p); ctx.stroke();
+    }
+  };
+  repaintEditor();
+
+  const pixelAt = (ev) => {
+    const x = Math.floor(ev.offsetX / EDIT_SCALE);
+    const y = Math.floor(ev.offsetY / EDIT_SCALE);
+    if (x < 0 || x > 7 || y < 0 || y > 7) return null;
+    return { x, y };
+  };
+
+  const applyAt = (ev) => {
+    const pos = pixelAt(ev);
+    if (!pos) return;
+    const px = editPixels();
+    if (state.tool === "eyedropper") {
+      state.ink = px[pos.y * TILE_PX + pos.x];
+      render();                       // refresh the active ink swatch
+      return;
+    }
+    if (state.tool === "fill") {
+      floodFill(px, pos.x, pos.y, state.ink);
+    } else {
+      px[pos.y * TILE_PX + pos.x] = state.ink;
+    }
+    repaintEditor();
+  };
+
+  let painting = false;
+  canvas.addEventListener("pointerdown", (ev) => {
+    if (state.tool !== "eyedropper") snapshot();  // whole stroke = one undo step
+    painting = state.tool === "pencil";  // only the pencil drags
+    applyAt(ev);
+  });
+  canvas.addEventListener("pointermove", (ev) => { if (painting) applyAt(ev); });
+  // Stop painting anywhere, then refresh the library thumbnail of this tile.
+  const stop = () => { if (painting) { painting = false; refreshTileThumb(ts, tile); } };
+  canvas.addEventListener("pointerup", stop);
+  canvas.addEventListener("pointerleave", stop);
+  ed.appendChild(canvas);
+
+  // ---- Animation frames ----
+  ed.appendChild(spacer(14));
+  ed.appendChild(el("span", "cell-label", "Animation frames (click to edit, + to add, +▦ to copy a tile)"));
+  ed.appendChild(spacer(6));
+
+  const strip = el("div", "frame-strip");
+  tileFrames(tile).forEach((framePixels, i) => {
+    const fc = el("button", "frame-cell" + (state.selectedFrame === i ? " selected" : ""));
+    const fcanvas = document.createElement("canvas");
+    fcanvas.width = 42; fcanvas.height = 42;
+    drawPixels(fcanvas.getContext("2d"), framePixels, colors, 42 / TILE_PX);
+    fc.appendChild(fcanvas);
+    fc.appendChild(el("span", "fnum", i === 0 ? "base" : String(i)));
+    fc.addEventListener("click", () => { state.selectedFrame = i; render(); });
+    strip.appendChild(fc);
+  });
+  // Appends `pixels` (already copied) as a new frame and selects it.
+  const appendFrame = (pixels) => {
+    snapshot();
+    if (!tile.frames) tile.frames = [];
+    if (!tile.frameRate) tile.frameRate = 15;
+    tile.frames.push(pixels);
+    state.selectedFrame = frameCountFor(tile) - 1;
+    render();
+  };
+
+  const addFrame = el("button", "frame-cell", "+");
+  addFrame.style.fontSize = "20px";
+  addFrame.title = "Add a frame (copies the current frame)";
+  addFrame.addEventListener("click", () => appendFrame([...editPixels()]));
+  strip.appendChild(addFrame);
+
+  // Add a frame by copying another tile's art (its base frame). Handy when the
+  // animation cycles through art that already exists as separate tiles.
+  const addFromTile = el("button", "frame-cell", "+▦");
+  addFromTile.title = "Add a frame copied from an existing tile";
+  addFromTile.addEventListener("click", () => {
+    openModal("Pick a tile to copy as frame " + frameCountFor(tile), (modal) => {
+      modal.appendChild(el("p", "hint",
+        "The tile's base art is copied into a new frame of \"" + tile.name + "\"."));
+      const grid = el("div", "lib-grid");
+      ts.tiles.forEach((t, index) => {
+        const cell = el("button", "lib-cell");
+        const c = document.createElement("canvas");
+        c.width = 38; c.height = 38;
+        drawPixels(c.getContext("2d"), t.pixels, colors, 38 / TILE_PX);
+        cell.appendChild(c);
+        cell.appendChild(el("span", "idx", String(index)));
+        cell.title = t.name;
+        cell.addEventListener("click", () => { closeModal(); appendFrame([...t.pixels]); });
+        grid.appendChild(cell);
+      });
+      modal.appendChild(grid);
+    });
+  });
+  strip.appendChild(addFromTile);
+  ed.appendChild(strip);
+
+  ed.appendChild(spacer(10));
+  const fctl = el("div", "row");
+  const delFrame = el("button", "tiny danger", "Delete frame");
+  delFrame.disabled = state.selectedFrame === 0;    // the base frame stays
+  delFrame.addEventListener("click", () => {
+    if (state.selectedFrame === 0) return;
+    snapshot();
+    tile.frames.splice(state.selectedFrame - 1, 1);
+    if (tile.frames.length === 0) delete tile.frames;
+    state.selectedFrame = 0;
+    render();
+  });
+  fctl.appendChild(delFrame);
+
+  if (isAnimated(tile)) {
+    const rateField = el("div", "field");
+    rateField.appendChild(label("Ticks / frame (60 = 1s)"));
+    const rate = numberInput(tile.frameRate || 15, 1, 240);
+    rate.addEventListener("change", () => { snapshot(); tile.frameRate = clampInt(rate.value, 1, 240); render(); });
+    rateField.appendChild(rate);
+    fctl.appendChild(rateField);
+
+    const prevWrap = el("div", "group");
+    prevWrap.appendChild(el("span", "cell-label", "Preview"));
+    const prev = document.createElement("canvas");
+    prev.className = "anim-preview";
+    prev.width = 48; prev.height = 48;
+    paintTileCanvas(prev, tile, colors, 48 / TILE_PX);
+    prevWrap.appendChild(prev);
+    fctl.appendChild(prevWrap);
+
+    const playBtn = el("button", "tiny" + (state.animPlay ? " tool-btn active" : ""), state.animPlay ? "Pause" : "Play");
+    playBtn.addEventListener("click", () => { state.animPlay = !state.animPlay; render(); });
+    fctl.appendChild(playBtn);
+  }
+  ed.appendChild(fctl);
+
+  cols.appendChild(ed);
+  root.appendChild(cols);
+}
+
+// Redraw a single library thumbnail without rebuilding the whole panel, so
+// dragging in the editor stays smooth.
+function refreshTileThumb(ts, tile) {
+  const index = ts.tiles.indexOf(tile);
+  const cells = document.querySelectorAll(".lib-grid .lib-cell");
+  const cell = cells[index];
+  if (!cell) return;
+  const c = cell.querySelector("canvas");
+  drawTile(c.getContext("2d"), tile, colorsForPalette(state.displayPaletteId), 38 / TILE_PX);
+}
+
+function floodFill(pixels, x, y, newInk) {
+  const target = pixels[y * TILE_PX + x];
+  if (target === newInk) return;
+  const stack = [[x, y]];
+  while (stack.length) {
+    const [cx, cy] = stack.pop();
+    if (cx < 0 || cx > 7 || cy < 0 || cy > 7) continue;
+    if (pixels[cy * TILE_PX + cx] !== target) continue;
+    pixels[cy * TILE_PX + cx] = newInk;
+    stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
+  }
+}
+
+/* ============================================================
+   PNG import / export for tiles
+   ============================================================
+
+   Import slices any PNG into 8x8 tiles (left-to-right, top-to-bottom),
+   quantizing each pixel's luminance into the four DMG shades (lightest = 0).
+   Exact duplicates are skipped, both within the image and against tiles
+   already in the tileset. Export writes all tiles as a 16-column grayscale
+   sheet at 1x scale, using the same four shades the importer buckets to,
+   so an exported sheet re-imports losslessly. */
+
+// The export shades are bucket midpoints of the importer's luminance ranges,
+// which is what makes the round-trip lossless.
+const PNG_SHADES = ["#ffffff", "#aaaaaa", "#555555", "#000000"];
+
+// Luminance (0..255) -> pixel value 0..3. Lightest maps to ink 0.
+function shadeFromLuminance(lum) {
+  return 3 - Math.min(3, Math.floor(lum / 64));
+}
+
+function importTilesFromPng(ts) {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "image/png,image/*";
+  input.addEventListener("change", () => {
+    const file = input.files[0];
+    if (!file) return;
+    const img = new Image();
+    img.onload = () => {
+      openImportOptions(ts, img);
+      URL.revokeObjectURL(img.src);
+    };
+    img.onerror = () => alert("Could not read that file as an image.");
+    img.src = URL.createObjectURL(file);
+  });
+  input.click();
+}
+
+// After the image loads, let the author choose whether to also assemble
+// metatiles (2x2 tiles) and blocks (2x2 metatiles) straight from the image
+// grid, so a laid-out tilemap can come in as ready-to-paint blocks in one pass.
+function openImportOptions(ts, img) {
+  const tilesAcross = Math.floor(img.width / TILE_PX);
+  const tilesDown = Math.floor(img.height / TILE_PX);
+  if (tilesAcross === 0 || tilesDown === 0) { alert("Image is smaller than one 8x8 tile."); return; }
+
+  const opts = { metatiles: true, blocks: true };
+  openModal("Import PNG", (modal) => {
+    modal.appendChild(el("p", "hint",
+      "Image is " + tilesAcross + "×" + tilesDown + " tiles (" + img.width + "×" +
+      img.height + " px). Tiles are sliced left-to-right, top-to-bottom and deduplicated."));
+
+    // Metatiles/blocks are assembled off the image's own 2x2 / 4x4 tile grid, so
+    // odd leftover rows/columns at the right/bottom edge are ignored (floored).
+    const metasAcross = Math.floor(tilesAcross / 2), metasDown = Math.floor(tilesDown / 2);
+    const blocksAcross = Math.floor(metasAcross / 2), blocksDown = Math.floor(metasDown / 2);
+
+    const metaToggle = toggle(
+      "Also create metatiles (2×2 tiles) — up to " + (metasAcross * metasDown) + " cells",
+      opts.metatiles, (v) => {
+        opts.metatiles = v;
+        if (!v) { opts.blocks = false; blockBox.checked = false; }
+        blockBox.disabled = !v;
+      });
+    const blockToggleEl = toggle(
+      "Also create blocks (2×2 metatiles) — up to " + (blocksAcross * blocksDown) + " cells",
+      opts.blocks, (v) => {
+        opts.blocks = v;
+        if (v) { opts.metatiles = true; metaBox.checked = true; blockBox.disabled = false; }
+      });
+    const metaBox = metaToggle.querySelector("input");
+    const blockBox = blockToggleEl.querySelector("input");
+
+    modal.appendChild(spacer(6));
+    modal.appendChild(metaToggle);
+    modal.appendChild(spacer(4));
+    modal.appendChild(blockToggleEl);
+    modal.appendChild(el("p", "hint",
+      "Metatiles use the first palette with walkable collision and normal behavior; "
+      + "identical metatiles and blocks are reused, and any matching existing ones are shared."));
+
+    modal.appendChild(spacer(12));
+    const actions = el("div", "row");
+    const importBtn = el("button", "primary", "Import");
+    importBtn.addEventListener("click", () => {
+      closeModal();
+      try { addTilesFromImage(ts, img, opts); }
+      catch (err) { alert("Could not import image: " + err.message); }
+    });
+    const cancelBtn = el("button", null, "Cancel");
+    cancelBtn.addEventListener("click", closeModal);
+    actions.append(importBtn, cancelBtn);
+    modal.appendChild(actions);
+  });
+}
+
+function addTilesFromImage(ts, img, opts) {
+  opts = opts || {};
+  const tilesAcross = Math.floor(img.width / TILE_PX);
+  const tilesDown = Math.floor(img.height / TILE_PX);
+  if (tilesAcross === 0 || tilesDown === 0) { alert("Image is smaller than one 8x8 tile."); return; }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = img.width; canvas.height = img.height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0);
+  const data = ctx.getImageData(0, 0, img.width, img.height).data;
+
+  // Map each unique pixel pattern to the tile id that will represent it, seeded
+  // with tiles already in the project so imported cells reuse existing art.
+  // Grid cells that resolve to a brand-new tile record its pending key here and
+  // get a real id at commit time (so aborting the budget prompt allocates none).
+  const tileIdByKey = new Map();
+  ts.tiles.forEach(t => { const k = t.pixels.join(""); if (!tileIdByKey.has(k)) tileIdByKey.set(k, t.id); });
+
+  const newTiles = [];                 // { key, pixels } for tiles to be created
+  const newTileKeys = new Set();       // keys already queued in newTiles
+  // Per-image-cell pixel key, so metatile assembly can look up each cell's tile.
+  const keyGrid = new Array(tilesDown);
+  let duplicates = 0;
+
+  for (let ty = 0; ty < tilesDown; ty++) {
+    keyGrid[ty] = new Array(tilesAcross);
+    for (let tx = 0; tx < tilesAcross; tx++) {
+      const pixels = new Array(PIXELS_PER_TILE);
+      for (let y = 0; y < TILE_PX; y++) {
+        for (let x = 0; x < TILE_PX; x++) {
+          const i = (((ty * TILE_PX + y) * img.width) + (tx * TILE_PX + x)) * 4;
+          // Fully transparent pixels read as the lightest shade.
+          const lum = data[i + 3] === 0
+            ? 255
+            : 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+          pixels[y * TILE_PX + x] = shadeFromLuminance(lum);
+        }
+      }
+      const key = pixels.join("");
+      keyGrid[ty][tx] = key;
+      if (tileIdByKey.has(key)) { duplicates++; continue; }
+      if (!newTileKeys.has(key)) { newTileKeys.add(key); newTiles.push({ key, pixels }); }
+      else duplicates++;
+    }
+  }
+
+  if (newTiles.length === 0 && !opts.metatiles) {
+    alert("No new tiles: all " + duplicates + " tiles in the image already exist.");
+    return;
+  }
+  const total = ts.tiles.length + newTiles.length;
+  if (total > ts.tileBudget &&
+      !confirm("Importing " + newTiles.length + " tiles brings the tileset to " + total +
+               ", over the budget of " + ts.tileBudget + ". Import anyway?")) return;
+
+  snapshot();
+
+  // Commit new tiles, resolving each pending key to its freshly allocated id.
+  newTiles.forEach(({ key, pixels }) => {
+    const tile = { id: genId(), pixels };
+    ts.tiles.push(tile);
+    tileIdByKey.set(key, tile.id);
+  });
+  if (ts.tiles.length) { state.selectedTileId = ts.tiles[ts.tiles.length - 1].id; state.selectedFrame = 0; }
+
+  let newMetatiles = 0, newBlocks = 0;
+  let metaGrid = null;
+
+  if (opts.metatiles) {
+    const firstPalette = state.project.palettes[0].id;
+    // Reuse existing metatiles whose four tiles match exactly (order TL,TR,BL,BR).
+    const metaIdByKey = new Map();
+    ts.metatiles.forEach(m => {
+      const k = m.tiles.join(",");
+      if (!metaIdByKey.has(k)) metaIdByKey.set(k, m.id);
+    });
+    const metasAcross = Math.floor(tilesAcross / 2), metasDown = Math.floor(tilesDown / 2);
+    metaGrid = new Array(metasDown);
+    for (let my = 0; my < metasDown; my++) {
+      metaGrid[my] = new Array(metasAcross);
+      for (let mx = 0; mx < metasAcross; mx++) {
+        const cellTiles = [
+          tileIdByKey.get(keyGrid[my * 2][mx * 2]),         // TL
+          tileIdByKey.get(keyGrid[my * 2][mx * 2 + 1]),     // TR
+          tileIdByKey.get(keyGrid[my * 2 + 1][mx * 2]),     // BL
+          tileIdByKey.get(keyGrid[my * 2 + 1][mx * 2 + 1]), // BR
+        ];
+        const key = cellTiles.join(",");
+        let id = metaIdByKey.get(key);
+        if (id == null) {
+          const m = {
+            id: genId(), name: "imported",
+            tiles: cellTiles,
+            cellPalettes: [firstPalette, firstPalette, firstPalette, firstPalette],
+            collision: "walk", behavior: "normal", borders: [],
+          };
+          ts.metatiles.push(m);
+          id = m.id;
+          metaIdByKey.set(key, id);
+          newMetatiles++;
+        }
+        metaGrid[my][mx] = id;
+      }
+    }
+    if (ts.metatiles.length) { state.selectedMetatileId = ts.metatiles[ts.metatiles.length - 1].id; state.selectedCell = 0; }
+  }
+
+  if (opts.blocks && metaGrid) {
+    // Reuse existing blocks whose four metatiles match exactly.
+    const blockIdByKey = new Map();
+    ts.blocks.forEach(b => {
+      const k = b.metatiles.join(",");
+      if (!blockIdByKey.has(k)) blockIdByKey.set(k, b.id);
+    });
+    const metasAcross = metaGrid.length ? metaGrid[0].length : 0;
+    const metasDown = metaGrid.length;
+    const blocksAcross = Math.floor(metasAcross / 2), blocksDown = Math.floor(metasDown / 2);
+    for (let by = 0; by < blocksDown; by++) {
+      for (let bx = 0; bx < blocksAcross; bx++) {
+        const cellMetas = [
+          metaGrid[by * 2][bx * 2],         // TL
+          metaGrid[by * 2][bx * 2 + 1],     // TR
+          metaGrid[by * 2 + 1][bx * 2],     // BL
+          metaGrid[by * 2 + 1][bx * 2 + 1], // BR
+        ];
+        const key = cellMetas.join(",");
+        if (blockIdByKey.has(key)) continue;
+        const b = { id: genId(), name: "imported", metatiles: cellMetas };
+        ts.blocks.push(b);
+        blockIdByKey.set(key, b.id);
+        newBlocks++;
+      }
+    }
+    if (ts.blocks.length) state.selectedBlockId = ts.blocks[ts.blocks.length - 1].id;
+  }
+
+  render();
+
+  const parts = [newTiles.length + " tile(s)"];
+  if (opts.metatiles) parts.push(newMetatiles + " metatile(s)");
+  if (opts.blocks) parts.push(newBlocks + " block(s)");
+  alert("Imported " + parts.join(", ") +
+        (duplicates ? " (" + duplicates + " duplicate tile(s) skipped)" : "") + ".");
+}
+
+function exportTilesToPng(ts) {
+  const cols = 16;
+  const rowsCount = Math.ceil(ts.tiles.length / cols);
+  const canvas = document.createElement("canvas");
+  canvas.width = cols * TILE_PX;
+  canvas.height = Math.max(1, rowsCount) * TILE_PX;
+  const ctx = canvas.getContext("2d");
+  // Empty cells at the end of the last row export as the lightest shade.
+  ctx.fillStyle = PNG_SHADES[0];
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ts.tiles.forEach((tile, index) => {
+    drawPixels(ctx, tile.pixels, PNG_SHADES, 1,
+      (index % cols) * TILE_PX, Math.floor(index / cols) * TILE_PX);
+  });
+  const name = (ts.name || "tiles").replace(/[^a-z0-9_-]+/gi, "_") + "-tiles.png";
+  canvas.toBlob(blob => {
+    if (blob) downloadBlob(name, blob);
+    else alert("Could not encode the PNG.");
+  }, "image/png");
+}
+
+/* ============================================================
+   Panel: Metatiles
+   ============================================================ */
+
+function renderMetatilesPanel(root) {
+  renderTilesetBar(root);
+  const ts = activeTileset();
+  if (!ts) { root.appendChild(el("p", "hint", "No tileset.")); return; }
+
+  const cols = el("div", "cols");
+
+  /* ---- left: metatile list ---- */
+  const lib = el("div", "card col-library");
+  lib.appendChild(el("h2", null, "Metatiles in " + ts.name));
+  lib.appendChild(toggle("Animate tiles", state.animMetatiles, v => { state.animMetatiles = v; render(); }));
+
+  if (ts.metatiles.length === 0) {
+    lib.appendChild(el("p", "hint", "No metatiles yet. Create one to start composing 16x16 cells."));
+  }
+
+  const list = el("div", "metatile-list");
+  ts.metatiles.forEach((m, index) => {
+    const row = el("div", "mt-row" + (m.id === state.selectedMetatileId ? " selected" : ""));
+    const c = document.createElement("canvas");
+    c.width = 32; c.height = 32;
+    drawMetatile(c.getContext("2d"), ts, m, 32 / (TILE_PX * 2), 0, 0, state.animMetatiles);
+    c.style.border = "1px solid var(--border)";
+    const name = el("span", "mt-name", "#" + index + "  " + m.name);
+    const bord = bordersOf(m);
+    const meta = el("span", "mt-meta", m.collision + " / " + m.behavior +
+      (m.overlay ? (m.overlayMode === "bottom" ? " / overlay-btm" : " / overlay") : "") +
+      (m.snow ? " / snow" : "") +
+      (bord.length ? " / \u2b1a" + bord.map(s2 => BORDER_GLYPHS[s2]).join("") : ""));
+    row.append(c, name, meta);
+    row.addEventListener("click", () => { state.selectedMetatileId = m.id; state.selectedCell = 0; render(); });
+    list.appendChild(row);
+  });
+  lib.appendChild(list);
+
+  const libBtns = el("div", "row");
+  libBtns.style.marginTop = "12px";
+  const addBtn = el("button", null, "+ New metatile");
+  addBtn.addEventListener("click", () => {
+    snapshot();
+    const firstPalette = state.project.palettes[0].id;
+    const m = {
+      id: genId(),
+      name: "metatile",
+      tiles: [null, null, null, null],          // tl, tr, bl, br tile ids
+      cellPalettes: [firstPalette, firstPalette, firstPalette, firstPalette],
+      collision: "walk",
+      behavior: "normal",
+      borders: [],
+      overlay: false,
+      overlayMode: "full",
+      snow: false,
+    };
+    ts.metatiles.push(m);
+    state.selectedMetatileId = m.id; state.selectedCell = 0; render();
+  });
+  const dupBtn = el("button", null, "Duplicate");
+  dupBtn.addEventListener("click", () => {
+    const src = metatileById(ts, state.selectedMetatileId);
+    if (!src) return;
+    snapshot();
+    const m = {
+      id: genId(), name: src.name + " copy",
+      tiles: [...src.tiles], cellPalettes: [...src.cellPalettes],
+      collision: src.collision, behavior: src.behavior,
+      borders: [...bordersOf(src)], overlay: !!src.overlay,
+      overlayMode: src.overlayMode === "bottom" ? "bottom" : "full",
+      snow: !!src.snow,
+    };
+    ts.metatiles.push(m);
+    state.selectedMetatileId = m.id; state.selectedCell = 0; render();
+  });
+  const delBtn = el("button", "danger", "Delete");
+  delBtn.addEventListener("click", () => {
+    const m = metatileById(ts, state.selectedMetatileId);
+    if (!m) return;
+    const refs = countMetatileReferences(ts, m.id);
+    if (refs > 0) { alert("This metatile is used by " + refs + " block cell(s). Clear it there first."); return; }
+    snapshot();
+    ts.metatiles = ts.metatiles.filter(x => x.id !== m.id);
+    state.selectedMetatileId = ts.metatiles[0] ? ts.metatiles[0].id : null;
+    render();
+  });
+  libBtns.append(addBtn, dupBtn, delBtn);
+  lib.appendChild(libBtns);
+  cols.appendChild(lib);
+
+  /* ---- right: composer ---- */
+  const ed = el("div", "card col-editor");
+  ed.appendChild(el("h2", null, "Metatile editor"));
+
+  const m = metatileById(ts, state.selectedMetatileId);
+  if (!m) { ed.appendChild(el("p", "hint", "Select or create a metatile.")); cols.appendChild(ed); root.appendChild(cols); return; }
+
+  // Name.
+  const nameField = el("div", "field");
+  nameField.appendChild(label("Name"));
+  const nameInput = inputText(m.name, 200);
+  nameInput.addEventListener("input", () => { m.name = nameInput.value; });
+  nameField.appendChild(nameInput);
+  ed.appendChild(nameField);
+
+  // Composer: a 2x2 grid of cells. Click selects a cell; clicking a tile in the
+  // picker below assigns it to the selected cell.
+  ed.appendChild(spacer(12));
+  ed.appendChild(el("span", "cell-label", "Layout (click a cell, then pick a tile)"));
+  ed.appendChild(spacer(6));
+  const composer = el("div", "composer");
+  const COMP_SCALE = 96 / TILE_PX;
+  for (let i = 0; i < 4; i++) {
+    const cell = el("button", "composer-cell" + (state.selectedCell === i ? " selected" : ""));
+    const c = document.createElement("canvas");
+    c.width = 96; c.height = 96;
+    const cctx = c.getContext("2d");
+    const tileId = m.tiles[i];
+    const tile = tileId != null ? tileById(ts, tileId) : null;
+    if (tile) drawTile(cctx, tile, colorsForPalette(m.cellPalettes[i]), COMP_SCALE, 0, 0, state.animMetatiles);
+    else drawEmptyCell(cctx, 96);
+    cell.appendChild(c);
+    cell.addEventListener("click", () => { state.selectedCell = i; render(); });
+    composer.appendChild(cell);
+  }
+  ed.appendChild(composer);
+
+  // Per-cell palette assignment (GBC). DMG ignores this.
+  ed.appendChild(spacer(12));
+  const palField = el("div", "field");
+  palField.appendChild(label("Cell " + state.selectedCell + " palette (GBC)"));
+  const palSelect = document.createElement("select");
+  state.project.palettes.forEach(p => {
+    const opt = document.createElement("option");
+    opt.value = p.id; opt.textContent = p.name;
+    if (p.id === m.cellPalettes[state.selectedCell]) opt.selected = true;
+    palSelect.appendChild(opt);
+  });
+  palSelect.addEventListener("change", () => {
+    snapshot();
+    m.cellPalettes[state.selectedCell] = Number(palSelect.value); render();
+  });
+  palField.appendChild(palSelect);
+  ed.appendChild(palField);
+
+  // Clear the selected cell.
+  ed.appendChild(spacer(8));
+  const clearCell = el("button", "tiny danger", "Clear cell " + state.selectedCell);
+  clearCell.addEventListener("click", () => { snapshot(); m.tiles[state.selectedCell] = null; render(); });
+  ed.appendChild(clearCell);
+
+  // Collision and behavior apply to the whole metatile (the 16x16 movement cell).
+  ed.appendChild(spacer(12));
+  const movRow = el("div", "row");
+  const colField = el("div", "field");
+  colField.appendChild(label("Collision"));
+  colField.appendChild(selectFrom(COLLISION_OPTIONS, m.collision, v => { snapshot(); m.collision = v; render(); }));
+  const behField = el("div", "field");
+  behField.appendChild(label("Behavior"));
+  behField.appendChild(selectFrom(state.project.behaviors, m.behavior, v => { snapshot(); m.behavior = v; render(); }));
+  movRow.append(colField, behField);
+  ed.appendChild(movRow);
+
+  // Per-edge borders. Independent of both collision and behavior, and freely
+  // combinable: a border closes that one edge of the 16x16 cell in both
+  // directions (you can neither step out through it nor step in through it)
+  // while the other edges stay open.
+  ed.appendChild(spacer(8));
+  const bordField = el("div", "field");
+  bordField.appendChild(label("Borders (blocked edges)"));
+  const bordRow = el("div", "row");
+  BORDER_OPTIONS.forEach(side => {
+    const lab = document.createElement("label");
+    lab.className = "checkbox";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = bordersOf(m).includes(side);
+    cb.addEventListener("change", () => {
+      snapshot();
+      const have = bordersOf(m);
+      m.borders = cb.checked
+        ? BORDER_OPTIONS.filter(s => s === side || have.includes(s))
+        : have.filter(s => s !== side);
+      render();
+    });
+    lab.append(cb, document.createTextNode(" " + BORDER_GLYPHS[side] + " " + side));
+    bordRow.appendChild(lab);
+  });
+  bordField.appendChild(bordRow);
+  ed.appendChild(bordField);
+  if (LEDGE_OPTIONS.includes(m.behavior) && bordersOf(m).length)
+    ed.appendChild(el("p", "hint",
+      "This metatile is a ledge, so its borders have no effect — a ledge is " +
+      "jumped over, never entered or exited."));
+
+  // Surface. Orthogonal to everything above: it says what the ground is made
+  // of, not what movement does there, so it combines freely with any
+  // collision value, behavior or border.
+  ed.appendChild(spacer(8));
+  const surfField = el("div", "field");
+  surfField.appendChild(label("Surface"));
+  const snowLabel = document.createElement("label");
+  snowLabel.className = "checkbox";
+  const snowCb = document.createElement("input");
+  snowCb.type = "checkbox";
+  snowCb.checked = !!m.snow;
+  snowCb.addEventListener("change", () => { snapshot(); m.snow = snowCb.checked; render(); });
+  snowLabel.append(snowCb, document.createTextNode(" Snow (player leaves footprints)"));
+  surfField.appendChild(snowLabel);
+  ed.appendChild(surfField);
+  if (m.snow && m.collision === "solid")
+    ed.appendChild(el("p", "hint",
+      "This metatile is solid, so its snow has no effect — footprints are " +
+      "pressed by the player walking, and nothing can stand here."));
+
+  // Overlay: the metatile's BG art draws over the player (engine sets the
+  // OAM priority bit on player parts standing on it). Independent of
+  // collision: a canopy is solid + overlay, tall grass is walk + overlay.
+  // DMG caveat: only BG colors 1-3 cover the sprite; color 0 shows it.
+  ed.appendChild(spacer(8));
+  const ovField = el("div", "field");
+  const ovLabel = document.createElement("label");
+  ovLabel.className = "checkbox";
+  const ovCb = document.createElement("input");
+  ovCb.type = "checkbox";
+  ovCb.checked = !!m.overlay;
+  ovCb.addEventListener("change", () => { snapshot(); m.overlay = ovCb.checked; render(); });
+  ovLabel.append(ovCb, document.createTextNode(" Draw over player (overlay)"));
+  ovField.appendChild(ovLabel);
+  ed.appendChild(ovField);
+  if (m.overlay) {
+    // Coverage mode only matters (and is only exported) while overlay is on.
+    ed.appendChild(spacer(6));
+    const ovModeField = el("div", "field");
+    ovModeField.appendChild(label("Overlay coverage"));
+    ovModeField.appendChild(selectFrom(OVERLAY_MODE_OPTIONS,
+      m.overlayMode === "bottom" ? "bottom" : "full",
+      v => { snapshot(); m.overlayMode = v; render(); }));
+    ed.appendChild(ovModeField);
+  }
+
+  // Tile picker for assigning into the selected cell.
+  ed.appendChild(spacer(16));
+  ed.appendChild(el("span", "cell-label", "Tiles (click to place in cell " + state.selectedCell + ")"));
+  ed.appendChild(spacer(6));
+  const picker = el("div", "lib-grid");
+  ts.tiles.forEach((tile, index) => {
+    const cell = el("button", "lib-cell");
+    const c = document.createElement("canvas");
+    c.width = 38; c.height = 38;
+    drawTile(c.getContext("2d"), tile, colorsForPalette(m.cellPalettes[state.selectedCell]), 38 / TILE_PX, 0, 0, state.animMetatiles);
+    cell.appendChild(c);
+    if (isAnimated(tile)) cell.appendChild(el("span", "anim-badge", "\u25B6"));
+    cell.appendChild(el("span", "idx", String(index)));
+    cell.addEventListener("click", () => { snapshot(); m.tiles[state.selectedCell] = tile.id; render(); });
+    picker.appendChild(cell);
+  });
+  ed.appendChild(picker);
+
+  cols.appendChild(ed);
+  root.appendChild(cols);
+}
+
+/* ============================================================
+   Panel: Blocks
+   ============================================================ */
+
+function renderBlocksPanel(root) {
+  renderTilesetBar(root);
+  const ts = activeTileset();
+  if (!ts) { root.appendChild(el("p", "hint", "No tileset.")); return; }
+
+  const cols = el("div", "cols");
+
+  /* ---- left: block library ---- */
+  const lib = el("div", "card col-library");
+  lib.appendChild(el("h2", null, "Blocks in " + ts.name));
+  lib.appendChild(toggle("Animate tiles", state.animBlocks, v => { state.animBlocks = v; render(); }));
+
+  if (ts.metatiles.length === 0) {
+    lib.appendChild(el("p", "hint", "Create some metatiles first, then compose them into 32x32 blocks here."));
+  } else if (ts.blocks.length === 0) {
+    lib.appendChild(el("p", "hint", "No blocks yet. A block is a 2x2 grid of metatiles, the unit your maps are painted with."));
+  }
+
+  const list = el("div", "metatile-list");
+  ts.blocks.forEach((b, index) => {
+    const row = el("div", "mt-row" + (b.id === state.selectedBlockId ? " selected" : ""));
+    const c = document.createElement("canvas");
+    c.width = 48; c.height = 48;
+    drawBlock(c.getContext("2d"), ts, b, 48 / (TILE_PX * 4), 0, 0, state.animBlocks); // a block is 32 px (4 tiles) wide
+    c.style.border = "1px solid var(--border)";
+    const name = el("span", "mt-name", "#" + index + "  " + b.name);
+    row.append(c, name);
+    row.addEventListener("click", () => { state.selectedBlockId = b.id; state.selectedCell = 0; render(); });
+    list.appendChild(row);
+  });
+  lib.appendChild(list);
+
+  const libBtns = el("div", "row");
+  libBtns.style.marginTop = "12px";
+  const addBtn = el("button", null, "+ New block");
+  addBtn.addEventListener("click", () => {
+    snapshot();
+    const b = { id: genId(), name: "block", metatiles: [null, null, null, null] }; // tl, tr, bl, br
+    ts.blocks.push(b);
+    state.selectedBlockId = b.id; state.selectedCell = 0; render();
+  });
+  const dupBtn = el("button", null, "Duplicate");
+  dupBtn.addEventListener("click", () => {
+    const src = blockById(ts, state.selectedBlockId);
+    if (!src) return;
+    snapshot();
+    const b = { id: genId(), name: src.name + " copy", metatiles: [...src.metatiles] };
+    ts.blocks.push(b);
+    state.selectedBlockId = b.id; state.selectedCell = 0; render();
+  });
+  const delBtn = el("button", "danger", "Delete");
+  delBtn.addEventListener("click", () => {
+    const b = blockById(ts, state.selectedBlockId);
+    if (!b) return;
+    const refs = countBlockReferences(b.id);
+    if (refs > 0) { alert("This block is used in " + refs + " map cell(s). Clear it there first."); return; }
+    snapshot();
+    ts.blocks = ts.blocks.filter(x => x.id !== b.id);
+    // Drop any map border-block references to the deleted block.
+    state.project.maps.forEach(m => { if (m.borderBlock === b.id) m.borderBlock = null; });
+    state.selectedBlockId = ts.blocks[0] ? ts.blocks[0].id : null;
+    render();
+  });
+  libBtns.append(addBtn, dupBtn, delBtn);
+  lib.appendChild(libBtns);
+  cols.appendChild(lib);
+
+  /* ---- right: composer ---- */
+  const ed = el("div", "card col-editor");
+  ed.appendChild(el("h2", null, "Block editor"));
+
+  const b = blockById(ts, state.selectedBlockId);
+  if (!b) { ed.appendChild(el("p", "hint", "Select or create a block.")); cols.appendChild(ed); root.appendChild(cols); return; }
+
+  // Name.
+  const nameField = el("div", "field");
+  nameField.appendChild(label("Name"));
+  const nameInput = inputText(b.name, 200);
+  nameInput.addEventListener("input", () => { b.name = nameInput.value; });
+  nameField.appendChild(nameInput);
+  ed.appendChild(nameField);
+
+  // Composer: a 2x2 grid of metatile cells. Click a cell, then pick a metatile.
+  ed.appendChild(spacer(12));
+  ed.appendChild(el("span", "cell-label", "Layout (click a cell, then pick a metatile)"));
+  ed.appendChild(spacer(6));
+  const composer = el("div", "composer");
+  const COMP_SCALE = 96 / (2 * TILE_PX); // 96 px cell showing one 16 px metatile
+  for (let i = 0; i < 4; i++) {
+    const cell = el("button", "composer-cell" + (state.selectedCell === i ? " selected" : ""));
+    const c = document.createElement("canvas");
+    c.width = 96; c.height = 96;
+    const cctx = c.getContext("2d");
+    const metatileId = b.metatiles[i];
+    const metatile = metatileId != null ? metatileById(ts, metatileId) : null;
+    if (metatile) drawMetatile(cctx, ts, metatile, COMP_SCALE, 0, 0, state.animBlocks);
+    else drawEmptyCell(cctx, 96);
+    cell.appendChild(c);
+    cell.addEventListener("click", () => { state.selectedCell = i; render(); });
+    composer.appendChild(cell);
+  }
+  ed.appendChild(composer);
+
+  // Clear the selected cell.
+  ed.appendChild(spacer(8));
+  const clearCell = el("button", "tiny danger", "Clear cell " + state.selectedCell);
+  clearCell.addEventListener("click", () => { snapshot(); b.metatiles[state.selectedCell] = null; render(); });
+  ed.appendChild(clearCell);
+
+  // Metatile picker for assigning into the selected cell.
+  ed.appendChild(spacer(16));
+  ed.appendChild(el("span", "cell-label", "Metatiles (click to place in cell " + state.selectedCell + ")"));
+  ed.appendChild(spacer(6));
+  if (ts.metatiles.length === 0) {
+    ed.appendChild(el("p", "hint", "No metatiles to place. Build some on the Metatiles tab."));
+  }
+  const picker = el("div", "lib-grid");
+  ts.metatiles.forEach((m, index) => {
+    const cell = el("button", "lib-cell");
+    const c = document.createElement("canvas");
+    c.width = 38; c.height = 38;
+    drawMetatile(c.getContext("2d"), ts, m, 38 / (2 * TILE_PX), 0, 0, state.animBlocks);
+    cell.appendChild(c);
+    cell.appendChild(el("span", "idx", String(index)));
+    cell.title = m.name;
+    cell.addEventListener("click", () => { snapshot(); b.metatiles[state.selectedCell] = m.id; render(); });
+    picker.appendChild(cell);
+  });
+  ed.appendChild(picker);
+
+  cols.appendChild(ed);
+  root.appendChild(cols);
+}
+
+/* ============================================================
+   Panel: Maps
+   ============================================================ */
+
+function renderMapsPanel(root) {
+  const cols = el("div", "cols");
+
+  /* ---- left: maps, properties, connections ---- */
+  const side = el("div", "col-library");
+
+  // Map list.
+  const listCard = el("div", "card");
+  listCard.appendChild(el("h2", null, "Maps"));
+  if (state.project.maps.length === 0) {
+    listCard.appendChild(el("p", "hint", "No maps yet. Create one to start painting blocks."));
+  }
+  const list = el("div", "map-list");
+  state.project.maps.forEach(map => {
+    const row = el("div", "map-row" + (map.id === state.selectedMapId ? " selected" : ""));
+    row.append(
+      el("span", "map-name", map.name),
+      el("span", "map-dims", map.width + "x" + map.height));
+    row.addEventListener("click", () => { state.selectedMapId = map.id; state.selectedEventId = null; state.pathEdit = null; state.mapScroll = { left: 0, top: 0 }; render(); });
+    list.appendChild(row);
+  });
+  listCard.appendChild(list);
+
+  const newBtn = el("button", null, "+ New map");
+  newBtn.style.marginTop = "12px";
+  newBtn.addEventListener("click", () => {
+    const ts = activeTileset() || state.project.tilesets[0];
+    if (!ts) { alert("Create a tileset first."); return; }
+    snapshot();
+    const map = createMap("map " + (state.project.maps.length + 1), ts.id, 16, 16);
+    state.project.maps.push(map);
+    state.selectedMapId = map.id;
+    state.selectedEventId = null;
+    state.mapScroll = { left: 0, top: 0 };
+    render();
+  });
+  listCard.appendChild(newBtn);
+
+  const worldPngBtn = el("button", null, "Export world PNG");
+  worldPngBtn.style.marginTop = "8px";
+  worldPngBtn.addEventListener("click", exportWorldPng);
+  listCard.appendChild(worldPngBtn);
+
+  side.appendChild(listCard);
+
+  const map = mapById(state.selectedMapId);
+
+  if (map) {
+    side.appendChild(renderMapProperties(map));
+    side.appendChild(renderConnections(map));
+  }
+  cols.appendChild(side);
+
+  /* ---- right: paint surface ---- */
+  const main = el("div", "card col-editor");
+  main.style.flex = "2 1 520px";
+  main.appendChild(el("h2", null, "Map editor"));
+
+  if (!map) {
+    main.appendChild(el("p", "hint", "Select or create a map."));
+    cols.appendChild(main);
+    root.appendChild(cols);
+    return;
+  }
+
+  const ts = tilesetForMap(map);
+  if (!ts) {
+    main.appendChild(el("p", "warn", "This map points at a tileset that no longer exists."));
+    cols.appendChild(main);
+    root.appendChild(cols);
+    return;
+  }
+
+  main.appendChild(renderMapToolbar(map, ts));
+
+  // Viewport wraps a single canvas sized to the whole map; it scrolls inside.
+  const viewport = el("div", "map-viewport");
+  // Remember scroll so a re-render (tool change, brush pick) does not jump to 0,0.
+  viewport.addEventListener("scroll", () => {
+    state.mapScroll = { left: viewport.scrollLeft, top: viewport.scrollTop };
+  });
+  requestAnimationFrame(() => {
+    viewport.scrollLeft = state.mapScroll.left;
+    viewport.scrollTop = state.mapScroll.top;
+  });
+  const canvas = document.createElement("canvas");
+  canvas.className = "map-canvas";
+  const z = state.mapZoom;
+  canvas.width = map.width * z;
+  canvas.height = map.height * z;
+  const ctx = canvas.getContext("2d");
+
+  // Paint a single cell (block art, empty marker, then its grid lines).
+  const paintCell = (cx, cy) => {
+    const px = cx * z, py = cy * z;
+    const blockId = map.blockGrid[cy * map.width + cx];
+    const block = blockId != null ? blockById(ts, blockId) : null;
+    if (block) drawBlock(ctx, ts, block, z / (TILE_PX * 4), px, py, state.animMaps ? "live" : false);
+    else drawEmptyCell(ctx, z, px, py);
+    // Collision mode always shows the overlay -- painting it blind is useless.
+    if ((state.showCollision || state.mapMode === "collision") && block)
+      drawCollisionCell(ctx, ts, block, z, px, py);
+    if (state.showMapGrid) {
+      ctx.strokeStyle = "rgba(224,248,208,0.10)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(px + 0.5, py + 0.5, z, z);
+      if (state.mapMode === "collision") {
+        // Fainter half-cell lines: collision is painted per metatile.
+        ctx.strokeStyle = "rgba(224,248,208,0.05)";
+        ctx.beginPath();
+        ctx.moveTo(px + z / 2 + 0.5, py); ctx.lineTo(px + z / 2 + 0.5, py + z);
+        ctx.moveTo(px, py + z / 2 + 0.5); ctx.lineTo(px + z, py + z / 2 + 0.5);
+        ctx.stroke();
+      }
+    }
+  };
+
+  const repaintAll = () => {
+    for (let y = 0; y < map.height; y++)
+      for (let x = 0; x < map.width; x++) paintCell(x, y);
+  };
+  repaintAll();
+  if (!map.events) map.events = [];
+  if (state.mapMode === "events") { drawEventMarkers(ctx, map, z); drawWarpTargets(ctx, map, z); }
+
+  // One composite animator target repaints just the cells whose block uses an
+  // animated tile whenever any tile's frame advances. paintCell scans the live
+  // blockGrid, so cells painted or erased mid-stroke stay in sync, and the
+  // grid/event overlays are redrawn along with the art.
+  if (state.animMaps) {
+    const animBlockIds = new Set(
+      ts.blocks.filter(b => blockUsesAnimatedTile(ts, b)).map(b => b.id));
+    if (animBlockIds.size > 0) {
+      animator.targets.push({
+        tiles: ts.tiles.filter(isAnimated),
+        last: "",
+        redraw: () => {
+          const repainted = new Set();
+          for (let y = 0; y < map.height; y++)
+            for (let x = 0; x < map.width; x++)
+              if (animBlockIds.has(map.blockGrid[y * map.width + x])) {
+                paintCell(x, y);
+                repainted.add(y * map.width + x);
+              }
+          // Markers are translucent, so restore only the ones whose cell was
+          // just repainted — redrawing them all would stack the alpha. A
+          // dialog zone spans many cells and redraws as a whole, so first
+          // repaint every cell of any zone the animation touched.
+          if (state.mapMode === "events" && repainted.size > 0) {
+            map.events.forEach(e => {
+              if (e.type !== "dialog" || !eventTouchesBlockCells(e, map, repainted)) return;
+              eventBlockCells(e, map).forEach(i => {
+                if (repainted.has(i)) return;
+                paintCell(i % map.width, Math.floor(i / map.width));
+                repainted.add(i);
+              });
+            });
+            drawEventMarkers(ctx, map, z, repainted);
+            drawWarpTargets(ctx, map, z, repainted);
+          }
+        },
+      });
+    }
+  }
+
+  // Translate a pointer event into a block cell, or null if outside the grid.
+  const cellAt = (ev) => {
+    const x = Math.floor(ev.offsetX / z);
+    const y = Math.floor(ev.offsetY / z);
+    if (x < 0 || x >= map.width || y < 0 || y >= map.height) return null;
+    return { x, y };
+  };
+
+  const applyAt = (cx, cy) => {
+    const i = cy * map.width + cx;
+    if (state.mapTool === "erase") {
+      map.blockGrid[i] = null;
+    } else if (state.mapTool === "fill") {
+      floodFillMap(map, cx, cy, state.paintBlockId);
+      repaintAll();
+      return;
+    } else {
+      if (state.paintBlockId == null) return;
+      map.blockGrid[i] = state.paintBlockId;
+    }
+    paintCell(cx, cy);
+  };
+
+  // Scroll the viewport when the cursor nears an edge while painting.
+  const edgeAutoScroll = (ev) => {
+    if (!state.autoScroll) return;
+    const rect = viewport.getBoundingClientRect();
+    const margin = 48, step = 24;
+    const x = ev.clientX - rect.left, y = ev.clientY - rect.top;
+    if (x < margin) viewport.scrollLeft -= step;
+    else if (x > rect.width - margin) viewport.scrollLeft += step;
+    if (y < margin) viewport.scrollTop -= step;
+    else if (y > rect.height - margin) viewport.scrollTop += step;
+  };
+
+  // Events live on the finer metatile grid (half a block per axis).
+  const eventCellAt = (ev) => {
+    const cell = z / 2;
+    const x = Math.floor(ev.offsetX / cell);
+    const y = Math.floor(ev.offsetY / cell);
+    if (x < 0 || x >= map.width * 2 || y < 0 || y >= map.height * 2) return null;
+    return { x, y };
+  };
+
+  if (state.mapMode === "blocks") {
+    let painting = false;
+    canvas.addEventListener("pointerdown", (ev) => {
+      const pos = cellAt(ev);
+      if (!pos) return;
+      snapshot();          // the whole stroke (or a fill) collapses into one undo step
+      painting = true;
+      applyAt(pos.x, pos.y);
+    });
+    canvas.addEventListener("pointermove", (ev) => {
+      if (!painting) return;
+      edgeAutoScroll(ev);
+      const pos = cellAt(ev);
+      if (pos) applyAt(pos.x, pos.y);
+    });
+    const stop = () => { painting = false; };
+    canvas.addEventListener("pointerup", stop);
+    canvas.addEventListener("pointerleave", stop);
+  } else if (state.mapMode === "collision") {
+    // Collision mode: paint walk/solid at metatile resolution. The edit lands
+    // on the metatile *definition* (reached through the block under the
+    // cursor), so every use of that metatile -- on this map and others --
+    // changes with it. Repaint every cell whose block contains the metatile
+    // so the whole overlay stays truthful during the stroke.
+    const repaintCellsUsing = (metatileId) => {
+      const blockIds = new Set(
+        ts.blocks.filter(b => b.metatiles.includes(metatileId)).map(b => b.id));
+      for (let y = 0; y < map.height; y++)
+        for (let x = 0; x < map.width; x++)
+          if (blockIds.has(map.blockGrid[y * map.width + x])) paintCell(x, y);
+    };
+    // Support for "Duplicate shared": how often a block appears on any map of
+    // this tileset, and how often a metatile appears in any block.
+    const mapsSharingTs = state.project.maps.filter(mp => mp.tilesetId === ts.id);
+    const blockUsageCount = (blockId) => {
+      let n = 0;
+      mapsSharingTs.forEach(mp => mp.blockGrid.forEach(id => { if (id === blockId) n++; }));
+      return n;
+    };
+    const metaUsageCount = (mtId) => {
+      let n = 0;
+      ts.blocks.forEach(b => b.metatiles.forEach(id => { if (id === mtId) n++; }));
+      return n;
+    };
+    // Reuse-or-create a metatile identical to src except for the collision
+    // and behavior the brush writes, and a block identical to src except for
+    // one quadrant. Reuse keeps a drag stroke from spawning one copy per
+    // painted cell.
+    // Borders and snow are part of the identity: without them a stroke would
+    // reuse a variant that differs only by which edges are closed, or by
+    // whether the ground takes footprints.
+    const metaKey = (m2) => [m2.tiles.join(","), m2.cellPalettes.join(","), m2.behavior,
+      m2.overlay ? (m2.overlayMode === "bottom" ? "ob" : "of") : "-", m2.collision,
+      m2.snow ? "snow" : "-", bordersOf(m2).join("+")].join("|");
+    const variantOfMetatile = (src, edit) => {
+      const wanted = metaKey({ ...src, ...edit });
+      const hit = ts.metatiles.find(m2 => metaKey(m2) === wanted);
+      if (hit) return hit.id;
+      const copy = {
+        id: genId(), name: src.name + " (" + state.collisionTool + ")",
+        tiles: [...src.tiles], cellPalettes: [...src.cellPalettes],
+        collision: edit.collision, behavior: edit.behavior,
+        borders: [...edit.borders],
+        overlay: !!src.overlay,
+        overlayMode: src.overlayMode === "bottom" ? "bottom" : "full",
+        snow: edit.snow,
+      };
+      ts.metatiles.push(copy);
+      return copy.id;
+    };
+    const variantOfBlock = (src, q, mtId) => {
+      const cells = src.metatiles.slice();
+      cells[q] = mtId;
+      const key = cells.join(",");
+      const hit = ts.blocks.find(b => b.metatiles.join(",") === key);
+      if (hit) return hit.id;
+      const copy = { id: genId(), name: src.name + " copy", metatiles: cells };
+      ts.blocks.push(copy);
+      return copy.id;
+    };
+    const applyCollisionAt = (mx, my) => {
+      const cellIndex = (my >> 1) * map.width + (mx >> 1);
+      const blockId = map.blockGrid[cellIndex];
+      const block = blockId != null ? blockById(ts, blockId) : null;
+      if (!block) return;
+      const q = (my & 1) * 2 + (mx & 1);                       // TL, TR, BL, BR
+      const mtId = block.metatiles[q];
+      const m = mtId != null ? metatileById(ts, mtId) : null;
+      if (!m || brushMatches(m, state.collisionTool)) return;
+      const edit = brushEdit(state.collisionTool, m);
+      if (!state.collisionDuplicate) {
+        m.collision = edit.collision;
+        m.behavior = edit.behavior;
+        m.borders = [...edit.borders];
+        m.snow = edit.snow;
+        repaintCellsUsing(mtId);
+        return;
+      }
+      // Duplicate shared: confine the change to this one map cell by copying
+      // whatever is shared on the path to the metatile. A shared block gets a
+      // variant pointed at only from this cell; an unshared block with a
+      // shared metatile just swaps its quadrant; if nothing is shared the
+      // metatile can be edited in place.
+      if (blockUsageCount(blockId) > 1) {
+        map.blockGrid[cellIndex] = variantOfBlock(block, q, variantOfMetatile(m, edit));
+      } else if (metaUsageCount(mtId) > 1) {
+        block.metatiles[q] = variantOfMetatile(m, edit);
+      } else {
+        m.collision = edit.collision;
+        m.behavior = edit.behavior;
+        m.borders = [...edit.borders];
+        m.snow = edit.snow;
+      }
+      paintCell(mx >> 1, my >> 1);
+    };
+    let painting = false;
+    canvas.addEventListener("pointerdown", (ev) => {
+      const pos = eventCellAt(ev);   // metatile grid, same as events
+      if (!pos) return;
+      snapshot();
+      painting = true;
+      applyCollisionAt(pos.x, pos.y);
+    });
+    canvas.addEventListener("pointermove", (ev) => {
+      if (!painting) return;
+      edgeAutoScroll(ev);
+      const pos = eventCellAt(ev);
+      if (pos) applyCollisionAt(pos.x, pos.y);
+    });
+    const stop = () => { painting = false; };
+    canvas.addEventListener("pointerup", stop);
+    canvas.addEventListener("pointerleave", stop);
+  } else {
+    // Events mode: click a marker to select it, or an empty cell to place one.
+    // The dialog tool places by dragging: the swept rectangle becomes the zone.
+    let dragEvent = null;   // dialog event being sized by the current drag
+    let dragAnchor = null;  // cell the drag started on
+
+    // Placing an NPC's waypoint path: every click appends one axis-aligned
+    // waypoint to that NPC's route instead of selecting/placing an event.
+    const appendWaypoint = (pos) => {
+      const npc = map.events.find(e => e.id === state.pathEdit);
+      if (!npc) { state.pathEdit = null; render(); return; }
+      if (!npc.path) npc.path = [];
+      if (npc.path.length >= NPC_PATH_MAX - 1) return;   // spawn + path ≤ MAX
+      const pts = npcPathPoints(npc);
+      const prev = pts[pts.length - 1];
+      let nx = pos.x, ny = pos.y;
+      // Snap a diagonal click to a straight leg: the dominant axis wins.
+      if (nx !== prev.x && ny !== prev.y) {
+        if (Math.abs(nx - prev.x) >= Math.abs(ny - prev.y)) ny = prev.y; else nx = prev.x;
+      }
+      if (nx === prev.x && ny === prev.y) return;        // zero-length, ignore
+      snapshot();
+      npc.path.push({ x: nx, y: ny });
+      render();
+    };
+
+    canvas.addEventListener("pointerdown", (ev) => {
+      const pos = eventCellAt(ev);
+      if (!pos) return;
+      if (state.pathEdit != null) { appendWaypoint(pos); return; }
+      const existing = map.events.find(e => eventContains(e, pos.x, pos.y));
+      if (existing) { state.selectedEventId = existing.id; render(); return; }
+      // A warp landing marker is only a reminder of where a warp sends the
+      // player -- never a place to author a new event. Swallow the click so it
+      // can't spawn one; if the warp that lands here lives on this map, select
+      // it as a convenience. (Toggle "Warp targets" off to place on the cell.)
+      if (state.showWarpTargets) {
+        const landing = warpsLandingAt(map, pos.x, pos.y);
+        if (landing.length) {
+          const here = landing.find(l => l.src.id === map.id);
+          if (here) { state.selectedEventId = here.ev.id; }
+          render();
+          return;
+        }
+      }
+      snapshot();
+      const e = makeEvent(state.eventTool, pos.x, pos.y);
+      e.id = genId();
+      map.events.push(e);
+      state.selectedEventId = e.id;
+      if (state.eventTool === "dialog") {
+        // Defer the full render to pointerup so the drag can keep sizing the
+        // zone against this canvas; repaint in place meanwhile.
+        dragEvent = e;
+        dragAnchor = pos;
+        repaintAll();
+        drawEventMarkers(ctx, map, z);
+      } else {
+        render();
+      }
+    });
+    canvas.addEventListener("pointermove", (ev) => {
+      if (!dragEvent) return;
+      edgeAutoScroll(ev);
+      const pos = eventCellAt(ev);
+      if (!pos) return;
+      dragEvent.x = Math.min(dragAnchor.x, pos.x);
+      dragEvent.y = Math.min(dragAnchor.y, pos.y);
+      dragEvent.w = Math.abs(pos.x - dragAnchor.x) + 1;
+      dragEvent.h = Math.abs(pos.y - dragAnchor.y) + 1;
+      repaintAll();
+      drawEventMarkers(ctx, map, z);
+    });
+    const stopDrag = () => {
+      if (!dragEvent) return;
+      dragEvent = null;
+      dragAnchor = null;
+      render();
+    };
+    canvas.addEventListener("pointerup", stopDrag);
+    canvas.addEventListener("pointerleave", stopDrag);
+  }
+
+  viewport.appendChild(canvas);
+  main.appendChild(viewport);
+
+  if (state.mapMode === "blocks") {
+    // Block palette: pick the brush block.
+    main.appendChild(spacer(12));
+    main.appendChild(el("span", "cell-label", "Blocks (click to set the brush)"));
+    main.appendChild(spacer(6));
+    if (ts.blocks.length === 0) {
+      main.appendChild(el("p", "hint", "No blocks in this tileset. Build some on the Blocks tab."));
+    }
+    const palette = el("div", "lib-grid");
+    ts.blocks.forEach((block, index) => {
+      const cell = el("button", "lib-cell" + (block.id === state.paintBlockId ? " selected" : ""));
+      const c = document.createElement("canvas");
+      c.width = 38; c.height = 38;
+      drawBlock(c.getContext("2d"), ts, block, 38 / (TILE_PX * 4), 0, 0, state.animMaps);
+      cell.appendChild(c);
+      cell.appendChild(el("span", "idx", String(index)));
+      cell.title = block.name;
+      cell.addEventListener("click", () => {
+        state.paintBlockId = block.id;
+        if (state.mapTool === "erase") state.mapTool = "paint";
+        render();
+      });
+      palette.appendChild(cell);
+    });
+    main.appendChild(palette);
+  } else if (state.mapMode === "collision") {
+    main.appendChild(spacer(12));
+    main.appendChild(el("p", "hint", state.collisionDuplicate
+      ? "Paint " + state.collisionTool + " onto 16×16 metatile cells. Duplicate shared is on: " +
+        "shared metatiles/blocks under the brush are copied (reusing an identical variant when " +
+        "one exists), so only the painted cell changes."
+      : "Paint " + state.collisionTool + " onto 16×16 metatile cells. The edit is stored on " +
+        "the metatile itself, so every use of that metatile — in other blocks and on other " +
+        "maps — updates with it. Turn on “Duplicate shared” to change only the painted cell."));
+    main.appendChild(el("p", "hint",
+      "A ledge brush names the direction the player jumps: walking into a ledge → cell " +
+      "carries them over it and onto the cell beyond. Ledges are one-way — solid from every " +
+      "other side — and need the jump skill unlocked. Paint walk or solid over a ledge to " +
+      "clear it."));
+    main.appendChild(el("p", "hint",
+      "A border brush closes one edge of a metatile: movement across that edge is blocked " +
+      "in both directions, while the other edges stay open. Borders stack (paint ↑ then ← " +
+      "for a corner) and combine with any collision or behavior; “none” clears all four. " +
+      "Because an edge is shared, closing it on either of the two neighbouring cells has " +
+      "the same effect."));
+  } else {
+    main.appendChild(spacer(12));
+    main.appendChild(el("p", "hint", state.eventTool === "dialog"
+      ? "Drag across the map to sweep out a dialog zone (click = one cell), or " +
+        "click a marker to select it. Set the zone's text in the inspector."
+      : "Click an empty cell to drop a " + EVENT_TYPES[state.eventTool].label.toLowerCase() +
+        ", or click a marker to select it."));
+    if (state.showWarpTargets) {
+      main.appendChild(el("p", "hint",
+        "Dashed reticles mark where warps land on this map (⇢ names the source " +
+        "map for warps arriving from elsewhere). They are just a reminder — " +
+        "clicking one won't place an event. Turn off “Warp targets” to author " +
+        "on those cells."));
+    }
+    main.appendChild(spacer(8));
+    main.appendChild(renderEventInspector(map));
+    main.appendChild(renderEventList(map));
+  }
+
+  cols.appendChild(main);
+  root.appendChild(cols);
+}
+
+// Draw event markers over the map: a colored square with the type's letter,
+// sized to one metatile cell, highlighted when selected.
+// `onlyBlockCells` (optional Set of blockGrid indices) limits drawing to the
+// markers sitting on those block cells — used when animation repaints a cell.
+// Block cells (blockGrid indices) covered by an event: one for point events,
+// the whole rectangle for dialog zones.
+function eventBlockCells(e, map) {
+  const cells = [];
+  const x1 = Math.floor(e.x / 2), y1 = Math.floor(e.y / 2);
+  const x2 = e.type === "dialog" ? Math.floor((e.x + (e.w || 1) - 1) / 2) : x1;
+  const y2 = e.type === "dialog" ? Math.floor((e.y + (e.h || 1) - 1) / 2) : y1;
+  for (let y = y1; y <= y2; y++)
+    for (let x = x1; x <= x2; x++) cells.push(y * map.width + x);
+  return cells;
+}
+
+function eventTouchesBlockCells(e, map, blockCells) {
+  return eventBlockCells(e, map).some(i => blockCells.has(i));
+}
+
+// A walking NPC's full route: the spawn cell followed by its waypoints. A
+// static NPC (or one with no path) is just the spawn.
+function npcPathPoints(ev) {
+  const pts = [{ x: ev.x, y: ev.y }];
+  (ev.path || []).forEach(p => pts.push({ x: p.x, y: p.y }));
+  return pts;
+}
+
+// Problems with a walking NPC's route (empty list = clean). Every leg must be
+// a straight axis-aligned run; a loop's closing leg (last → spawn) counts too.
+function npcPathWarnings(ev) {
+  const w = [];
+  const pts = npcPathPoints(ev);
+  if (pts.length < 2) { w.push("no waypoints yet — add at least one"); return w; }
+  const legs = pts.slice();
+  if (ev.movement === "walk_path_loop") legs.push(pts[0]);   // closing leg
+  for (let i = 1; i < legs.length; i++) {
+    const a = legs[i - 1], b = legs[i];
+    if (a.x === b.x && a.y === b.y)
+      w.push("leg " + i + " has zero length");
+    else if (a.x !== b.x && a.y !== b.y)
+      w.push("leg " + i + " (" + a.x + "," + a.y + ")→(" + b.x + "," + b.y + ") is diagonal");
+  }
+  if (pts.length > NPC_PATH_MAX)
+    w.push("more than " + NPC_PATH_MAX + " waypoints (engine limit)");
+  return w;
+}
+
+// The pink patrol route overlay for every walking NPC on the map: a polyline
+// through the waypoints (closed for a loop) with a dot on each waypoint. The
+// one being placed is highlighted. Drawn under the event markers.
+function drawNpcPaths(ctx, map, z) {
+  const cell = z / 2;
+  const center = (p) => ({ x: p.x * cell + cell / 2, y: p.y * cell + cell / 2 });
+  (map.events || []).forEach(e => {
+    if (e.type !== "npc") return;
+    if (e.movement !== "walk_path" && e.movement !== "walk_path_loop") return;
+    const pts = npcPathPoints(e);
+    if (pts.length < 2) return;
+    const active = e.id === state.pathEdit;
+    const sel = e.id === state.selectedEventId;
+    ctx.save();
+    ctx.lineWidth = active ? 3 : 2;
+    ctx.strokeStyle = active ? "#ffe066" : (sel ? "#ffffff" : "rgba(224,106,214,0.9)");
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    const c0 = center(pts[0]);
+    ctx.moveTo(c0.x, c0.y);
+    for (let i = 1; i < pts.length; i++) { const c = center(pts[i]); ctx.lineTo(c.x, c.y); }
+    if (e.movement === "walk_path_loop") ctx.lineTo(c0.x, c0.y);
+    ctx.stroke();
+    ctx.fillStyle = ctx.strokeStyle;
+    for (let i = 1; i < pts.length; i++) {
+      const c = center(pts[i]);
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, Math.max(2, cell * 0.16), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  });
+}
+
+function drawEventMarkers(ctx, map, z, onlyBlockCells) {
+  const cell = z / 2;                       // a metatile is half a block per axis
+  const inset = Math.max(1, cell * 0.12);
+  // Patrol routes go under the markers. Skipped on the partial repaints the
+  // tile animator triggers (a thin line under an animated cell is negligible).
+  if (!onlyBlockCells) drawNpcPaths(ctx, map, z);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  (map.events || []).forEach(e => {
+    if (onlyBlockCells && !eventTouchesBlockCells(e, map, onlyBlockCells)) return;
+    const meta = EVENT_TYPES[e.type] || { color: "#ffffff", letter: "?" };
+    const px = e.x * cell, py = e.y * cell;
+    const selected = e.id === state.selectedEventId;
+
+    if (e.type === "dialog") {
+      // A dialog zone is a translucent rectangle over its whole w×h area,
+      // with the type letter in its first cell.
+      const w = (e.w || 1) * cell, h = (e.h || 1) * cell;
+      ctx.globalAlpha = 0.30;
+      ctx.fillStyle = meta.color;
+      ctx.fillRect(px + 1, py + 1, w - 2, h - 2);
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = selected ? "#ffffff" : meta.color;
+      ctx.lineWidth = selected ? 2 : 1;
+      ctx.strokeRect(px + 1.5, py + 1.5, w - 3, h - 3);
+      if (cell >= 12) {
+        ctx.fillStyle = selected ? "#ffffff" : meta.color;
+        ctx.font = "bold " + Math.floor(cell * 0.55) + "px " +
+          "ui-monospace, Menlo, Consolas, monospace";
+        ctx.fillText(meta.letter, px + cell / 2, py + cell / 2 + 0.5);
+      }
+      return;
+    }
+
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = meta.color;
+    ctx.fillRect(px + inset, py + inset, cell - 2 * inset, cell - 2 * inset);
+    ctx.globalAlpha = 1;
+
+    ctx.strokeStyle = selected ? "#ffffff" : "rgba(6,18,12,0.85)";
+    ctx.lineWidth = selected ? 2 : 1;
+    ctx.strokeRect(px + inset + 0.5, py + inset + 0.5, cell - 2 * inset - 1, cell - 2 * inset - 1);
+
+    if (cell >= 12) {
+      ctx.fillStyle = "#06120c";
+      ctx.font = "bold " + Math.floor(cell * 0.55) + "px " +
+        "ui-monospace, Menlo, Consolas, monospace";
+      ctx.fillText(meta.letter, px + cell / 2, py + cell / 2 + 0.5);
+    }
+  });
+}
+
+// Every warp (from any map) whose destination is cell (x,y) on `map`. Used
+// both to draw the landing overlay and to keep those cells non-placing: a
+// landing marker is a visual reminder, not an event you author on, so a click
+// there must not drop a new event.
+function warpsLandingAt(map, x, y) {
+  const out = [];
+  (state.project.maps || []).forEach(src => {
+    (src.events || []).forEach(e => {
+      if (e.type === "warp" && e.toMap === map.id &&
+          (e.toX || 0) === x && (e.toY || 0) === y) out.push({ src, ev: e });
+    });
+  });
+  return out;
+}
+
+// Overlay showing where warps LAND on this map, so it is obvious where the
+// player ends up. A warp event is drawn at its source cell (the "W" marker),
+// but its destination can be anywhere -- including on this map from a warp
+// authored on a different map. This scans every map's warps for ones whose
+// destination is the current map and draws a reticle at (toX, toY); for a
+// warp whose source is also on this map it also draws a connector from the
+// source to the landing cell. `onlyBlockCells`, when given, restricts drawing
+// to targets whose landing cell was just repainted (the tile animator path).
+function drawWarpTargets(ctx, map, z, onlyBlockCells) {
+  if (!state.showWarpTargets) return;
+  const cell = z / 2;                       // event coords are in metatile cells
+  const color = EVENT_TYPES.warp.color;
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  (state.project.maps || []).forEach(src => {
+    (src.events || []).forEach(e => {
+      if (e.type !== "warp" || e.toMap !== map.id) return;
+      const tx = e.toX || 0, ty = e.toY || 0;
+      if (onlyBlockCells) {
+        const bi = Math.floor(ty / 2) * map.width + Math.floor(tx / 2);
+        if (!onlyBlockCells.has(bi)) return;
+      }
+      const cx = tx * cell + cell / 2, cy = ty * cell + cell / 2;
+      const sameMap = src.id === map.id;
+      const selected = e.id === state.selectedEventId;
+      const r = cell * 0.42;
+
+      // Same-map warp: a dashed connector from the source cell to where it lands.
+      if (sameMap) {
+        const sx = e.x * cell + cell / 2, sy = e.y * cell + cell / 2;
+        ctx.globalAlpha = selected ? 0.9 : 0.5;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = selected ? 2 : 1;
+        ctx.setLineDash([Math.max(3, cell * 0.2), Math.max(3, cell * 0.15)]);
+        ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(cx, cy); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      // Landing reticle: a dashed ring + crosshair reads as "destination"
+      // rather than a placed event (those are solid filled squares).
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = selected ? "#ffffff" : color;
+      ctx.lineWidth = selected ? 2 : 1.5;
+      ctx.setLineDash([Math.max(2, cell * 0.16), Math.max(2, cell * 0.12)]);
+      ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(cx - r, cy); ctx.lineTo(cx + r, cy);
+      ctx.moveTo(cx, cy - r); ctx.lineTo(cx, cy + r);
+      ctx.stroke();
+      ctx.fillStyle = selected ? "#ffffff" : color;
+      ctx.beginPath(); ctx.arc(cx, cy, Math.max(1, cell * 0.08), 0, Math.PI * 2); ctx.fill();
+
+      // Tag the source: "warp" for a same-map jump, else the origin map's name.
+      // Sits above the cell, or below it when the cell is at the very top edge.
+      if (cell >= 12) {
+        const tag = sameMap ? "↩ warp" : ("⇢ " + src.name);
+        ctx.font = "bold " + Math.floor(cell * 0.34) +
+          "px ui-monospace, Menlo, Consolas, monospace";
+        const tw = ctx.measureText(tag).width + 6, th = cell * 0.4;
+        let ly = cy - r - cell * 0.28;
+        if (ly - th / 2 < 0) ly = cy + r + cell * 0.28;   // flip below near top
+        ctx.globalAlpha = 0.9;
+        ctx.fillStyle = "rgba(6,18,12,0.85)";
+        ctx.fillRect(cx - tw / 2, ly - th / 2, tw, th);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = selected ? "#ffffff" : color;
+        ctx.fillText(tag, cx, ly + 0.5);
+      }
+    });
+  });
+  ctx.restore();
+}
+
+// The waypoint editor block for a walking NPC: a toggle that puts the map into
+// path-placing mode (clicks append waypoints), a readout of the route, undo/
+// clear while placing, and any alignment warnings.
+function renderNpcPathEditor(map, ev) {
+  const box = el("div", "field");
+  box.appendChild(label("Waypoints"));
+  const editing = state.pathEdit === ev.id;
+
+  const btn = el("button", editing ? "active" : null, editing ? "Done placing" : "Place on map");
+  btn.addEventListener("click", () => {
+    state.pathEdit = editing ? null : ev.id;
+    state.selectedEventId = ev.id;   // keep this NPC selected while placing
+    render();
+  });
+  box.appendChild(btn);
+
+  const pts = npcPathPoints(ev);
+  box.appendChild(spacer(6));
+  box.appendChild(el("p", "hint",
+    pts.length + " point" + (pts.length === 1 ? "" : "s") + " — start (" +
+    ev.x + "," + ev.y + ")" +
+    (ev.path && ev.path.length ? " → " + ev.path.map(p => p.x + "," + p.y).join(" → ") : "")));
+
+  if (editing) {
+    const row = el("div", "row");
+    const undo = el("button", null, "Undo point");
+    undo.addEventListener("click", () => {
+      if (ev.path && ev.path.length) { snapshot(); ev.path.pop(); render(); }
+    });
+    const clear = el("button", "danger", "Clear path");
+    clear.addEventListener("click", () => {
+      if (ev.path && ev.path.length) { snapshot(); ev.path = []; render(); }
+    });
+    row.append(undo, clear);
+    box.appendChild(spacer(6));
+    box.appendChild(row);
+    box.appendChild(spacer(6));
+    box.appendChild(el("p", "hint",
+      "Click cells on the map to append waypoints. A diagonal click snaps to a " +
+      "straight leg (its dominant axis wins). Up to " + NPC_PATH_MAX + " points."));
+  }
+
+  npcPathWarnings(ev).forEach(msg => {
+    box.appendChild(spacer(6));
+    box.appendChild(el("p", "warn", "⚠ " + msg));
+  });
+  return box;
+}
+
+// Inspector for the selected event: its coordinates plus type-specific fields.
+function renderEventInspector(map) {
+  const card = el("div", "card");
+  const ev = (map.events || []).find(e => e.id === state.selectedEventId);
+  if (!ev) {
+    card.appendChild(el("h2", null, "Event"));
+    card.appendChild(el("p", "hint", "No event selected."));
+    return card;
+  }
+  const meta = EVENT_TYPES[ev.type] || { label: ev.type };
+  card.appendChild(el("h2", null, meta.label + " event"));
+
+  // Coordinates (in metatile cells). Editing them moves the event.
+  const posRow = el("div", "row");
+  const xField = el("div", "field");
+  xField.appendChild(label("X (cells)"));
+  const xInput = numberInput(ev.x, 0, map.width * 2 - 1);
+  xInput.addEventListener("change", () => { snapshot(); ev.x = clampInt(xInput.value, 0, map.width * 2 - 1); render(); });
+  xField.appendChild(xInput);
+  const yField = el("div", "field");
+  yField.appendChild(label("Y (cells)"));
+  const yInput = numberInput(ev.y, 0, map.height * 2 - 1);
+  yInput.addEventListener("change", () => { snapshot(); ev.y = clampInt(yInput.value, 0, map.height * 2 - 1); render(); });
+  yField.appendChild(yInput);
+  posRow.append(xField, yField);
+  card.appendChild(posRow);
+  card.appendChild(spacer(10));
+
+  // Type-specific fields. Text fields update live; selects/numbers are snapshotted.
+  const addText = (lbl, key) => {
+    const f = el("div", "field");
+    f.appendChild(label(lbl));
+    const i = inputText(ev[key] || "", 220);
+    i.addEventListener("input", () => { ev[key] = i.value; });
+    f.appendChild(i);
+    card.appendChild(f);
+    card.appendChild(spacer(8));
+  };
+  const addNumber = (lbl, key, min, max) => {
+    const f = el("div", "field");
+    f.appendChild(label(lbl));
+    const i = numberInput(ev[key], min, max);
+    // render() so map overlays that read this value (e.g. a warp's landing
+    // reticle and connector line at toX/toY) move as the number changes.
+    i.addEventListener("change", () => { snapshot(); ev[key] = clampInt(i.value, min, max); render(); });
+    f.appendChild(i);
+    card.appendChild(f);
+    card.appendChild(spacer(8));
+  };
+
+  if (ev.type === "spawn") {
+    const f = el("div", "field");
+    f.appendChild(label("Facing"));
+    f.appendChild(selectFrom(FACINGS, ev.facing || "down", v => { snapshot(); ev.facing = v; }));
+    card.appendChild(f);
+    card.appendChild(spacer(8));
+
+    // The default spawn is where a new game begins. Only one may hold it, so
+    // enabling it here clears the flag on every other spawn in the world.
+    const dflt = el("div", "field");
+    const cbLabel = document.createElement("label");
+    cbLabel.className = "checkbox";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!ev.isDefault;
+    cb.addEventListener("change", () => {
+      snapshot();
+      if (cb.checked) {
+        state.project.maps.forEach(m => (m.events || []).forEach(e => {
+          if (e.type === "spawn") e.isDefault = false;
+        }));
+      }
+      ev.isDefault = cb.checked;
+      render();
+    });
+    cbLabel.append(cb, document.createTextNode(" Default spawn (new game starts here)"));
+    dflt.appendChild(cbLabel);
+    card.appendChild(dflt);
+    card.appendChild(spacer(8));
+  } else if (ev.type === "warp") {
+    const tf = el("div", "field");
+    tf.appendChild(label("Warp type"));
+    tf.appendChild(selectFrom(WARP_TYPES, ev.warpType || "transport", v => { snapshot(); ev.warpType = v; render(); }));
+    card.appendChild(tf);
+    card.appendChild(spacer(8));
+
+    const f = el("div", "field");
+    f.appendChild(label("Destination map"));
+    const sel = document.createElement("select");
+    const none = document.createElement("option");
+    none.value = ""; none.textContent = "(none)";
+    sel.appendChild(none);
+    state.project.maps.forEach(m => {
+      const opt = document.createElement("option");
+      opt.value = m.id; opt.textContent = m.name;
+      if (ev.toMap === m.id) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    sel.addEventListener("change", () => { snapshot(); ev.toMap = sel.value ? Number(sel.value) : null; render(); });
+    f.appendChild(sel);
+    card.appendChild(f);
+    card.appendChild(spacer(8));
+    const dest = mapById(ev.toMap);
+    const maxX = dest ? dest.width * 2 - 1 : 255;
+    const maxY = dest ? dest.height * 2 - 1 : 255;
+    addNumber("Target X (cells)", "toX", 0, maxX);
+    addNumber("Target Y (cells)", "toY", 0, maxY);
+
+    // Where the landing is shown: a same-map warp draws its reticle + connector
+    // live on this canvas as you edit the coords; a cross-map warp lands on a
+    // different map, so nothing moves here -- say so and offer a jump to that
+    // map, centred on the target, to check it lands right.
+    if (dest) {
+      if (dest.id === map.id) {
+        card.appendChild(el("p", "hint",
+          "Lands on this map — the dashed reticle and connector line show where."));
+      } else {
+        card.appendChild(el("p", "hint",
+          "Lands on “" + dest.name + "”. The reticle shows on that map, not here."));
+        const go = el("button", null, "View destination map →");
+        go.addEventListener("click", () => {
+          const cell = state.mapZoom / 2;
+          state.selectedMapId = dest.id;
+          state.selectedEventId = null;
+          state.pathEdit = null;
+          state.mapScroll = {
+            left: Math.max(0, (ev.toX || 0) * cell - 200),
+            top:  Math.max(0, (ev.toY || 0) * cell - 150),
+          };
+          render();
+        });
+        card.appendChild(go);
+      }
+      card.appendChild(spacer(8));
+    }
+
+    const ff = el("div", "field");
+    ff.appendChild(label("Facing after warp"));
+    ff.appendChild(selectFrom(WARP_FACINGS, ev.facing || "same", v => { snapshot(); ev.facing = v; render(); }));
+    card.appendChild(ff);
+    card.appendChild(spacer(8));
+  } else if (ev.type === "sign") {
+    addText("Sign text", "text");
+  } else if (ev.type === "item") {
+    addText("Item id", "item");
+    addNumber("Quantity", "qty", 1, 99);
+    addText("Flag id (so it can't be taken twice)", "flag");
+  } else if (ev.type === "npc") {
+    addText("Sprite id", "sprite");
+    const f = el("div", "field");
+    f.appendChild(label("Movement"));
+    f.appendChild(selectFrom(NPC_MOVEMENTS, ev.movement, v => {
+      snapshot();
+      ev.movement = v;
+      // Leaving a walk mode ends any path-placing session for this NPC.
+      if (v === "static" && state.pathEdit === ev.id) state.pathEdit = null;
+      render();
+    }));
+    card.appendChild(f);
+    card.appendChild(spacer(8));
+
+    const walking = ev.movement === "walk_path" || ev.movement === "walk_path_loop";
+    if (!walking) {
+      // Static NPCs face a fixed way (or the player).
+      const ff = el("div", "field");
+      ff.appendChild(label("Facing"));
+      ff.appendChild(selectFrom(NPC_FACINGS, ev.facing || "player", v => { snapshot(); ev.facing = v; }));
+      card.appendChild(ff);
+      card.appendChild(spacer(4));
+      card.appendChild(el("p", "hint", "\"player\" turns to face the player; a compass direction is held until the NPC is talked to."));
+      card.appendChild(spacer(8));
+    } else {
+      // Walking NPCs face their travel direction; instead they carry a
+      // waypoint path and a blocked-behaviour choice.
+      const bf = el("div", "field");
+      bf.appendChild(label("When blocked"));
+      bf.appendChild(selectFrom(NPC_ONBLOCK, ev.onBlock || "stop", v => { snapshot(); ev.onBlock = v; }));
+      card.appendChild(bf);
+      card.appendChild(spacer(8));
+      card.appendChild(renderNpcPathEditor(map, ev));
+      card.appendChild(spacer(8));
+    }
+
+    addText("Script id", "script");
+  } else if (ev.type === "trigger") {
+    addText("Script id", "script");
+  } else if (ev.type === "dialog") {
+    const sizeRow = el("div", "row");
+    const mkSize = (lbl, key, max) => {
+      const f = el("div", "field");
+      f.appendChild(label(lbl));
+      const i = numberInput(ev[key] || 1, 1, max);
+      i.addEventListener("change", () => { snapshot(); ev[key] = clampInt(i.value, 1, max); render(); });
+      f.appendChild(i);
+      return f;
+    };
+    sizeRow.append(mkSize("Width (cells)", "w", map.width * 2),
+                   mkSize("Height (cells)", "h", map.height * 2));
+    card.appendChild(sizeRow);
+    card.appendChild(spacer(10));
+    // The zone's text: up to two lines of DIALOG_MAX_CHARS, stored as one
+    // string with an embedded "\n" (what the converter interns).
+    const lines = (ev.text || "").split("\n");
+    const addLine = (lbl, idx) => {
+      const f = el("div", "field");
+      f.appendChild(label(lbl));
+      const i = inputText(lines[idx] || "", 220);
+      i.maxLength = DIALOG_MAX_CHARS;
+      i.addEventListener("input", () => {
+        lines[idx] = i.value;
+        ev.text = lines[1] ? (lines[0] || "") + "\n" + lines[1] : (lines[0] || "");
+      });
+      f.appendChild(i);
+      card.appendChild(f);
+      card.appendChild(spacer(8));
+    };
+    addLine("Line 1 (max " + DIALOG_MAX_CHARS + " chars)", 0);
+    addLine("Line 2 (max " + DIALOG_MAX_CHARS + " chars)", 1);
+  }
+
+  const delBtn = el("button", "danger", "Delete event");
+  delBtn.addEventListener("click", () => {
+    snapshot();
+    map.events = map.events.filter(e => e.id !== ev.id);
+    state.selectedEventId = null;
+    render();
+  });
+  card.appendChild(delBtn);
+  return card;
+}
+
+// A compact list of every event on the map, for overview and quick selection.
+function renderEventList(map) {
+  const card = el("div", "card");
+  card.appendChild(el("h2", null, "Events on this map (" + (map.events || []).length + ")"));
+  if (!map.events || map.events.length === 0) {
+    card.appendChild(el("p", "hint", "None yet."));
+    return card;
+  }
+  const summarize = (e) => {
+    if (e.type === "warp") { const d = mapById(e.toMap); return (e.warpType || "transport") + " to " + (d ? d.name : "(unset)") + " (" + e.toX + "," + e.toY + ")"; }
+    if (e.type === "sign") return e.text ? '"' + e.text.slice(0, 24) + '"' : "(no text)";
+    if (e.type === "item") return (e.item || "(unset)") + (e.qty > 1 ? " x" + e.qty : "");
+    if (e.type === "npc") return e.sprite || "(no sprite)";
+    if (e.type === "trigger") return e.script || "(no script)";
+    if (e.type === "dialog") return (e.w || 1) + "x" + (e.h || 1) +
+      (e.text ? ' "' + e.text.replace("\n", " / ").slice(0, 24) + '"' : " (no text)");
+    return "";
+  };
+  const list = el("div", "metatile-list");
+  map.events.forEach(e => {
+    const meta = EVENT_TYPES[e.type] || { letter: "?", color: "#fff" };
+    const row = el("div", "mt-row" + (e.id === state.selectedEventId ? " selected" : ""));
+    const badge = el("span", null, meta.letter);
+    badge.style.cssText = "display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;" +
+      "background:" + meta.color + ";color:#06120c;font-weight:700;border:1px solid var(--border);";
+    const name = el("span", "mt-name", "(" + e.x + "," + e.y + ")  " + summarize(e));
+    row.append(badge, name);
+    row.addEventListener("click", () => { state.selectedEventId = e.id; render(); });
+    list.appendChild(row);
+  });
+  card.appendChild(list);
+  return card;
+}
+
+// Collision overlay: tint each of a block's four metatiles by what movement
+// does there. Solid = red; walkable-but-special behaviors get their own hue
+// (water blue, tall grass green, ledges orange with a direction arrow);
+// plain walk/normal stays untinted so problems stand out.
+const COLLISION_TINTS = {
+  solid: "rgba(232,64,64,0.45)",
+  water: "rgba(64,128,240,0.40)",
+  tall_grass: "rgba(64,200,96,0.35)",
+  ledge: "rgba(240,160,48,0.40)",
+  ledgeSolid: "#f0a030",   // opaque: brush-button borders, not the overlay
+  border: "rgba(232,64,200,0.95)",  // per-edge border stroke
+  borderSolid: "#e840c8",
+  // Snow is a surface, not a movement rule, so it is drawn as speckles over
+  // whatever tint the cell already has rather than as a tint of its own —
+  // a snowy ledge has to stay legible as a ledge.
+  snow: "rgba(255,255,255,0.9)",
+  snowSolid: "#dff4ff",
+};
+const LEDGE_ARROWS = {
+  ledge_up: "↑", ledge_down: "↓",
+  ledge_left: "←", ledge_right: "→",
+};
+
+function drawCollisionCell(ctx, ts, block, z, px, py) {
+  const half = z / 2;
+  for (let i = 0; i < 4; i++) {           // TL, TR, BL, BR
+    const m = block.metatiles[i] != null ? metatileById(ts, block.metatiles[i]) : null;
+    if (!m) continue;
+    const mx = px + (i % 2) * half, my = py + (i >> 1) * half;
+    let tint = null, glyph = null;
+    // Ledges are checked before solid: the engine treats a ledge as solid
+    // from every direction but the jump, so a ledge metatile marked solid
+    // must still show its arrow rather than reading as a plain wall.
+    if (LEDGE_ARROWS[m.behavior]) {
+      tint = COLLISION_TINTS.ledge;
+      glyph = LEDGE_ARROWS[m.behavior];
+    } else if (m.collision === "solid") {
+      tint = COLLISION_TINTS.solid;
+    } else if (COLLISION_TINTS[m.behavior]) {
+      tint = COLLISION_TINTS[m.behavior];
+    }
+    if (tint) {
+      ctx.fillStyle = tint;
+      ctx.fillRect(mx, my, half, half);
+    }
+    if (glyph) {
+      ctx.fillStyle = "rgba(0,0,0,0.8)";
+      ctx.font = "bold " + Math.max(8, Math.floor(half * 0.6)) + "px monospace";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(glyph, mx + half / 2, my + half / 2);
+    }
+    // Snow speckles: three dots in a scatter, sized off the cell so they
+    // stay visible at every zoom. Outlined, because the lightest DMG shade
+    // is nearly white and plain white dots vanish on snow art.
+    if (m.snow) {
+      const r = Math.max(1, half * 0.055);
+      ctx.fillStyle = COLLISION_TINTS.snow;
+      ctx.strokeStyle = "rgba(0,0,0,0.55)";
+      ctx.lineWidth = Math.max(1, r * 0.6);
+      [[0.28, 0.30], [0.68, 0.46], [0.44, 0.72]].forEach(([fx, fy]) => {
+        ctx.beginPath();
+        ctx.arc(mx + half * fx, my + half * fy, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      });
+    }
+
+    // Borders last, and independent of the tint: they close one edge of an
+    // otherwise ordinary metatile, so they have to show on cells that carry
+    // no tint at all. Drawn inset by half the line width so the stroke sits
+    // inside its own cell rather than straddling the neighbor's.
+    const borders = bordersOf(m);
+    if (!borders.length) continue;
+    const lw = Math.max(2, Math.round(half * 0.14));
+    ctx.strokeStyle = COLLISION_TINTS.border;
+    ctx.lineWidth = lw;
+    ctx.lineCap = "butt";
+    const o = lw / 2;
+    ctx.beginPath();
+    if (borders.includes("up"))    { ctx.moveTo(mx, my + o);            ctx.lineTo(mx + half, my + o); }
+    if (borders.includes("down"))  { ctx.moveTo(mx, my + half - o);     ctx.lineTo(mx + half, my + half - o); }
+    if (borders.includes("left"))  { ctx.moveTo(mx + o, my);            ctx.lineTo(mx + o, my + half); }
+    if (borders.includes("right")) { ctx.moveTo(mx + half - o, my);     ctx.lineTo(mx + half - o, my + half); }
+    ctx.stroke();
+  }
+}
+
+function renderMapToolbar(map, ts) {
+  const bar = el("div", "map-toolbar");
+
+  // Mode switch: paint blocks, place events, or paint collision.
+  const modeGroup = el("div", "group");
+  [["blocks", "Blocks"], ["events", "Events"], ["collision", "Collision"]].forEach(([mode, label]) => {
+    const b = el("button", "tool-btn" + (state.mapMode === mode ? " active" : ""), label);
+    b.addEventListener("click", () => { state.mapMode = mode; render(); });
+    modeGroup.appendChild(b);
+  });
+  bar.appendChild(modeGroup);
+
+  if (state.mapMode === "blocks") {
+    // Block tools.
+    const tools = el("div", "group");
+    ["paint", "erase", "fill"].forEach(name => {
+      const b = el("button", "tool-btn" + (state.mapTool === name ? " active" : ""), name);
+      b.addEventListener("click", () => { state.mapTool = name; render(); });
+      tools.appendChild(b);
+    });
+    bar.appendChild(tools);
+
+    // Current brush preview.
+    const brushGroup = el("div", "group");
+    brushGroup.appendChild(el("span", "cell-label", "Brush"));
+    const preview = document.createElement("canvas");
+    preview.className = "paint-block-preview";
+    preview.width = 34; preview.height = 34;
+    const brush = state.paintBlockId != null ? blockById(ts, state.paintBlockId) : null;
+    if (brush) drawBlock(preview.getContext("2d"), ts, brush, 34 / (TILE_PX * 4), 0, 0, state.animMaps);
+    brushGroup.appendChild(preview);
+    bar.appendChild(brushGroup);
+  } else if (state.mapMode === "collision") {
+    // Collision brush: which value painting writes into the metatile.
+    const colGroup = el("div", "group");
+    COLLISION_OPTIONS.forEach(name => {
+      const b = el("button", "tool-btn" + (state.collisionTool === name ? " active" : ""), name);
+      // Match the overlay's color language: solid red, walkable green.
+      b.style.borderLeft = "4px solid " + (name === "solid" ? "#e84040" : "#6ade8f");
+      b.addEventListener("click", () => { state.collisionTool = name; render(); });
+      colGroup.appendChild(b);
+    });
+    bar.appendChild(colGroup);
+    // Ledge brushes, one per jumpable direction. Only offered for ledge
+    // behaviors this project actually defines, so a trimmed behavior list
+    // can't select a brush the converter would reject. The arrow and the
+    // orange border match how the overlay already draws ledges.
+    const ledgeNames = LEDGE_OPTIONS.filter(n => state.project.behaviors.includes(n));
+    if (ledgeNames.length) {
+      const ledgeGroup = el("div", "group");
+      ledgeGroup.appendChild(el("span", "cell-label", "Ledge"));
+      ledgeNames.forEach(name => {
+        const b = el("button", "tool-btn" + (state.collisionTool === name ? " active" : ""),
+                     LEDGE_ARROWS[name]);
+        b.title = name + " — jumped heading " + name.slice("ledge_".length);
+        b.style.borderLeft = "4px solid " + COLLISION_TINTS.ledgeSolid;
+        b.addEventListener("click", () => { state.collisionTool = name; render(); });
+        ledgeGroup.appendChild(b);
+      });
+      bar.appendChild(ledgeGroup);
+    }
+    // Border brushes: one per edge, plus an eraser. Each sets its own edge
+    // and leaves the others (and the collision/behavior) alone, so a tile
+    // can accumulate several; "none" clears all four. Setting rather than
+    // toggling keeps drag-painting a long cliff edge predictable — a
+    // toggle would flip cells back as the pointer re-entered them.
+    const borderGroup = el("div", "group");
+    borderGroup.appendChild(el("span", "cell-label", "Border"));
+    BORDER_OPTIONS.forEach(side => {
+      const brush = "border_" + side;
+      const b = el("button", "tool-btn" + (state.collisionTool === brush ? " active" : ""),
+                   BORDER_GLYPHS[side]);
+      b.title = "border " + side + " — closes this metatile's " + side + " edge in both directions";
+      b.style.borderLeft = "4px solid " + COLLISION_TINTS.borderSolid;
+      b.addEventListener("click", () => { state.collisionTool = brush; render(); });
+      borderGroup.appendChild(b);
+    });
+    const clearB = el("button",
+      "tool-btn" + (state.collisionTool === BORDER_CLEAR_BRUSH ? " active" : ""), "none");
+    clearB.title = "clear every border edge on the metatile";
+    clearB.style.borderLeft = "4px solid " + COLLISION_TINTS.borderSolid;
+    clearB.addEventListener("click", () => { state.collisionTool = BORDER_CLEAR_BRUSH; render(); });
+    borderGroup.appendChild(clearB);
+    bar.appendChild(borderGroup);
+    // Surface brushes. Set/clear rather than toggle, for the same reason the
+    // border brushes do: a toggle would flip cells back as a drag re-entered
+    // them, and snow is painted in large sweeps.
+    const surfGroup = el("div", "group");
+    surfGroup.appendChild(el("span", "cell-label", "Surface"));
+    [[SNOW_BRUSH, "snow", "mark as snow — the player leaves footprints here"],
+     [SNOW_CLEAR_BRUSH, "no snow", "clear the snow flag"]].forEach(([brush, text, title]) => {
+      const b = el("button", "tool-btn" + (state.collisionTool === brush ? " active" : ""), text);
+      b.title = title;
+      b.style.borderLeft = "4px solid " + COLLISION_TINTS.snowSolid;
+      b.addEventListener("click", () => { state.collisionTool = brush; render(); });
+      surfGroup.appendChild(b);
+    });
+    bar.appendChild(surfGroup);
+    // Localize the paint: duplicate shared metatiles/blocks under the brush
+    // instead of editing the shared definition.
+    bar.appendChild(toggle("Duplicate shared", state.collisionDuplicate,
+      v => { state.collisionDuplicate = v; render(); }));
+  } else {
+    // Event type picker: which kind of event a click drops.
+    const evGroup = el("div", "group");
+    EVENT_ORDER.forEach(type => {
+      const meta = EVENT_TYPES[type];
+      const b = el("button", "tool-btn" + (state.eventTool === type ? " active" : ""), meta.label);
+      b.style.borderLeft = "4px solid " + meta.color;   // color-codes the marker
+      b.addEventListener("click", () => { state.eventTool = type; render(); });
+      evGroup.appendChild(b);
+    });
+    bar.appendChild(evGroup);
+  }
+
+  // Zoom (both modes).
+  const zoomGroup = el("div", "group");
+  zoomGroup.appendChild(el("span", "cell-label", "Zoom"));
+  zoomGroup.appendChild(selectFrom(
+    ["16", "24", "32", "48"], String(state.mapZoom),
+    v => { state.mapZoom = Number(v); render(); }));
+  bar.appendChild(zoomGroup);
+
+  // Auto-scroll only matters while drag-painting (blocks or collision).
+  if (state.mapMode !== "events") {
+    bar.appendChild(toggle("Auto-scroll at edges", state.autoScroll, v => { state.autoScroll = v; }));
+  }
+  bar.appendChild(toggle("Grid", state.showMapGrid, v => { state.showMapGrid = v; render(); }));
+  // In collision mode the overlay is always on, so the toggle would be inert.
+  if (state.mapMode !== "collision") {
+    bar.appendChild(toggle("Collision", state.showCollision, v => { state.showCollision = v; render(); }));
+  }
+  // Landing markers for warps that end on this map (only relevant while editing events).
+  if (state.mapMode === "events") {
+    bar.appendChild(toggle("Warp targets", state.showWarpTargets, v => { state.showWarpTargets = v; render(); }));
+  }
+  bar.appendChild(toggle("Animate", state.animMaps, v => { state.animMaps = v; render(); }));
+
+  return bar;
+}
+
+function renderMapProperties(map) {
+  const card = el("div", "card");
+  card.appendChild(el("h2", null, "Map properties"));
+
+  const nameField = el("div", "field");
+  nameField.appendChild(label("Name"));
+  const nameInput = inputText(map.name, 200);
+  nameInput.addEventListener("input", () => {
+    map.name = nameInput.value;
+    // Keep the list label live without a full re-render that would drop focus.
+    const row = document.querySelector(".map-row.selected .map-name");
+    if (row) row.textContent = map.name;
+  });
+  nameField.appendChild(nameInput);
+  card.appendChild(nameField);
+
+  // Tileset selector. Changing it can strand painted blocks, so warn.
+  card.appendChild(spacer(10));
+  const tsField = el("div", "field");
+  tsField.appendChild(label("Tileset"));
+  const tsSelect = document.createElement("select");
+  state.project.tilesets.forEach(t => {
+    const opt = document.createElement("option");
+    opt.value = t.id; opt.textContent = t.name;
+    if (t.id === map.tilesetId) opt.selected = true;
+    tsSelect.appendChild(opt);
+  });
+  tsSelect.addEventListener("change", () => {
+    if (map.blockGrid.some(b => b != null) &&
+        !confirm("Switching tileset leaves painted blocks pointing at the old set. Continue?")) {
+      tsSelect.value = map.tilesetId; return;
+    }
+    snapshot();
+    map.tilesetId = Number(tsSelect.value);
+    map.borderBlock = null;    // the old tileset's blocks no longer apply
+    state.paintBlockId = null;
+    render();
+  });
+  tsField.appendChild(tsSelect);
+  card.appendChild(tsField);
+
+  // Border block: what the engine draws past unconnected map edges (the
+  // camera sees out there because the player is screen-centered).
+  card.appendChild(spacer(10));
+  const bbField = el("div", "field");
+  bbField.appendChild(label("Border block (past map edges)"));
+  const bbSelect = document.createElement("select");
+  const bbNone = document.createElement("option");
+  bbNone.value = ""; bbNone.textContent = "(repeat edge blocks)";
+  bbSelect.appendChild(bbNone);
+  const mapTs = state.project.tilesets.find(t => t.id === map.tilesetId);
+  (mapTs ? mapTs.blocks : []).forEach((blk, i) => {
+    const opt = document.createElement("option");
+    opt.value = blk.id;
+    opt.textContent = i + ": " + (blk.name || "(unnamed)");
+    if (blk.id === map.borderBlock) opt.selected = true;
+    bbSelect.appendChild(opt);
+  });
+  bbSelect.addEventListener("change", () => {
+    snapshot();
+    map.borderBlock = bbSelect.value ? Number(bbSelect.value) : null;
+  });
+  bbField.appendChild(bbSelect);
+  card.appendChild(bbField);
+
+  // Size in blocks.
+  card.appendChild(spacer(10));
+  const sizeRow = el("div", "row");
+  const wField = el("div", "field");
+  wField.appendChild(label("Width (blocks)"));
+  const wInput = numberInput(map.width, 1, 256);
+  const hField = el("div", "field");
+  hField.appendChild(label("Height (blocks)"));
+  const hInput = numberInput(map.height, 1, 256);
+  const applyBtn = el("button", null, "Resize");
+  applyBtn.addEventListener("click", () => {
+    const w = clampInt(wInput.value, 1, 256), h = clampInt(hInput.value, 1, 256);
+    if (w < map.width || h < map.height) {
+      if (!confirm("Shrinking can drop painted blocks outside the new bounds. Continue?")) return;
+    }
+    snapshot();
+    resizeMap(map, w, h);
+    render();
+  });
+  sizeRow.append(wField, hField, applyBtn);
+  card.appendChild(sizeRow);
+  card.appendChild(el("p", "hint", "Pixels: " + (map.width * 32) + " x " + (map.height * 32) +
+    " (" + (map.width * 4) + " x " + (map.height * 4) + " tiles)"));
+
+  // Prune: drop tileset entries nothing references. Counts usage across all
+  // maps sharing the tileset, so this is always safe for sibling maps.
+  card.appendChild(spacer(10));
+  const pruneBtn = el("button", null, "Prune unused tiles/metatiles/blocks");
+  pruneBtn.addEventListener("click", () => {
+    const ts = tilesetForMap(map);
+    if (!ts) { alert("This map has no tileset to prune."); return; }
+    const dead = pruneTilesetDeadEntries(ts);
+    const total = dead.blocks.length + dead.metatiles.length + dead.tiles.length;
+    if (!total) {
+      alert('Nothing to prune: every tile, metatile and block in "' + ts.name + '" is in use.');
+      return;
+    }
+    const mapsNote = dead.numMaps > 1
+      ? " Usage was checked across all " + dead.numMaps + " maps on this tileset."
+      : "";
+    if (!confirm('Prune tileset "' + ts.name + '": remove ' +
+        dead.blocks.length + " block(s), " + dead.metatiles.length + " metatile(s) and " +
+        dead.tiles.length + " tile(s) that nothing uses?" + mapsNote)) return;
+    snapshot();
+    const deadBlocks = new Set(dead.blocks.map(b => b.id));
+    const deadMetatiles = new Set(dead.metatiles.map(m => m.id));
+    const deadTiles = new Set(dead.tiles.map(t => t.id));
+    ts.blocks = ts.blocks.filter(b => !deadBlocks.has(b.id));
+    ts.metatiles = ts.metatiles.filter(m => !deadMetatiles.has(m.id));
+    ts.tiles = ts.tiles.filter(t => !deadTiles.has(t.id));
+    validateSelections();   // selections/brush may have pointed at pruned entries
+    render();
+  });
+  card.appendChild(pruneBtn);
+
+  // Delete.
+  card.appendChild(spacer(10));
+  const delBtn = el("button", "danger", "Delete map");
+  delBtn.addEventListener("click", () => {
+    const linkers = mapsConnectingTo(map.id);
+    const msg = linkers.length
+      ? linkers.length + " other map(s) connect to this one. Delete and clear those links?"
+      : "Delete this map?";
+    if (!confirm(msg)) return;
+    snapshot();
+    // Clear inbound connections so nothing points at a deleted map.
+    linkers.forEach(m => DIRECTIONS.forEach(d => {
+      if (m.connections[d] && m.connections[d].mapId === map.id) m.connections[d] = null;
+    }));
+    state.project.maps = state.project.maps.filter(x => x.id !== map.id);
+    state.selectedMapId = state.project.maps[0] ? state.project.maps[0].id : null;
+    render();
+  });
+  card.appendChild(delBtn);
+
+  return card;
+}
+
+function renderConnections(map) {
+  const card = el("div", "card");
+  card.appendChild(el("h2", null, "Connections"));
+  card.appendChild(el("p", "hint",
+    "Edge links to neighboring maps. Seamless only when both maps share a tileset; " +
+    "offset shifts the neighbor along the shared edge, in blocks."));
+  card.appendChild(spacer(8));
+
+  // North on top, west/center/east in the middle, south on the bottom.
+  const grid = el("div", "conn-grid");
+  const placeholders = {
+    "1": "north", "3": "west", "4": "center", "5": "east", "7": "south",
+  };
+  for (let slot = 0; slot < 9; slot++) {
+    const which = placeholders[String(slot)];
+    if (which === "center") {
+      const c = el("div", "conn-center", map.name);
+      grid.appendChild(c);
+    } else if (which) {
+      grid.appendChild(connectionSlot(map, which));
+    } else {
+      grid.appendChild(document.createElement("div"));
+    }
+  }
+  card.appendChild(grid);
+  return card;
+}
+
+function connectionSlot(map, dir) {
+  const wrap = el("div", "conn-slot");
+  wrap.appendChild(el("span", "cell-label", dir));
+
+  const conn = map.connections[dir];
+  const others = state.project.maps.filter(m => m.id !== map.id);
+
+  const select = document.createElement("select");
+  const none = document.createElement("option");
+  none.value = ""; none.textContent = "(none)";
+  select.appendChild(none);
+  others.forEach(m => {
+    const opt = document.createElement("option");
+    opt.value = m.id; opt.textContent = m.name;
+    if (conn && conn.mapId === m.id) opt.selected = true;
+    select.appendChild(opt);
+  });
+  select.style.width = "100%";
+  select.addEventListener("change", () => {
+    snapshot();
+    map.connections[dir] = select.value ? { mapId: Number(select.value), offset: 0 } : null;
+    render();
+  });
+  wrap.appendChild(select);
+
+  if (conn) {
+    const offset = numberInput(conn.offset, -255, 255);
+    offset.title = "offset (blocks)";
+    offset.style.width = "100%";
+    offset.style.marginTop = "4px";
+    offset.addEventListener("input", () => { conn.offset = clampInt(offset.value, -255, 255); });
+    wrap.appendChild(offset);
+
+    // Warn when the neighbor uses a different tileset (forces a VRAM reload).
+    const neighbor = mapById(conn.mapId);
+    if (neighbor && neighbor.tilesetId !== map.tilesetId) {
+      wrap.appendChild(el("div", "warn", "different tileset"));
+    }
+  }
+  return wrap;
+}
+
+// Flood fill a contiguous region of equal block ids with a new block.
+function floodFillMap(map, x, y, newBlockId) {
+  const target = map.blockGrid[y * map.width + x];
+  if (target === newBlockId) return;
+  const stack = [[x, y]];
+  while (stack.length) {
+    const [cx, cy] = stack.pop();
+    if (cx < 0 || cx >= map.width || cy < 0 || cy >= map.height) continue;
+    if (map.blockGrid[cy * map.width + cx] !== target) continue;
+    map.blockGrid[cy * map.width + cx] = newBlockId;
+    stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
+  }
+}
+
+/* ============================================================
+   Import / export
+   ============================================================ */
+
+/* ============================================================
+   World PNG export
+   ============================================================ */
+
+/* Assign each map a block-space origin by walking its edge connections,
+   matching the engine converter's convention (gbworld_to_c.py):
+   positive offset shifts the neighbor right (north/south) or down (east/west).
+   Disconnected groups are stacked vertically with a one-block gap. */
+function layoutWorldMaps() {
+  const maps = {};
+  state.project.maps.forEach(m => { maps[m.id] = m; });
+  const pos = {};
+
+  function placeComponent(startId, baseY) {
+    pos[startId] = { x: 0, y: baseY };
+    const stack = [startId];
+    const component = [startId];
+    while (stack.length) {
+      const mid = stack.pop();
+      const m = maps[mid];
+      const { x: bx, y: by } = pos[mid];
+      for (const d of DIRECTIONS) {
+        const c = (m.connections || {})[d];
+        if (!c || !maps[c.mapId] || pos[c.mapId]) continue;
+        const nm = maps[c.mapId];
+        const off = c.offset || 0;
+        if (d === "north")      pos[c.mapId] = { x: bx + off, y: by - nm.height };
+        else if (d === "south") pos[c.mapId] = { x: bx + off, y: by + m.height };
+        else if (d === "east")  pos[c.mapId] = { x: bx + m.width, y: by + off };
+        else                    pos[c.mapId] = { x: bx - nm.width, y: by + off };
+        stack.push(c.mapId);
+        component.push(c.mapId);
+      }
+    }
+    return component;
+  }
+
+  let nextBase = 0;
+  for (const m of state.project.maps) {
+    if (pos[m.id]) continue;
+    const comp = placeComponent(m.id, nextBase);
+    // Shift the component so its top sits at nextBase, then start the next
+    // component one block below its bottom edge.
+    const shift = nextBase - Math.min(...comp.map(id => pos[id].y));
+    comp.forEach(id => { pos[id].y += shift; });
+    nextBase = Math.max(...comp.map(id => pos[id].y + maps[id].height)) + 1;
+  }
+  return pos;
+}
+
+/* Draw curved arrows from each warp event to its destination cell.
+   Warp coords are metatile cells (half a block per step). */
+function drawWarpArrows(ctx, pos, maps, minX, minY, scale) {
+  const CELL_PX = 2 * TILE_PX * scale; // 16 px metatile cells
+  const originOf = id => ({
+    x: (pos[id].x - minX) * 2 * CELL_PX,
+    y: (pos[id].y - minY) * 2 * CELL_PX,
+  });
+
+  ctx.save();
+  ctx.strokeStyle = EVENT_TYPES.warp.color;
+  ctx.fillStyle = EVENT_TYPES.warp.color;
+  ctx.lineWidth = Math.max(1.5, scale);
+
+  for (const m of state.project.maps) {
+    if (!pos[m.id]) continue;
+    for (const e of (m.events || [])) {
+      if (e.type !== "warp" || e.toMap == null || !pos[e.toMap] || !maps[e.toMap]) continue;
+      const so = originOf(m.id), to = originOf(e.toMap);
+      const sx = so.x + (e.x + 0.5) * CELL_PX, sy = so.y + (e.y + 0.5) * CELL_PX;
+      const tx = to.x + (e.toX + 0.5) * CELL_PX, ty = to.y + (e.toY + 0.5) * CELL_PX;
+
+      // Control point: midpoint pushed perpendicular to the line, so
+      // opposite-direction warp pairs bow apart instead of overlapping.
+      const dx = tx - sx, dy = ty - sy;
+      const dist = Math.hypot(dx, dy) || 1;
+      const bow = Math.min(dist * 0.25, 3 * CELL_PX);
+      const cx = (sx + tx) / 2 - (dy / dist) * bow;
+      const cy = (sy + ty) / 2 + (dx / dist) * bow;
+
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.quadraticCurveTo(cx, cy, tx, ty);
+      ctx.stroke();
+
+      // Dot at the source cell.
+      ctx.beginPath();
+      ctx.arc(sx, sy, Math.max(2, 1.5 * scale), 0, Math.PI * 2);
+      ctx.fill();
+
+      // Arrowhead at the destination, along the curve's end tangent.
+      const ang = Math.atan2(ty - cy, tx - cx);
+      const ah = Math.max(5, 4 * scale);
+      ctx.beginPath();
+      ctx.moveTo(tx, ty);
+      ctx.lineTo(tx - ah * Math.cos(ang - 0.45), ty - ah * Math.sin(ang - 0.45));
+      ctx.lineTo(tx - ah * Math.cos(ang + 0.45), ty - ah * Math.sin(ang + 0.45));
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+// Render every map into one stitched canvas at the given per-pixel scale.
+function renderWorldCanvas(scale, withLabels, withWarps) {
+  const pos = layoutWorldMaps();
+  const maps = {};
+  state.project.maps.forEach(m => { maps[m.id] = m; });
+  const ids = Object.keys(pos).map(Number);
+
+  const BLOCK_PX = 4 * TILE_PX; // 32 px
+  const minX = Math.min(...ids.map(id => pos[id].x));
+  const minY = Math.min(...ids.map(id => pos[id].y));
+  const maxX = Math.max(...ids.map(id => pos[id].x + maps[id].width));
+  const maxY = Math.max(...ids.map(id => pos[id].y + maps[id].height));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = (maxX - minX) * BLOCK_PX * scale;
+  canvas.height = (maxY - minY) * BLOCK_PX * scale;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#0c160e"; // background behind empty cells
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  for (const id of ids) {
+    const m = maps[id];
+    const ts = tilesetForMap(m);
+    const px = (pos[id].x - minX) * BLOCK_PX * scale;
+    const py = (pos[id].y - minY) * BLOCK_PX * scale;
+    if (ts) {
+      for (let y = 0; y < m.height; y++) {
+        for (let x = 0; x < m.width; x++) {
+          const blockId = m.blockGrid[y * m.width + x];
+          const block = blockId != null ? blockById(ts, blockId) : null;
+          if (block) drawBlock(ctx, ts, block, scale, px + x * BLOCK_PX * scale, py + y * BLOCK_PX * scale);
+        }
+      }
+    }
+    if (withLabels) {
+      ctx.strokeStyle = "#2c5840";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(px + 0.5, py + 0.5, m.width * BLOCK_PX * scale - 1, m.height * BLOCK_PX * scale - 1);
+      ctx.font = (5 * scale + 6) + "px monospace";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      // Dark chip behind the name so it stays readable over any tiles.
+      const tw = ctx.measureText(m.name).width;
+      ctx.fillStyle = "rgba(12,22,14,0.8)";
+      ctx.fillRect(px + 1, py + 1, tw + 6, 5 * scale + 10);
+      ctx.fillStyle = "#d8f0c8";
+      ctx.fillText(m.name, px + 4, py + 4);
+    }
+  }
+  if (withWarps) drawWarpArrows(ctx, pos, maps, minX, minY, scale);
+  return canvas;
+}
+
+function exportWorldPng() {
+  if (state.project.maps.length === 0) { alert("No maps to export."); return; }
+  openModal("Export world PNG", (modal) => {
+    modal.appendChild(el("p", "hint",
+      "Stitches every map into one image using the edge connections; " +
+      "disconnected maps are stacked below with a one-block gap."));
+
+    const row = el("div", "row");
+    row.style.margin = "10px 0";
+    row.appendChild(el("span", "cell-label", "Scale"));
+    const scaleSel = document.createElement("select");
+    [1, 2, 3, 4].forEach(s => {
+      const opt = document.createElement("option");
+      opt.value = s; opt.textContent = s + "×";
+      scaleSel.appendChild(opt);
+    });
+    row.appendChild(scaleSel);
+    const labelWrap = document.createElement("label");
+    const labelChk = document.createElement("input");
+    labelChk.type = "checkbox"; labelChk.checked = true;
+    labelWrap.append(labelChk, " Map borders and names");
+    row.appendChild(labelWrap);
+    const warpWrap = document.createElement("label");
+    const warpChk = document.createElement("input");
+    warpChk.type = "checkbox"; warpChk.checked = false;
+    warpWrap.append(warpChk, " Warp connections");
+    row.appendChild(warpWrap);
+    modal.appendChild(row);
+
+    const dl = el("button", "primary", "Download PNG");
+    dl.addEventListener("click", () => {
+      const canvas = renderWorldCanvas(Number(scaleSel.value), labelChk.checked, warpChk.checked);
+      const name = (state.project.meta.name || "world").replace(/[^a-z0-9_-]+/gi, "_") + "-world.png";
+      canvas.toBlob(blob => {
+        if (blob) { downloadBlob(name, blob); closeModal(); }
+        else alert("Could not encode the PNG.");
+      }, "image/png");
+    });
+    modal.appendChild(dl);
+  });
+}
+
+function projectJson() {
+  state.project._displayPaletteId = state.displayPaletteId;
+  return JSON.stringify(state.project, null, 2);
+}
+function safeFileName() {
+  return (state.project.meta.name || "world").replace(/[^a-z0-9_-]+/gi, "_") + ".gbworld.json";
+}
+
+function downloadJson() {
+  downloadText(safeFileName(), projectJson(), "application/json");
+}
+
+function exportProject() {
+  const json = projectJson();
+  openModal("Export project", (modal) => {
+    modal.appendChild(el("p", "hint",
+      "Download the .json, or if the download is blocked here, copy the text below into a file."));
+    const btnRow = el("div", "row");
+    btnRow.style.margin = "10px 0";
+    const dl = el("button", "primary", "Download .json");
+    dl.addEventListener("click", downloadJson);
+    const copy = el("button", null, "Copy to clipboard");
+    btnRow.append(dl, copy);
+    modal.appendChild(btnRow);
+
+    const ta = document.createElement("textarea");
+    ta.value = json; ta.readOnly = true;
+    ta.addEventListener("focus", () => ta.select());
+    modal.appendChild(ta);
+
+    copy.addEventListener("click", async () => {
+      const ok = await copyText(json);
+      copy.textContent = ok ? "Copied" : "Press Ctrl/Cmd+C";
+      if (ok) setTimeout(() => copy.textContent = "Copy to clipboard", 1200);
+    });
+  });
+}
+
+function loadProjectFrom(text) {
+  const parsed = JSON.parse(text);
+  if (!parsed.tilesets || !parsed.palettes) throw new Error("Missing tilesets or palettes.");
+  if (parsed.formatVersion !== FORMAT_VERSION) {
+    if (!confirm("This file is format v" + parsed.formatVersion + ", editor is v" + FORMAT_VERSION + ". Try to open anyway?")) return;
+  }
+  // Backfill fields that older exports may lack, so they open cleanly.
+  parsed.maps = parsed.maps || [];
+  parsed.tilesets.forEach(ts => {
+    ts.blocks = ts.blocks || []; ts.metatiles = ts.metatiles || [];
+    if (!ts.tileBudget) ts.tileBudget = 256;   // older files predate an editable budget
+  });
+  parsed.maps.forEach(m => {
+    if (m.borderBlock === undefined) m.borderBlock = null;
+    // Older files predate warp types and post-warp facing.
+    (m.events || []).forEach(e => {
+      if (e.type === "warp") {
+        if (!e.warpType) e.warpType = "transport";
+        if (!e.facing) e.facing = "same";
+      }
+    });
+  });
+  state.project = parsed;
+  syncSelectionsToProject();
+  resetHistory();
+  state.activePanel = "tiles";
+  closeModal();
+  render();
+}
+
+function importProject() {
+  openModal("Import project", (modal) => {
+    modal.appendChild(el("p", "hint", "Open a .gbworld.json file, or paste its contents below."));
+    const fileBtn = el("button", "primary", "Choose file");
+    fileBtn.style.margin = "10px 0";
+    fileBtn.addEventListener("click", () => document.getElementById("file-input").click());
+    modal.appendChild(fileBtn);
+
+    const ta = document.createElement("textarea");
+    ta.placeholder = "Paste project JSON here...";
+    modal.appendChild(ta);
+
+    const loadBtn = el("button", null, "Load pasted JSON");
+    loadBtn.style.marginTop = "10px";
+    loadBtn.addEventListener("click", () => {
+      try { loadProjectFrom(ta.value); }
+      catch (err) { alert("Could not open project: " + err.message); }
+    });
+    modal.appendChild(loadBtn);
+  });
+}
+
+/* ============================================================
+   Wiring (done once; only the panel re-renders afterward)
+   ============================================================ */
+
+document.getElementById("project-name").addEventListener("input", (e) => {
+  state.project.meta.name = e.target.value;
+});
+document.getElementById("btn-new").addEventListener("click", () => {
+  if (!confirm("Start a new project? Unsaved changes are lost. Export first to keep them.")) return;
+  state.project = makeDefaultProject();
+  syncSelectionsToProject();
+  resetHistory();
+  state.activePanel = "tiles";
+  render();
+});
+document.getElementById("btn-export").addEventListener("click", exportProject);
+document.getElementById("btn-import").addEventListener("click", importProject);
+document.getElementById("btn-undo").addEventListener("click", undo);
+document.getElementById("btn-redo").addEventListener("click", redo);
+document.getElementById("file-input").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (file) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try { loadProjectFrom(reader.result); }
+      catch (err) { alert("Could not open project: " + err.message); }
+    };
+    reader.readAsText(file);
+  }
+  e.target.value = "";   // allow re-importing the same file
+});
+document.querySelectorAll(".tab").forEach(tab => {
+  tab.addEventListener("click", () => { state.activePanel = tab.dataset.panel; state.selectedCell = 0; render(); });
+});
+
+// Keyboard undo/redo, but let native text editing keep its own undo in fields.
+document.addEventListener("keydown", (e) => {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  const tag = (document.activeElement && document.activeElement.tagName) || "";
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  const key = e.key.toLowerCase();
+  if (key === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
+  else if ((key === "z" && e.shiftKey) || key === "y") { e.preventDefault(); redo(); }
+});
+
+syncSelectionsToProject();
+render();

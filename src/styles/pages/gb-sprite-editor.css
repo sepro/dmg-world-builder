@@ -1,0 +1,70 @@
+/* Editor-specific styling. Shared tokens, controls, and the modal live in gb-theme.css. */
+  .budget-ok   { color: var(--muted); }
+  .budget-over { color: var(--danger); font-weight: 700; }
+
+  /* ---- libraries (grids of thumbnails) ---- */
+  .lib-grid { display: grid; grid-template-columns: repeat(auto-fill, 40px); gap: 6px; }
+  .lib-cell {
+    position: relative;
+    width: 40px; height: 40px;
+    border: 1px solid var(--border);
+    background: var(--gb-3);
+    cursor: pointer;
+    padding: 0;
+  }
+  .lib-cell:hover { border-color: var(--muted); }
+  .lib-cell.selected { border-color: var(--accent); outline: 1px solid var(--accent); }
+  .lib-cell .idx {
+    position: absolute; bottom: 0; right: 1px;
+    font-size: 9px; color: var(--accent);
+    background: rgba(8,24,32,0.7); padding: 0 2px; pointer-events: none;
+  }
+
+  .ms-list, .anim-list { display: flex; flex-direction: column; gap: 4px; }
+  .ms-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px; border: 1px solid var(--border); background: var(--panel-2);
+    cursor: pointer;
+  }
+  .ms-row:hover { border-color: var(--muted); }
+  .ms-row.selected { border-color: var(--accent); }
+  .ms-row .ms-name { flex: 1; }
+  .ms-row .ms-meta { color: var(--muted); font-size: 11px; }
+
+  /* ---- tile pixel editor ---- */
+  .editor-canvas { border: 1px solid var(--border); background: var(--gb-3); touch-action: none; cursor: crosshair; }
+  .ink-swatches { display: flex; gap: 6px; }
+  .ink-swatch {
+    width: 34px; height: 34px; border: 2px solid var(--border); cursor: pointer; position: relative;
+    background-size: 12px 12px;
+  }
+  .ink-swatch.active { border-color: var(--accent); }
+  .ink-swatch .val { position: absolute; bottom: 0; right: 2px; font-size: 9px; color: var(--accent); }
+  .tool-btn.active { color: var(--accent); border-color: var(--accent); }
+
+  /* ---- metasprite composer ---- */
+  .composer-canvas { border: 1px solid var(--border); background: var(--gb-3); touch-action: none; cursor: grab; }
+  .part-list { display: flex; flex-direction: column; gap: 3px; margin-top: 8px; }
+  .part-row {
+    display: flex; align-items: center; gap: 8px; padding: 4px 8px;
+    border: 1px solid var(--border); background: var(--panel-2); cursor: pointer;
+    font-size: 11px;
+  }
+  .part-row:hover { border-color: var(--muted); }
+  .part-row.selected { border-color: var(--accent); }
+  .part-row .part-meta { color: var(--muted); }
+  .cell-toggle.active { color: var(--accent); border-color: var(--accent); }
+
+  /* ---- animation editor ---- */
+  .frame-strip { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .frame-cell {
+    position: relative; width: 44px; height: 44px;
+    border: 1px solid var(--border); background: var(--gb-3); cursor: pointer; padding: 0;
+  }
+  .frame-cell:hover { border-color: var(--muted); }
+  .frame-cell.selected { border-color: var(--accent); outline: 1px solid var(--accent); }
+  .frame-cell .fnum {
+    position: absolute; bottom: 0; right: 1px; font-size: 9px; color: var(--accent);
+    background: rgba(8,24,32,0.7); padding: 0 2px; pointer-events: none;
+  }
+  .anim-preview { border: 1px solid var(--border); background: var(--gb-3); }

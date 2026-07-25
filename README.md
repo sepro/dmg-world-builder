@@ -1,12 +1,36 @@
 # GB Tools
 
-Six browser-based Game Boy authoring tools, plus the command-line tooling around
-them. Every tool is a single self-contained HTML page with no build step —
-vanilla JS, served as static files, running entirely in the browser. Nothing is
-uploaded anywhere and there is no browser storage: every project is saved and
-loaded through explicit Export/Import so a page behaves identically served
-locally or from a preview. A themed landing page (`docs/index.html`) links them
-all and each tool cross-links to the others.
+Six browser-based Game Boy authoring tools built as a multi-page Svelte 5
+application with Vite. The source project lives in this repository; `docs/` is
+the checked-in static production build used by GitHub Pages. Nothing is uploaded
+anywhere and project data is saved and loaded through explicit Export/Import. A
+themed landing page links every tool, and the shared Svelte header/menu keeps
+navigation consistent across pages.
+
+## Development
+
+Requires Node.js 20.19+ (Node 22 or 24 recommended) and npm. This repository is
+self-contained and can be cloned, built, and tested independently of its parent
+repository.
+
+```bash
+npm ci
+npm run dev          # Vite development server
+npm run check        # Svelte/static diagnostics
+npm run build        # production output written to docs/
+npm run test:e2e     # Chromium workflow tests (run build first)
+npm run test:all     # all checks, tests, build, and browser workflows
+```
+
+Install the browser once on a new machine with `npx playwright install --with-deps
+chromium`. The included devcontainer does this automatically. From the parent
+`dmg-wispbound` repository, the equivalent commands are `npm --prefix editor ci`
+and `npm --prefix editor run build`; its Dockerfile includes Node/npm and the
+Chromium runtime libraries.
+
+Do not edit generated files in `docs/` by hand. Edit `src/`, the root HTML entry
+files, or shared configuration and rebuild. Commit the resulting `docs/` changes
+so GitHub Pages can host the suite without a build action.
 
 Everything targets the original **DMG** Game Boy: four shades of gray, a 256-tile
 VRAM budget, and no hardware tile flipping on backgrounds. The tools share those
@@ -124,62 +148,34 @@ Each tool has an end-user guide in [`markdown/`](markdown/):
 
 ## Structure
 
-```
-dmg-world-builder/
-├── docs/                          # the apps + landing page (served over HTTP)
-│   ├── index.html                 # landing page linking every tool
-│   ├── gb-world-editor.html       # the world editor
-│   ├── gb-sprite-editor.html      # the sprite editor
-│   ├── gb-music-generator.html    # the music generator
-│   ├── gb-sfx-generator.html      # the sfx generator
-│   ├── gb-pixelizer.html          # the pixelizer
-│   ├── gb-tile-reducer.html       # the tile reducer
-│   ├── gb-theme.css               # shared DMG design tokens + components
-│   ├── gb-common.js               # shared DOM/form helpers
-│   └── screenshots/               # README screenshots
-├── markdown/
-│   ├── WORLD_EDITOR.md            # world editor guide
-│   ├── SPRITE_EDITOR.md           # sprite editor guide
-│   ├── MUSIC_GENERATOR.md         # music generator option reference
-│   ├── SFX_GENERATOR.md           # sfx generator guide
-│   ├── PIXELIZER.md               # pixelizer guide
-│   ├── TILE_REDUCER.md            # tile reducer guide
-│   └── DEVELOPER_HANDOFF.md       # JSON schema, C structures, integration guide
-├── worlds/                        # example projects (test.gbworld.json)
-├── .devcontainer/
-└── README.md
+```text
+.
+├── src/
+│   ├── components/       # shared Svelte page shell, header, and tool menu
+│   ├── config/           # single source of truth for suite navigation
+│   ├── legacy/           # preserved, bundled tool engines and algorithms
+│   ├── lib/              # shared browser/file/DOM helpers
+│   ├── pages/            # one Vite/Svelte entry per public HTML URL
+│   └── styles/           # shared theme plus page-specific styles
+├── tests/e2e/            # Playwright browser workflows for all tools
+├── public/screenshots/   # static assets copied into the production build
+├── docs/                 # generated GitHub Pages output (committed)
+├── *.html                # Vite multi-page source entries
+├── package.json          # standalone scripts and locked dependencies
+├── vite.config.js
+└── playwright.config.js
 ```
 
-The apps live in `docs/` so the suite can be published straight to GitHub Pages
-(serve from the `docs/` folder). When published, the landing page is the site root.
+## Hosting the production build
 
-## Quick start
-
-The pages are static, but they link the shared `gb-theme.css` / `gb-common.js`, so
-they **must be served over HTTP** — opening a `.html` via `file://` won't load the
-shared assets.
-
-### With VS Code Dev Containers (recommended)
-
-Open this folder in VS Code and choose **Dev Containers: Reopen in Container**. A
-static server (Live Server) starts automatically on port 5500.
-
-### Without Docker
-
-Serve the repo root with anything static:
+Serve `docs/` with any static server, or configure GitHub Pages to publish from
+the repository’s `docs/` folder. All historical page names are preserved.
 
 ```bash
-python3 -m http.server 8000
-# landing page:     http://localhost:8000/docs/
-# world editor:     http://localhost:8000/docs/gb-world-editor.html
-# sprite editor:    http://localhost:8000/docs/gb-sprite-editor.html
-# music generator:  http://localhost:8000/docs/gb-music-generator.html
-# sfx generator:    http://localhost:8000/docs/gb-sfx-generator.html
-# pixelizer:        http://localhost:8000/docs/gb-pixelizer.html
-# tile reducer:     http://localhost:8000/docs/gb-tile-reducer.html
+python3 -m http.server 8000 --directory docs
+# http://localhost:8000/
+# http://localhost:8000/gb-world-editor.html
 ```
-
-Every tool runs entirely in the browser; the server only delivers the files.
 
 ## World tooling
 
