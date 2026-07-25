@@ -6,8 +6,10 @@ import {
   enforceMonophony,
   gridRhythm,
   noteTiming,
+  notationForValue,
   NOTE_GATE,
   onsetTime,
+  restrainedSyncProbability,
 } from "./music-rhythm.js";
 
 function sequenceRng(values) {
@@ -22,7 +24,25 @@ describe("music rhythm", () => {
       { step: 0, dur: 4, gate: NOTE_GATE },
       { step: 8, dur: 4, gate: NOTE_GATE },
     ]);
-    expect(noteTiming(0, rhythm[0].dur, rhythm[0].gate, 0, 4).dur).toBeCloseTo(3.28);
+    expect(noteTiming(0, rhythm[0].dur, rhythm[0].gate, 0, 4).dur).toBeCloseTo(4);
+  });
+
+  test("quarter notes occupy a complete quarter-note duration", () => {
+    expect(NOTE_GATE).toBe(1);
+    expect(noteTiming(0, 4, NOTE_GATE, 0, 4)).toEqual({ t: 0, dur: 4 });
+  });
+
+  test("staff notation distinguishes quarter, eighth, sixteenth, and dotted values", () => {
+    expect(notationForValue(4)).toMatchObject({ flags: 0, open: false, dotted: false });
+    expect(notationForValue(2)).toMatchObject({ flags: 1, open: false, dotted: false });
+    expect(notationForValue(1)).toMatchObject({ flags: 2, open: false, dotted: false });
+    expect(notationForValue(3)).toMatchObject({ flags: 1, dotted: true });
+    expect(notationForValue(8)).toMatchObject({ flags: 0, open: true, dotted: false });
+  });
+
+  test("ordinary syncopation is rare and explicit syncopation remains restrained", () => {
+    expect(restrainedSyncProbability(0.35, "march")).toBeCloseTo(0.035);
+    expect(restrainedSyncProbability(0.35, "syncopated")).toBeCloseTo(0.105);
   });
 
   test("syncopation cannot collide with the following slot on a one-step grid", () => {
@@ -84,7 +104,17 @@ describe("music rhythm", () => {
     });
     cleanupPitchedTrack(track, { swing: 0, stepsPerBeat: 4, stepsPerBar: 8 });
     expect(track.map((note) => note.value)).toEqual([4, 4]);
-    expect(track.map((note) => note.dur)).toEqual([expect.closeTo(3.28), expect.closeTo(3.28)]);
+    expect(track.map((note) => note.dur)).toEqual([expect.closeTo(4), expect.closeTo(4)]);
+  });
+
+  test("cleanup keeps logical notation equal to a clipped channel handoff", () => {
+    const track = [
+      { step: 0, value: 4, gate: NOTE_GATE, midi: 60, vel: 80, ...noteTiming(0, 4, NOTE_GATE, 0, 4) },
+      { step: 2, value: 2, gate: NOTE_GATE, midi: 62, vel: 80, ...noteTiming(2, 2, NOTE_GATE, 0, 4) },
+    ];
+    cleanupPitchedTrack(track, { swing: 0, stepsPerBeat: 4, stepsPerBar: 16 });
+    expect(track[0]).toMatchObject({ value: 2, dur: 2 });
+    expect(notationForValue(track[0].value)).toMatchObject({ flags: 1, open: false });
   });
 
   test("cleanup does not sustain a repeated pitch across a bar line", () => {

@@ -147,7 +147,7 @@ channel can be toggled on/off.
 
 ### Pulse 1 — Lead (melody)
 - **Duty** — square-wave timbre: 12.5% (thin/reedy), 25% (round), 50% (full), 75% (nasal).
-- **Density** — Sparse / Medium / Busy controls how many notes are played, melodic rests, and occasional phrase-level dropouts. It does not shorten individual notes: rhythmic values stay consistent while Sparse leaves more slots silent.
+- **Density** — Sparse / Medium / Busy controls how many notes are played, melodic rests, and occasional phrase-level dropouts. It does not shorten individual notes: quarter notes occupy a full quarter-note value while Sparse leaves more slots silent.
 
 ### Pulse 2 — Harmony
 - **Duty** — same timbre options as Pulse 1.

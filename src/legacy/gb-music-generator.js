@@ -6,8 +6,10 @@ import {
   densityProfile,
   gridRhythm,
   noteTiming,
+  notationForValue,
   NOTE_GATE,
   onsetTime,
+  restrainedSyncProbability,
 } from "../lib/music-rhythm.js";
 
 "use strict";
@@ -281,9 +283,10 @@ function roleGrid(pattern, role, stepsPerBeat) {
    Repeating a small set of motifs (with variation) is what makes the melody
    sound composed rather than random-walked. */
 
-function makeMotif(rng, stepsPerBar, grid, densityName, mood, stepsPerBeat) {
+function makeMotif(rng, stepsPerBar, grid, densityName, mood, stepsPerBeat, pattern) {
   const profile = densityProfile(densityName);
-  const rhythm = gridRhythm(stepsPerBar, grid, profile.hit, NOTE_GATE, rng, mood.sync);
+  const syncProbability = restrainedSyncProbability(mood.sync, pattern);
+  const rhythm = gridRhythm(stepsPerBar, grid, profile.hit, NOTE_GATE, rng, syncProbability);
   const arch = chance(rng, 0.5) ? 1 : -1;   // rise-then-fall contour, or the reverse
   const moves = rhythm.map((r, i) => {
     if (i === 0) return "C";                // anchor each bar on the harmony
@@ -384,10 +387,10 @@ function generate(settings) {
   // shape, which gives the tune recognizable phrases.
   const leadDensity = s.channels.pulse1.density;
   const leadGrid = roleGrid(s.pattern, "lead", stepsPerBeat);
-  const motifA  = makeMotif(rng, stepsPerBar, leadGrid, leadDensity, mood, stepsPerBeat);
+  const motifA  = makeMotif(rng, stepsPerBar, leadGrid, leadDensity, mood, stepsPerBeat, s.pattern);
   const motifA2 = variantOf(motifA, rng, leadDensity);
-  const motifB  = makeMotif(rng, stepsPerBar, leadGrid, leadDensity, mood, stepsPerBeat);
-  let   motifC  = makeMotif(rng, stepsPerBar, leadGrid, leadDensity, mood, stepsPerBeat);
+  const motifB  = makeMotif(rng, stepsPerBar, leadGrid, leadDensity, mood, stepsPerBeat, s.pattern);
+  let   motifC  = makeMotif(rng, stepsPerBar, leadGrid, leadDensity, mood, stepsPerBeat, s.pattern);
   let   motifC2 = variantOf(motifC, rng, leadDensity);
   const mem = { idx: Math.floor(leadScale.length / 2), centre: Math.floor(leadScale.length / 2) };
 
@@ -445,7 +448,7 @@ function generate(settings) {
           if (chance(rng, p)) rhythm.push({ step: b * stepsPerBeat, dur: stepsPerBeat, gate: NOTE_GATE });
         }
       } else {
-        rhythm = gridRhythm(stepsPerBar, grid, p, NOTE_GATE, rng, mood.sync * 0.5);
+        rhythm = gridRhythm(stepsPerBar, grid, p, NOTE_GATE, rng, restrainedSyncProbability(mood.sync, s.pattern) * 0.5);
       }
       rhythm.forEach((r, i) => {
         const pc = chordPcs[i % chordPcs.length];               // arpeggiate the triad
@@ -459,7 +462,7 @@ function generate(settings) {
       // Through-composed: refresh the motif bank at each 4-bar phrase so the
       // material keeps evolving instead of looping.
       if (s.structure === "through" && bar > 0 && bar % 4 === 0) {
-        motifC = makeMotif(rng, stepsPerBar, leadGrid, leadDensity, mood, stepsPerBeat);
+        motifC = makeMotif(rng, stepsPerBar, leadGrid, leadDensity, mood, stepsPerBeat, s.pattern);
         motifC2 = variantOf(motifC, rng, leadDensity);
       }
       const groupPos = bar % 4;
@@ -1114,14 +1117,23 @@ function buildStaff() {
       ctx.strokeStyle = "#2c5840";
       for (let d = dn; d > sys.bottomDn + 8; d -= 2) { const ly = yForDn(d); ctx.beginPath(); ctx.moveTo(x - 5, ly + 0.5); ctx.lineTo(x + 6, ly + 0.5); ctx.stroke(); }
       for (let d = dn; d < sys.bottomDn; d += 2) { const ly = yForDn(d); ctx.beginPath(); ctx.moveTo(x - 5, ly + 0.5); ctx.lineTo(x + 6, ly + 0.5); ctx.stroke(); }
-      // note head (open for >= half note)
+      // Note shape comes from the logical value, not the playback envelope.
+      const notation = notationForValue(n.value ?? n.dur);
       ctx.fillStyle = CHAN_COLOR[sys.id]; ctx.strokeStyle = CHAN_COLOR[sys.id];
-      const open = n.dur >= song.stepsPerBeat * 2;
       ctx.beginPath(); ctx.ellipse(x, y, 3.4, 2.6, -0.3, 0, Math.PI * 2);
-      if (open) { ctx.lineWidth = 1.3; ctx.stroke(); } else { ctx.fill(); }
-      // stem
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(x + 3, y); ctx.lineTo(x + 3, y - lineGap * 2.4); ctx.stroke();
+      if (notation.open) { ctx.lineWidth = 1.3; ctx.stroke(); } else { ctx.fill(); }
+      const stemTop = y - lineGap * 2.4;
+      if (notation.stem) {
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(x + 3, y); ctx.lineTo(x + 3, stemTop); ctx.stroke();
+        for (let flag = 0; flag < notation.flags; flag++) {
+          const fy = stemTop + flag * 4;
+          ctx.beginPath(); ctx.moveTo(x + 3, fy); ctx.quadraticCurveTo(x + 9, fy + 2, x + 7, fy + 7); ctx.stroke();
+        }
+      }
+      if (notation.dotted) {
+        ctx.beginPath(); ctx.arc(x + 7, y, 1.1, 0, Math.PI * 2); ctx.fill();
+      }
       // accidental
       if (sharp) { ctx.font = "9px serif"; ctx.fillText("♯", x - 11, y + 3); }
     });

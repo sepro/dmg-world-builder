@@ -19,9 +19,35 @@ export const DENSITY_PROFILES = {
   },
 };
 
-// Articulation is intentionally independent of density. Density decides how
-// often notes change; it must not make sparse notes intrinsically shorter.
-export const NOTE_GATE = 0.82;
+// Notes occupy their complete notated value. Breathing room comes from actual
+// rests and fewer attacks, never by shaving time off every generated note.
+export const NOTE_GATE = 1;
+
+// Classify a duration in sixteenth-note steps for conventional staff notation.
+// This deliberately uses quarter-note time, not the time-signature denominator.
+export function notationForValue(value) {
+  const candidates = [
+    { value: 1, flags: 2, open: false, stem: true, dotted: false },
+    { value: 1.5, flags: 2, open: false, stem: true, dotted: true },
+    { value: 2, flags: 1, open: false, stem: true, dotted: false },
+    { value: 3, flags: 1, open: false, stem: true, dotted: true },
+    { value: 4, flags: 0, open: false, stem: true, dotted: false },
+    { value: 6, flags: 0, open: false, stem: true, dotted: true },
+    { value: 8, flags: 0, open: true, stem: true, dotted: false },
+    { value: 12, flags: 0, open: true, stem: true, dotted: true },
+    { value: 16, flags: 0, open: true, stem: false, dotted: false },
+  ];
+  return candidates.reduce((best, candidate) =>
+    Math.abs(candidate.value - value) < Math.abs(best.value - value) ? candidate : best);
+}
+
+// Mood sync values describe character, but applying them literally made lines
+// habitually late. Keep pushes rare unless the user explicitly selects the
+// syncopated pattern.
+export function restrainedSyncProbability(baseProbability, pattern) {
+  const scale = pattern === "syncopated" ? 0.30 : 0.10;
+  return Math.max(0, Math.min(0.12, baseProbability * scale));
+}
 
 export function densityProfile(name) {
   return DENSITY_PROFILES[name] || DENSITY_PROFILES.medium;
@@ -91,6 +117,19 @@ export function cleanupPitchedTrack(track, { swing, stepsPerBeat, stepsPerBar, g
       current.dur = timing.dur;
       current.vel = Math.max(current.vel, next.vel);
       track.splice(i + 1, 1);
+    }
+  }
+  // If a pickup or other later event subdivides a note, update the logical
+  // value too. Otherwise the staff would show a quarter while playback and
+  // the piano roll had already clipped it to an eighth.
+  for (let i = 0; i < track.length - 1; i++) {
+    const current = track[i];
+    const available = track[i + 1].step - current.step;
+    if (available > 0 && current.value > available) {
+      current.value = available;
+      const timing = noteTiming(current.step, current.value, gate, swing, stepsPerBeat);
+      current.t = timing.t;
+      current.dur = timing.dur;
     }
   }
   for (let i = track.length - 1; i >= 0; i--) {
