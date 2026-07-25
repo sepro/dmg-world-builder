@@ -231,7 +231,9 @@ Events live on a map at **metatile coordinates** (`x` in `[0, width*2)`, `y` in
 `facing` is the direction the player looks after arriving:
 `same | up | down | left | right`, where `same` keeps the direction the player
 walked in with. Files that predate these fields import as `transport` / `same`.
-`movement` is one of `static | wander | walk_up_down | walk_left_right`. The string
+`movement` is one of `static | sentinel | walk_path | walk_path_loop`.
+`sentinel` requires a compass `facing`; walking modes may include an axis-aligned
+`path` array and `onBlock` (`stop | reverse`). The string
 fields (`text`, `item`, `sprite`, `script`, `flag`) are free-form ids your engine
 resolves.
 
@@ -334,13 +336,19 @@ converter prints a warning counting them.
 
 ### 3.4 Event field usage
 
-| Type | p0 | s0 | s1 |
-|------|----|----|----|
-| SIGN | — | text | — |
-| ITEM | quantity | item id | flag id |
-| NPC | `MOVE_*` | sprite id | script id |
-| TRIGGER | — | script id | — |
-| DIALOG | zone width (p1 = height, in cells) | text (`\n` splits the lines) | — |
+| Type | p0 | p1 | s0 | s1 |
+|------|----|----|----|----|
+| SIGN | — | — | text | — |
+| ITEM | quantity | — | item id | flag id |
+| NPC | `MOVE_*` | `NPC_FACE_PLAYER` or `DIR_*` | sprite id | waypoint-path index or `NPC_PATH_NONE` |
+| TRIGGER | — | — | script id | — |
+| DIALOG | zone width | zone height | text (`\n` splits the lines) | — |
+
+For NPCs, `movement: "sentinel"` emits `MOVE_SENTINEL`: the NPC remains on
+its cell and rotates clockwise once per second. Its `facing` must be a compass
+direction and becomes the starting `DIR_*` in `p1`; the converter defaults or
+repairs invalid sentinel facing to `up`. A sentinel temporarily faces the player
+while its dialog is open, then resumes rotating.
 
 Warps are **not** in the `events` array; they are in the dedicated `warps` table per
 map, because they drive movement and connectivity.

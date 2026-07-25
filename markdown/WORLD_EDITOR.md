@@ -90,6 +90,22 @@ The editor's left rail switches between panels; the typical bottom-up workflow i
 Painting tools, zoom, selection, and undo/redo (a single pointer stroke collapses
 to one undo step) operate on the active panel.
 
+## NPC movement modes
+
+NPC events have a **Movement** selector whose value is stored in the exported
+`movement` field:
+
+- `static` stays on its cell and either tracks the player or holds an authored
+  facing.
+- `sentinel` stays on its cell and turns clockwise every second. Choose a
+  concrete **Starting facing**; while spoken to it turns toward the player and
+  resumes its sweep afterward.
+- `walk_path` follows its waypoints there-and-back.
+- `walk_path_loop` closes the waypoint route into a cycle.
+
+The game repository's `gbworld_to_c.py` maps `sentinel` to `MOVE_SENTINEL` in
+NPC event `p0`, and maps the starting facing to `DIR_*` in `p1`.
+
 ## Persistence
 
 There is no browser storage. **Export** saves the whole project as a

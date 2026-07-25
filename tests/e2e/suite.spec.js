@@ -49,6 +49,35 @@ test("world editor switches every panel and exports a valid project", async ({ p
   expect(file.suggestedFilename()).toMatch(/\.gbworld\.json$/);
 });
 
+test("world editor authors and exports sentinel NPC mode", async ({ page }) => {
+  await page.goto("/gb-world-editor.html");
+  await page.locator('.tab[data-panel="maps"]').click();
+  await page.getByRole("button", { name: "Events", exact: true }).click();
+  await page.getByRole("button", { name: "NPC", exact: true }).click();
+  await page.locator("canvas.map-canvas").click({ position: { x: 100, y: 100 } });
+
+  const inspector = page.locator(".card").filter({
+    has: page.getByRole("heading", { name: "NPC event" }),
+  });
+  const movement = inspector.locator(".field").filter({ hasText: "Movement" }).locator("select");
+  await expect(movement.locator('option[value="sentinel"]')).toHaveText("sentinel");
+  await movement.selectOption("sentinel");
+
+  const facing = inspector.locator(".field").filter({ hasText: "Starting facing" }).locator("select");
+  await expect(facing).toHaveValue("up");
+  await expect(facing.locator('option[value="player"]')).toHaveCount(0);
+  await facing.selectOption("left");
+  await expect(inspector.getByText(/turns clockwise every second/)).toBeVisible();
+
+  await page.locator("#btn-export").click();
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download .json" }).click();
+  const download = await downloadPromise;
+  const json = JSON.parse(await (await import("node:fs/promises")).readFile(await download.path(), "utf8"));
+  const npc = json.maps.flatMap((map) => map.events).find((event) => event.type === "npc");
+  expect(npc).toMatchObject({ movement: "sentinel", facing: "left" });
+});
+
 test("sprite editor switches every panel and exports a valid project", async ({ page }) => {
   await page.goto("/gb-sprite-editor.html");
   for (const panel of ["palettes", "tiles", "metasprites", "animations"]) {

@@ -112,11 +112,12 @@ const EVENT_ORDER = ["spawn", "warp", "sign", "item", "npc", "trigger", "dialog"
 // The in-game dialog box shows 2 rows of 18 characters.
 const DIALOG_MAX_CHARS = 18;
 // How an NPC moves. "static" holds its tile (facing is authored separately).
-// "walk_path" patrols a list of waypoints there-and-back (ping-pong); once at
-// the last waypoint it retraces the route to the first. "walk_path_loop"
-// closes the route into a cycle, walking last -> first straight back to the
-// start. Every path segment must be axis-aligned (a straight run of tiles).
-const NPC_MOVEMENTS = ["static", "walk_path", "walk_path_loop"];
+// "sentinel" also holds its tile, but turns clockwise every second from an
+// authored compass direction. "walk_path" patrols a list of waypoints
+// there-and-back (ping-pong); "walk_path_loop" closes the route into a cycle.
+// Every path segment must be axis-aligned (a straight run of tiles). Values are
+// the JSON contract consumed by tools/world_builder/gbworld_to_c.py.
+const NPC_MOVEMENTS = ["static", "sentinel", "walk_path", "walk_path_loop"];
 // What a walking NPC does when something (not the player) blocks its next tile.
 // "stop" waits and resumes when the way clears; "reverse" turns around and runs
 // the route the other way. The player blocking always forces a stop regardless.
@@ -129,6 +130,9 @@ const NPC_PATH_MAX = 8;
 // when it turns to meet the player, then reverts once the box closes. Only
 // meaningful for "static" -- a walking NPC faces its direction of travel.
 const NPC_FACINGS = ["player", "down", "up", "left", "right"];
+// A sentinel needs a concrete start direction: p1 becomes a DIR_* value and
+// drives the clockwise sweep. NPC_FACE_PLAYER (0xFF) is not valid here.
+const NPC_SENTINEL_FACINGS = ["up", "right", "down", "left"];
 // Facing direction the player starts in at a spawn point.
 const FACINGS = ["down", "up", "left", "right"];
 // How a warp is presented by the engine (door fade, stair slide, fall, plain teleport).
@@ -2790,8 +2794,12 @@ function renderEventInspector(map) {
     f.appendChild(selectFrom(NPC_MOVEMENTS, ev.movement, v => {
       snapshot();
       ev.movement = v;
+      const walking = v === "walk_path" || v === "walk_path_loop";
       // Leaving a walk mode ends any path-placing session for this NPC.
-      if (v === "static" && state.pathEdit === ev.id) state.pathEdit = null;
+      if (!walking && state.pathEdit === ev.id) state.pathEdit = null;
+      // Sentinels rotate from a concrete DIR_*; never export the dynamic
+      // NPC_FACE_PLAYER sentinel used by ordinary static NPCs.
+      if (v === "sentinel" && (!ev.facing || ev.facing === "player")) ev.facing = "up";
       render();
     }));
     card.appendChild(f);
@@ -2799,13 +2807,19 @@ function renderEventInspector(map) {
 
     const walking = ev.movement === "walk_path" || ev.movement === "walk_path_loop";
     if (!walking) {
-      // Static NPCs face a fixed way (or the player).
+      const sentinel = ev.movement === "sentinel";
       const ff = el("div", "field");
-      ff.appendChild(label("Facing"));
-      ff.appendChild(selectFrom(NPC_FACINGS, ev.facing || "player", v => { snapshot(); ev.facing = v; }));
+      ff.appendChild(label(sentinel ? "Starting facing" : "Facing"));
+      ff.appendChild(selectFrom(
+        sentinel ? NPC_SENTINEL_FACINGS : NPC_FACINGS,
+        ev.facing || (sentinel ? "up" : "player"),
+        v => { snapshot(); ev.facing = v; },
+      ));
       card.appendChild(ff);
       card.appendChild(spacer(4));
-      card.appendChild(el("p", "hint", "\"player\" turns to face the player; a compass direction is held until the NPC is talked to."));
+      card.appendChild(el("p", "hint", sentinel
+        ? "Stands in place and turns clockwise every second from this direction. It still turns to face the player while being talked to."
+        : "\"player\" turns to face the player; a compass direction is held until the NPC is talked to."));
       card.appendChild(spacer(8));
     } else {
       // Walking NPCs face their travel direction; instead they carry a
@@ -3617,6 +3631,18 @@ function loadProjectFrom(text) {
       if (e.type === "warp") {
         if (!e.warpType) e.warpType = "transport";
         if (!e.facing) e.facing = "same";
+      } else if (e.type === "npc") {
+        // Normalize older/hand-authored NPCs so the value shown in each select
+        // is also the value a no-op re-export writes. Sentinel p1 must be a
+        // concrete DIR_*; NPC_FACE_PLAYER is only meaningful for static NPCs.
+        if (!NPC_MOVEMENTS.includes(e.movement)) e.movement = "static";
+        if (!NPC_ONBLOCK.includes(e.onBlock)) e.onBlock = "stop";
+        if (!Array.isArray(e.path)) e.path = [];
+        if (e.movement === "sentinel") {
+          if (!NPC_SENTINEL_FACINGS.includes(e.facing)) e.facing = "up";
+        } else if (!e.facing) {
+          e.facing = "player";
+        }
       }
     });
   });
