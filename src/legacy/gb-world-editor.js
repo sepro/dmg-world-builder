@@ -143,7 +143,7 @@ function makeEvent(type, x, y) {
   else if (type === "warp") { e.toMap = null; e.toX = 0; e.toY = 0; e.warpType = "transport"; e.facing = "same"; }
   else if (type === "sign") { e.text = ""; }
   else if (type === "item") { e.item = ""; e.qty = 1; e.flag = ""; }
-  else if (type === "npc") { e.sprite = ""; e.movement = "static"; e.facing = "player"; e.path = []; e.script = ""; }
+  else if (type === "npc") { e.sprite = ""; e.movement = "static"; e.facing = "player"; e.offsetX = 0; e.offsetY = 0; e.path = []; e.script = ""; }
   else if (type === "trigger") { e.script = ""; }
   else if (type === "dialog") { e.w = 1; e.h = 1; e.text = ""; }
   return e;
@@ -2801,6 +2801,20 @@ function renderEventInspector(map) {
     card.appendChild(f);
     card.appendChild(spacer(8));
 
+    const offsetRow = el("div", "row");
+    const addOffset = (labelText, key) => {
+      const field = el("div", "field");
+      field.appendChild(label(labelText));
+      const input = numberInput(ev[key] || 0, 0, 7);
+      input.addEventListener("change", () => { snapshot(); ev[key] = clampInt(input.value, 0, 7); render(); });
+      field.appendChild(input);
+      return field;
+    };
+    offsetRow.append(addOffset("Offset X (px)", "offsetX"), addOffset("Offset Y (px)", "offsetY"));
+    card.appendChild(offsetRow);
+    card.appendChild(el("p", "hint", "Visual placement only (0–7 px right/down). Collision and interaction remain on the event cell."));
+    card.appendChild(spacer(8));
+
     const walking = ev.movement === "walk_path" || ev.movement === "walk_path_loop";
     if (!walking) {
       const sentinel = ev.movement === "sentinel";
@@ -3631,6 +3645,8 @@ function loadProjectFrom(text) {
         // a no-op re-export also migrates older projects.
         delete e.onBlock;
         if (!Array.isArray(e.path)) e.path = [];
+        e.offsetX = clampInt(e.offsetX ?? 0, 0, 7);
+        e.offsetY = clampInt(e.offsetY ?? 0, 0, 7);
         if (e.movement === "sentinel") {
           if (!NPC_SENTINEL_FACINGS.includes(e.facing)) e.facing = "up";
         } else if (!e.facing) {
