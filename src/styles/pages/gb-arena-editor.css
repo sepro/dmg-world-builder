@@ -30,3 +30,4 @@
 .field textarea { width: 100%; resize: vertical; min-height: 76px; font-family: var(--mono); font-size: 11px; color: var(--text); background: var(--panel-2); border: 1px solid var(--border); padding: 6px; }
 @media (max-width: 1120px) { .arena-layout { grid-template-columns: 230px minmax(400px, 1fr); } #arena-inspector { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr)); gap: 12px; } }
 @media (max-width: 720px) { .arena-layout { display: block; } #arena-canvas { width: 100%; min-width: 0; } #arena-inspector { display: block; } }
+.png-import-preview { width: min(100%, 480px); height: auto; margin: 12px 0; border: 2px solid var(--border); background: var(--gb-3); }

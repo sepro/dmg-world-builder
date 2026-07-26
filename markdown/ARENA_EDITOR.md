@@ -11,6 +11,8 @@ select a tile, edit its four DMG pixel values, then paint it onto the arena map.
 New, duplicate, and delete controls let each boss arena own only the art it
 needs.
 
+**Import PNG** prepares a reference image as arena art: it rescales the image to the fixed 160×144 screen with nearest-neighbour sampling, converts it to the four DMG shades, splits it into 8×8 tiles, deduplicates those tiles, and rebuilds the arena map. A preview reports the resulting unique-tile count and warns when it exceeds the Game Boy background limit of 256. Applying an import changes only the art layer; gameplay overlays and markers remain intact.
+
 Each tile can have additional animation frames. The frame strip selects the
 frame to edit; **+** duplicates the current frame. Set the frame rate in 60 Hz
 ticks, and use the map toolbar's **Animation: playing/paused** toggle to preview

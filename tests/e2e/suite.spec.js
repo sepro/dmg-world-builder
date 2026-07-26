@@ -174,3 +174,26 @@ test("boss arena editor authors tiles, previews overlays and animations, and exp
   expect(arena.overlays[12 * 20 + 3]).toBe("platform");
   expect(arena.overlays[8 * 20 + 6]).toBe("platform");
 });
+
+test("boss arena tile selection is immediate and PNG import reconstructs art tiles", async ({ page }) => {
+  await page.goto("/gb-arena-editor.html");
+  const editor = page.locator("#tile-editor-canvas");
+
+  await page.locator('.arena-tile[data-tile-id="water"]').click();
+  await expect(page.locator('.arena-tile[data-tile-id="water"]')).toHaveAttribute("aria-pressed", "true");
+  const waterPixel = await editor.evaluate((canvas) => Array.from(canvas.getContext("2d").getImageData(14, 14, 1, 1).data));
+  expect(waterPixel).toEqual([136, 192, 112, 255]);
+
+  await page.locator('.arena-tile[data-tile-id="stone"]').click();
+  await expect(page.locator('.arena-tile[data-tile-id="stone"]')).toHaveAttribute("aria-pressed", "true");
+  const stonePixel = await editor.evaluate((canvas) => Array.from(canvas.getContext("2d").getImageData(14, 14, 1, 1).data));
+  expect(stonePixel).toEqual([8, 24, 32, 255]);
+
+  await page.getByRole("button", { name: "Import PNG" }).click();
+  await page.locator("#arena-png-input").setInputFiles("docs/screenshots/landscape-sample.png");
+  await expect(page.locator("#arena-png-status")).toContainText("unique 8×8 tiles");
+  await expect(page.locator(".png-import-preview")).toBeVisible();
+  await page.getByRole("button", { name: "Use as arena art" }).click();
+  await expect(page.locator(".arena-tile")).not.toHaveCount(0);
+  await expect(editor).toBeVisible();
+});

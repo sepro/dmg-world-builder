@@ -97,6 +97,11 @@ function drawTile(ctx, t, scale, ox = 0, oy = 0) { drawPixels(ctx, tileFrames(t)
 function drawThumbnail(t, size = 40) { const c = document.createElement("canvas"); c.width = size; c.height = size; drawTile(c.getContext("2d"), t, size / PX); return c; }
 
 function render() { renderTools(); renderWorkspace(); renderInspector(); }
+function selectTile(id) {
+  if (!tileById(id)) return;
+  state.selectedTileId = id; state.selectedFrame = 0; state.markerBrush = null; state.mapTool = "paint";
+  renderTools(); renderWorkspaceToolbar(); renderInspector(); drawArena();
+}
 function renderTools() {
   toolHost.innerHTML = "";
   const library = el("section", "card"); library.appendChild(el("h2", null, "Arena tiles"));
@@ -104,15 +109,15 @@ function renderTools() {
   const grid = el("div", "arena-tile-grid");
   state.arena.tiles.forEach((t, i) => {
     const button = el("button", `arena-tile${t.id === state.selectedTileId ? " selected" : ""}`);
-    button.title = t.name; button.appendChild(drawThumbnail(t)); button.appendChild(el("span", "idx", `${i}`));
+    button.type = "button"; button.dataset.tileId = t.id; button.setAttribute("aria-pressed", String(t.id === state.selectedTileId)); button.title = "Select " + t.name; button.appendChild(drawThumbnail(t)); button.appendChild(el("span", "idx", String(i)));
     if (animated(t)) button.appendChild(el("span", "anim-badge", `▶${frameCount(t)}`));
-    button.addEventListener("click", () => { state.selectedTileId = t.id; state.selectedFrame = 0; state.markerBrush = null; render(); }); grid.appendChild(button);
+    button.addEventListener("click", () => selectTile(t.id)); grid.appendChild(button);
   });
   library.appendChild(grid);
   const tileButtons = el("div", "row");
   const add = el("button", null, "+ New tile"); add.addEventListener("click", () => { snapshot(); const id = uniqueTileId("tile"); state.arena.tiles.push(tile(id, `Tile ${state.arena.tiles.length}`, blankPixels())); state.selectedTileId = id; state.selectedFrame = 0; markDirty(); render(); });
   const duplicate = el("button", null, "Duplicate"); duplicate.addEventListener("click", () => { snapshot(); const src = activeTile(); const id = uniqueTileId(`${src.id}_copy`); state.arena.tiles.push(tile(id, `${src.name} copy`, clonePixels(src.pixels), src.frames ? { frames: src.frames.map(clonePixels), frameRate: src.frameRate } : {})); state.selectedTileId = id; state.selectedFrame = 0; markDirty(); render(); });
-  const remove = el("button", "danger", "Delete"); remove.addEventListener("click", () => deleteActiveTile()); tileButtons.append(add, duplicate, remove); library.appendChild(tileButtons); toolHost.appendChild(library);
+  const importPng = el("button", null, "Import PNG"); importPng.addEventListener("click", importPngTiles); const remove = el("button", "danger", "Delete"); remove.addEventListener("click", () => deleteActiveTile()); tileButtons.append(add, duplicate, importPng, remove); library.appendChild(tileButtons); toolHost.appendChild(library);
 
   const overlay = el("section", "card"); overlay.appendChild(el("h2", null, "Gameplay overlays")); overlay.appendChild(el("p", "hint", "Paint collision separately from tile art. Toggle the overlay view in the canvas toolbar."));
   const overlayGrid = el("div", "brush-grid"); Object.entries(OVERLAYS).forEach(([id, data]) => {
@@ -131,6 +136,71 @@ function deleteActiveTile() {
   snapshot(); const fallback = state.arena.tiles.find((x) => x.id !== t.id); state.arena.map = state.arena.map.map((id) => id === t.id ? fallback.id : id); state.arena.tiles = state.arena.tiles.filter((x) => x.id !== t.id); state.selectedTileId = fallback.id; state.selectedFrame = 0; markDirty(); render();
 }
 
+function importPngTiles() {
+  openModal("Import PNG as arena tiles", (modal) => {
+    modal.appendChild(el("p", "hint", "The image is scaled with nearest-neighbour sampling to the 160×144 arena, quantized to four DMG shades, split into 8×8 tiles, then reconstructed as the art map. Existing gameplay overlays and annotations stay in place."));
+    const choose = el("button", "primary", "Choose PNG");
+    const file = document.createElement("input"); file.id = "arena-png-input"; file.type = "file"; file.accept = "image/png,.png"; file.style.display = "none";
+    const status = el("p", "hint", "No image selected."); status.id = "arena-png-status";
+    const preview = document.createElement("canvas"); preview.className = "png-import-preview"; preview.width = W * PX; preview.height = H * PX; preview.hidden = true;
+    const apply = el("button", "primary", "Use as arena art"); apply.disabled = true;
+    let prepared = null;
+    choose.addEventListener("click", () => file.click());
+    file.addEventListener("change", async () => {
+      const picked = file.files[0]; if (!picked) return;
+      status.textContent = "Converting image…"; apply.disabled = true;
+      try {
+        prepared = await pngToArenaTiles(picked);
+        const pctx = preview.getContext("2d"); pctx.clearRect(0, 0, preview.width, preview.height); pctx.drawImage(prepared.preview, 0, 0); preview.hidden = false;
+        const over = prepared.tiles.length > 256 ? ` Warning: ${prepared.tiles.length} unique tiles exceeds the 256-tile Game Boy background limit.` : "";
+        status.textContent = `${picked.name}: ${prepared.sourceWidth}×${prepared.sourceHeight} → 160×144, ${prepared.tiles.length} unique 8×8 tile${prepared.tiles.length === 1 ? "" : "s"}.${over}`;
+        status.className = prepared.tiles.length > 256 ? "warn" : "hint";
+        apply.disabled = false;
+      } catch (error) { status.textContent = `Could not import image: ${error.message}`; status.className = "warn"; }
+    });
+    apply.addEventListener("click", () => {
+      if (!prepared) return;
+      snapshot(); state.arena.tiles = prepared.tiles; state.arena.map = prepared.map;
+      state.selectedTileId = prepared.tiles[0].id; state.selectedFrame = 0; state.markerBrush = null; state.mapTool = "paint";
+      markDirty(); document.getElementById("modal-backdrop")?.remove(); render();
+    });
+    modal.append(choose, file, status, preview, apply);
+  });
+}
+
+function loadImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file); const image = new Image();
+    image.onload = () => { URL.revokeObjectURL(url); resolve(image); };
+    image.onerror = () => { URL.revokeObjectURL(url); reject(new Error("The file is not a readable PNG.")); };
+    image.src = url;
+  });
+}
+
+async function pngToArenaTiles(file) {
+  if (!file.type.startsWith("image/")) throw new Error("Choose a PNG image.");
+  const image = await loadImageFile(file);
+  const width = W * PX, height = H * PX;
+  const source = document.createElement("canvas"); source.width = width; source.height = height;
+  const sctx = source.getContext("2d", { willReadFrequently: true }); sctx.imageSmoothingEnabled = false; sctx.fillStyle = "#fff"; sctx.fillRect(0, 0, width, height); sctx.drawImage(image, 0, 0, width, height);
+  const rgba = sctx.getImageData(0, 0, width, height).data;
+  const quantized = new Array(width * height);
+  for (let i = 0; i < quantized.length; i++) {
+    const a = rgba[i * 4 + 3] / 255; const lum = (0.2126 * rgba[i * 4] + 0.7152 * rgba[i * 4 + 1] + 0.0722 * rgba[i * 4 + 2]) * a + 255 * (1 - a);
+    quantized[i] = Math.max(0, Math.min(3, Math.round((255 - lum) / 85)));
+  }
+  const tiles = [], map = [], known = new Map();
+  for (let ty = 0; ty < H; ty++) for (let tx = 0; tx < W; tx++) {
+    const pixels = []; for (let py = 0; py < PX; py++) for (let px = 0; px < PX; px++) pixels.push(quantized[(ty * PX + py) * width + tx * PX + px]);
+    const key = pixels.join(""); let id = known.get(key);
+    if (!id) { id = `png_${tiles.length}`; known.set(key, id); tiles.push(tile(id, `PNG tile ${tiles.length}`, pixels)); }
+    map.push(id);
+  }
+  const preview = document.createElement("canvas"); preview.width = width; preview.height = height; const pctx = preview.getContext("2d"); const output = pctx.createImageData(width, height);
+  for (let i = 0; i < quantized.length; i++) { const hex = COLORS[quantized[i]].slice(1); output.data[i * 4] = parseInt(hex.slice(0, 2), 16); output.data[i * 4 + 1] = parseInt(hex.slice(2, 4), 16); output.data[i * 4 + 2] = parseInt(hex.slice(4, 6), 16); output.data[i * 4 + 3] = 255; }
+  pctx.putImageData(output, 0, 0);
+  return { tiles, map, preview, sourceWidth: image.naturalWidth, sourceHeight: image.naturalHeight };
+}
 function renderWorkspace() {
   workspace.innerHTML = "";
   const card = el("section", "card"); const head = el("div", "row"); head.append(el("h2", null, "Arena map"));
@@ -179,7 +249,7 @@ function renderInspector() {
   const name = inputText(t.name); name.addEventListener("focus", snapshot); name.addEventListener("input", (e) => { t.name = e.target.value; markDirty(); }); editor.appendChild(field("Tile name", name));
   const inkRow = el("div", "row"); inkRow.appendChild(el("span", "cell-label", "Ink")); const inks = el("div", "ink-swatches"); for (let v = 0; v < 4; v++) { const b = el("button", `ink-swatch${state.ink === v ? " active" : ""}`); b.style.background = COLORS[v]; b.appendChild(el("span", "val", String(v))); b.addEventListener("click", () => { state.ink = v; renderInspector(); }); inks.appendChild(b); } inkRow.appendChild(inks); editor.appendChild(inkRow);
   const tools = el("div", "row"); ["pencil", "fill", "eyedropper"].forEach((kind) => { const b = el("button", `tiny${state.pixelTool === kind ? " primary" : ""}`, kind); b.addEventListener("click", () => { state.pixelTool = kind; renderInspector(); }); tools.appendChild(b); }); const clear = el("button", "tiny danger", "Clear frame"); clear.addEventListener("click", () => { snapshot(); editFrame(t).fill(0); markDirty(); drawPixelEditor(); refreshTileThumbs(); drawArena(); }); tools.appendChild(clear); editor.appendChild(tools);
-  const canvas = document.createElement("canvas"); canvas.id = "tile-editor-canvas"; canvas.className = "tile-editor-canvas"; canvas.width = PX * 28; canvas.height = PX * 28; editor.appendChild(canvas); bindPixelEditor(canvas, t); drawPixelEditor();
+  const canvas = document.createElement("canvas"); canvas.id = "tile-editor-canvas"; canvas.className = "tile-editor-canvas"; canvas.width = PX * 28; canvas.height = PX * 28; editor.appendChild(canvas); bindPixelEditor(canvas, t); drawPixelEditor(canvas);
   editor.appendChild(el("span", "cell-label", "Animation frames")); const strip = el("div", "frame-strip"); tileFrames(t).forEach((pixels, i) => { const b = el("button", `frame-cell${state.selectedFrame === i ? " selected" : ""}`); const c = document.createElement("canvas"); c.width = 38; c.height = 38; drawPixels(c.getContext("2d"), pixels, 38 / PX); b.append(c, el("span", "fnum", i === 0 ? "base" : String(i))); b.addEventListener("click", () => { state.selectedFrame = i; renderInspector(); }); strip.appendChild(b); }); const add = el("button", "frame-cell", "+"); add.title = "Add a frame copied from this frame"; add.addEventListener("click", () => { snapshot(); if (!t.frames) t.frames = []; if (!t.frameRate) t.frameRate = 12; t.frames.push(clonePixels(editFrame(t))); state.selectedFrame = frameCount(t) - 1; markDirty(); renderInspector(); drawArena(); }); strip.appendChild(add); editor.appendChild(strip);
   if (animated(t)) { const controls = el("div", "row"); const rate = numberInput(t.frameRate || 12, 1, 120); rate.addEventListener("change", () => { snapshot(); t.frameRate = clampInt(rate.value, 1, 120); markDirty(); }); controls.append(field("Ticks / frame", rate)); const removeFrame = el("button", "tiny danger", "Delete frame"); removeFrame.disabled = state.selectedFrame === 0; removeFrame.addEventListener("click", () => { if (!state.selectedFrame) return; snapshot(); t.frames.splice(state.selectedFrame - 1, 1); if (!t.frames.length) delete t.frames; state.selectedFrame = 0; markDirty(); renderInspector(); drawArena(); }); controls.appendChild(removeFrame); editor.appendChild(controls); }
   inspector.appendChild(editor);
@@ -190,7 +260,7 @@ function renderInspector() {
 function field(text, control) { const wrap = el("div", "field"); wrap.append(el("label", null, text), control); return wrap; }
 function editFrame(t) { if (state.selectedFrame >= frameCount(t)) state.selectedFrame = 0; return state.selectedFrame === 0 ? t.pixels : t.frames[state.selectedFrame - 1]; }
 function refreshTileThumbs() { document.querySelectorAll(".arena-tile").forEach((button) => { const index = Number(button.querySelector(".idx")?.textContent); const canvas = button.querySelector("canvas"); if (!Number.isInteger(index) || !canvas || !state.arena.tiles[index]) return; const ctx = canvas.getContext("2d"); ctx.clearRect(0, 0, canvas.width, canvas.height); drawTile(ctx, state.arena.tiles[index], canvas.width / PX); }); }
-function drawPixelEditor() { const c = document.getElementById("tile-editor-canvas"); if (!c) return; const ctx = c.getContext("2d"), pixels = editFrame(activeTile()), s = c.width / PX; drawPixels(ctx, pixels, s); ctx.strokeStyle = "rgba(224,248,208,.2)"; for (let i = 0; i <= PX; i++) { ctx.beginPath(); ctx.moveTo(i * s + .5, 0); ctx.lineTo(i * s + .5, c.height); ctx.stroke(); ctx.beginPath(); ctx.moveTo(0, i * s + .5); ctx.lineTo(c.width, i * s + .5); ctx.stroke(); } }
+function drawPixelEditor(target) { const c = target || document.getElementById("tile-editor-canvas"); if (!c) return; const ctx = c.getContext("2d"), pixels = editFrame(activeTile()), s = c.width / PX; drawPixels(ctx, pixels, s); ctx.strokeStyle = "rgba(224,248,208,.2)"; for (let i = 0; i <= PX; i++) { ctx.beginPath(); ctx.moveTo(i * s + .5, 0); ctx.lineTo(i * s + .5, c.height); ctx.stroke(); ctx.beginPath(); ctx.moveTo(0, i * s + .5); ctx.lineTo(c.width, i * s + .5); ctx.stroke(); } }
 function bindPixelEditor(canvas, t) { let painting = false; const pixelAt = (e) => { const r = canvas.getBoundingClientRect(); return { x: Math.max(0, Math.min(7, Math.floor((e.clientX - r.left) * PX / r.width))), y: Math.max(0, Math.min(7, Math.floor((e.clientY - r.top) * PX / r.height))) }; }; const apply = (e) => { const p = pixelAt(e), pixels = editFrame(t), i = p.y * PX + p.x; if (state.pixelTool === "eyedropper") { state.ink = pixels[i]; renderInspector(); return; } if (state.pixelTool === "fill") floodFill(pixels, p.x, p.y, state.ink); else pixels[i] = state.ink; markDirty(); drawPixelEditor(); refreshTileThumbs(); drawArena(); }; canvas.addEventListener("pointerdown", (e) => { if (state.pixelTool !== "eyedropper") snapshot(); painting = state.pixelTool === "pencil"; canvas.setPointerCapture(e.pointerId); apply(e); }); canvas.addEventListener("pointermove", (e) => { if (painting) apply(e); }); canvas.addEventListener("pointerup", () => { painting = false; }); }
 function floodFill(pixels, x, y, value) { const at = y * PX + x, old = pixels[at]; if (old === value) return; const queue = [[x, y]]; while (queue.length) { const [cx, cy] = queue.pop(); const i = cy * PX + cx; if (cx < 0 || cy < 0 || cx >= PX || cy >= PX || pixels[i] !== old) continue; pixels[i] = value; queue.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]); } }
 
