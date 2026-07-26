@@ -120,10 +120,39 @@ for (const [path] of [["gb-pixelizer.html", "Process"], ["gb-tile-reducer.html",
   });
 }
 
-test("boss arena editor loads Snapjaw and exports an arena project", async ({ page }) => {
+
+test("boss arena editor authors tiles, previews overlays and animations, and exports Snapjaw", async ({ page }) => {
   await page.goto("/gb-arena-editor.html");
   await expect(page.locator("#arena-canvas")).toBeVisible();
-  await expect(page.locator("#arena-inspector input").first()).toHaveValue("Snapjaw Marsh");
+  await expect(page.locator(".arena-tile")).toHaveCount(4);
+  await expect(page.locator("#tile-editor-canvas")).toBeVisible();
+
+  await page.getByRole("button", { name: "+ New tile" }).click();
+  await expect(page.locator(".arena-tile")).toHaveCount(5);
+  await page.getByRole("button", { name: "+", exact: true }).click();
+  await expect(page.locator(".frame-cell")).toHaveCount(3);
+  await page.locator("#btn-animation-toggle").click();
+  await expect(page.locator("#btn-animation-toggle")).toHaveText("Animation: paused");
+  await page.getByRole("button", { name: "base", exact: true }).click();
+  await page.locator("#tile-editor-canvas").click({ position: { x: 70, y: 70 } });
+  await page.locator("#arena-canvas").click({ position: { x: 16, y: 16 } });
+  const paintedPixel = await page.locator("#arena-canvas").evaluate((canvas) => Array.from(canvas.getContext("2d").getImageData(9, 9, 1, 1).data));
+  expect(paintedPixel).toEqual([8, 24, 32, 255]);
+  await expect(page.locator("#btn-undo")).toBeEnabled();
+  await page.locator("#btn-undo").click();
+  const undonePixel = await page.locator("#arena-canvas").evaluate((canvas) => Array.from(canvas.getContext("2d").getImageData(9, 9, 1, 1).data));
+  expect(undonePixel).toEqual([224, 248, 208, 255]);
+  await page.locator("#btn-redo").click();
+  const redonePixel = await page.locator("#arena-canvas").evaluate((canvas) => Array.from(canvas.getContext("2d").getImageData(9, 9, 1, 1).data));
+  expect(redonePixel).toEqual([8, 24, 32, 255]);
+
+
+  await page.locator("#btn-animation-toggle").click();
+  await expect(page.locator("#btn-animation-toggle")).toHaveText("Animation: playing");
+  await page.locator("#btn-overlay-toggle").click();
+  await expect(page.locator("#btn-overlay-toggle")).toHaveText("Gameplay overlays: on");
+  await expect(page.getByText("Overlay legend is active")).toBeVisible();
+
   await page.getByRole("button", { name: "Load Snapjaw" }).click();
   await page.locator("#btn-export").click();
   const download = page.waitForEvent("download");
@@ -132,12 +161,16 @@ test("boss arena editor loads Snapjaw and exports an arena project", async ({ pa
   expect(file.suggestedFilename()).toMatch(/Snapjaw_Marsh\.gbarena\.json$/);
   const arena = JSON.parse(await (await import("node:fs/promises")).readFile(await file.path(), "utf8"));
   expect(arena).toMatchObject({
-    kind: "gb-boss-arena",
+    kind: "gb-boss-arena", version: 2,
     screen: { width: 20, height: 18, tileSize: 8, camera: "fixed" },
     markers: { playerSpawn: { x: 5, y: 15 }, bossAnchor: { x: 18, y: 14 } },
   });
-  expect(arena.terrain[16 * 20]).toBe("solid");
-  expect(arena.terrain[16 * 20 + 10]).toBe("water");
-  expect(arena.terrain[12 * 20 + 3]).toBe("platform");
-  expect(arena.terrain[8 * 20 + 6]).toBe("platform");
+  expect(arena.tiles).toHaveLength(4);
+  expect(arena.tiles.find((tile) => tile.id === "water").frames).toHaveLength(1);
+  expect(arena.map[16 * 20]).toBe("stone");
+  expect(arena.overlays[16 * 20]).toBe("solid");
+  expect(arena.map[16 * 20 + 10]).toBe("water");
+  expect(arena.overlays[16 * 20 + 10]).toBe("water");
+  expect(arena.overlays[12 * 20 + 3]).toBe("platform");
+  expect(arena.overlays[8 * 20 + 6]).toBe("platform");
 });
