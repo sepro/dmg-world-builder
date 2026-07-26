@@ -118,4 +118,20 @@ const SHADES = ["#e0f8d0", "#88c070", "#346856", "#081820"];
   }
 })();
 
+/* Arena preview: a water pit and elevated one-way platforms. */
+(() => {
+  const ctx = document.getElementById("preview-arena").getContext("2d");
+  const px = (x, y, v) => { ctx.fillStyle = SHADES[v]; ctx.fillRect(x * 4, y * 4, 4, 4); };
+  for (let y = 0; y < 12; y++) for (let x = 0; x < 40; x++) px(x, y, 0);
+  for (let x = 0; x < 20; x++) { px(x, 10, 3); px(x, 11, 2); }
+  for (let x = 20; x < 40; x++) { px(x, 10, 2); px(x, 11, 1); }
+  for (let x = 7; x < 21; x++) px(x, 7, 3);
+  for (let x = 14; x < 19; x++) px(x, 4, 3);
+  px(4, 8, 3); px(5, 8, 3);
+  px(34, 7, 3); px(35, 7, 3); px(34, 8, 3);
+})();
+
+
+
+
 export {};

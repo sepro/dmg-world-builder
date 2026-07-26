@@ -48,6 +48,10 @@ connections and an events layer) and export them to GBDK-2020 C. See the
 [World Editor guide](markdown/WORLD_EDITOR.md).
 
 ![World Editor](docs/screenshots/world-editor.png)
+### Boss Arena Editor
+
+Design fixed 20×18 boss-combat screens with semantic solid, platform, water, hazard, ladder, and decor cells, plus player/boss spawn and exit annotations. It exports portable `.gbarena.json` projects and includes the Snapjaw Marsh ROM-matched preset. See the [Boss Arena Editor guide](markdown/ARENA_EDITOR.md).
+
 
 ### Sprite Editor
 
@@ -142,7 +146,7 @@ Each tool has an end-user guide in [`markdown/`](markdown/):
 
 - [World Editor](markdown/WORLD_EDITOR.md) · [Sprite Editor](markdown/SPRITE_EDITOR.md)
 - [Music Generator](markdown/MUSIC_GENERATOR.md) · [SFX Generator](markdown/SFX_GENERATOR.md)
-- [Pixelizer](markdown/PIXELIZER.md) · [Tile Reducer](markdown/TILE_REDUCER.md)
+- [Pixelizer](markdown/PIXELIZER.md) · [Tile Reducer](markdown/TILE_REDUCER.md) · [Boss Arena Editor](markdown/ARENA_EDITOR.md)
 - [Developer handoff](markdown/DEVELOPER_HANDOFF.md) — `.gbworld.json` schema, the
   generated C structures, and GBDK-2020 runtime integration.
 

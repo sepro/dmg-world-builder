@@ -1,14 +1,4 @@
-import { mount } from "svelte";
-import LegacyToolPage from "../components/LegacyToolPage.svelte";
-import "../styles/theme.css";
-import "../styles/pages/index.css";
-
-mount(LegacyToolPage, {
-  target: document.body,
-  props: {
-    beforeMenu: "<span class=\"brand\">GB&nbsp;Tool&nbsp;Suite <span class=\"sub\">for DMG / GBC</span></span><div class=\"spacer\"></div>",
-    afterMenu: "<span class=\"target-tag\">no build &middot; no server state</span>",
-    content: `<div class="hero"><h1>Game Boy Tool Suite</h1><p>Build worlds, boss arenas, sprites and chiptunes for GBDK-2020 — right in the browser.</p></div>
+import{m as a,L as e,_ as s}from"./theme-DCgAGtXn.js";a(e,{target:document.body,props:{beforeMenu:'<span class="brand">GB&nbsp;Tool&nbsp;Suite <span class="sub">for DMG / GBC</span></span><div class="spacer"></div>',afterMenu:'<span class="target-tag">no build &middot; no server state</span>',content:`<div class="hero"><h1>Game Boy Tool Suite</h1><p>Build worlds, boss arenas, sprites and chiptunes for GBDK-2020 — right in the browser.</p></div>
       <main class="tools">
         <a class="tool-card" href="gb-world-editor.html"><canvas id="preview-world" width="160" height="48"></canvas><h2>World Editor</h2><p>Draw tiles, compose maps, place warps and events. Exports .gbworld.json.</p><span class="go">Open editor &raquo;</span></a>
         <a class="tool-card" href="gb-arena-editor.html"><canvas id="preview-arena" width="160" height="48"></canvas><h2>Boss Arena Editor</h2><p>Design single-screen boss rooms: collision, platforms, water, hazards, ladders and spawn annotations.</p><span class="go">Open arena editor &raquo;</span></a>
@@ -17,8 +7,4 @@ mount(LegacyToolPage, {
         <a class="tool-card" href="gb-sfx-generator.html"><canvas id="preview-sfx" width="160" height="48"></canvas><h2>SFX Generator</h2><p>Design layered Game Boy sound effects and export .gbsfx.json, WAV, or C.</p><span class="go">Open generator &raquo;</span></a>
         <a class="tool-card" href="gb-pixelizer.html"><canvas id="preview-pixelizer" width="160" height="48"></canvas><h2>Pixelizer</h2><p>Turn any image into 2-bit pixel art with a live tile-count readout.</p><span class="go">Open pixelizer &raquo;</span></a>
         <a class="tool-card" href="gb-tile-reducer.html"><canvas id="preview-reducer" width="160" height="48"></canvas><h2>Tile Reducer</h2><p>Merge similar 8×8 tiles until art fits its VRAM budget.</p><span class="go">Open reducer &raquo;</span></a>
-      </main><footer>Everything runs locally. Projects live in exported files, not the browser.</footer>`,
-    currentPage: "",
-    initialize: () => import("../legacy/index.js"),
-  },
-});
+      </main><footer>Everything runs locally. Projects live in exported files, not the browser.</footer>`,currentPage:"",initialize:()=>s(()=>import("./index-vVTTemyD.js"),[],import.meta.url)}});

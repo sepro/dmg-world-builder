@@ -1,5 +1,5 @@
-const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./gb-world-editor-C9ZAqsUw.js","./common-C8PHBgJ_.js"])))=>i.map(i=>d[i]);
-import{m as t,L as n,_ as a}from"./theme-DaBNiN0a.js";t(n,{target:document.body,props:{beforeMenu:`<span class="brand">GB&nbsp;World&nbsp;Editor <span class="sub">v1</span></span>
+const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./gb-world-editor-BET7qZqg.js","./common-1PyUMA7R.js"])))=>i.map(i=>d[i]);
+import{m as t,L as n,_ as a}from"./theme-DCgAGtXn.js";t(n,{target:document.body,props:{beforeMenu:`<span class="brand">GB&nbsp;World&nbsp;Editor <span class="sub">v1</span></span>
     <div class="field" style="flex-direction:row;align-items:center;gap:6px;">
       <label style="margin:0;">Project</label>
       <input type="text" id="project-name" style="width:180px;">
@@ -18,4 +18,4 @@ import{m as t,L as n,_ as a}from"./theme-DaBNiN0a.js";t(n,{target:document.body,
     <button class="tab" data-panel="maps">Maps</button>
   </nav>
 
-  <main id="panel"></main>`,currentPage:"gb-world-editor.html",initialize:()=>a(()=>import("./gb-world-editor-C9ZAqsUw.js"),__vite__mapDeps([0,1]),import.meta.url)}});
+  <main id="panel"></main>`,currentPage:"gb-world-editor.html",initialize:()=>a(()=>import("./gb-world-editor-BET7qZqg.js"),__vite__mapDeps([0,1]),import.meta.url)}});

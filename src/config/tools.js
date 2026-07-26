@@ -10,6 +10,7 @@ export const toolGroups = [
     label: "Graphics",
     tools: [
       { name: "World", href: "gb-world-editor.html" },
+      { name: "Arenas", href: "gb-arena-editor.html" },
       { name: "Sprites", href: "gb-sprite-editor.html" },
     ],
   },

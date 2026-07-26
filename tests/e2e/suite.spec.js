@@ -3,6 +3,7 @@ import { expect, test } from "@playwright/test";
 const pages = [
   "index.html",
   "gb-world-editor.html",
+  "gb-arena-editor.html",
   "gb-sprite-editor.html",
   "gb-music-generator.html",
   "gb-sfx-generator.html",
@@ -19,7 +20,7 @@ for (const path of pages) {
     });
     await page.goto(`/${path}`);
     await expect(page.locator("#app")).toBeVisible();
-    await expect(page.locator("nav.tool-menu a")).toHaveCount(6);
+    await expect(page.locator("nav.tool-menu a")).toHaveCount(7);
     await page.waitForTimeout(150);
     expect(errors).toEqual([]);
   });
@@ -27,8 +28,8 @@ for (const path of pages) {
 
 test("landing page links to every tool and draws all previews", async ({ page }) => {
   await page.goto("/index.html");
-  await expect(page.locator(".tool-card")).toHaveCount(6);
-  await expect(page.locator(".tool-card canvas")).toHaveCount(6);
+  await expect(page.locator(".tool-card")).toHaveCount(7);
+  await expect(page.locator(".tool-card canvas")).toHaveCount(7);
   const painted = await page.locator(".tool-card canvas").evaluateAll((canvases) =>
     canvases.every((canvas) => canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data.some(Boolean)),
   );
@@ -46,7 +47,7 @@ test("world editor switches every panel and exports a valid project", async ({ p
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "Download .json" }).click();
   const file = await download;
-  expect(file.suggestedFilename()).toMatch(/\.gbworld\.json$/);
+  expect(file.suggestedFilename()).toMatch(/Snapjaw_Marsh\.gbarena\.json$/);
 });
 
 test("world editor authors and exports sentinel NPC mode", async ({ page }) => {
@@ -118,3 +119,25 @@ for (const [path] of [["gb-pixelizer.html", "Process"], ["gb-tile-reducer.html",
     await expect(page.locator("#panel canvas").last()).toBeVisible();
   });
 }
+
+test("boss arena editor loads Snapjaw and exports an arena project", async ({ page }) => {
+  await page.goto("/gb-arena-editor.html");
+  await expect(page.locator("#arena-canvas")).toBeVisible();
+  await expect(page.locator("#arena-inspector input").first()).toHaveValue("Snapjaw Marsh");
+  await page.getByRole("button", { name: "Load Snapjaw" }).click();
+  await page.locator("#btn-export").click();
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download .gbarena.json" }).click();
+  const file = await download;
+  expect(file.suggestedFilename()).toMatch(/Snapjaw_Marsh\.gbarena\.json$/);
+  const arena = JSON.parse(await (await import("node:fs/promises")).readFile(await file.path(), "utf8"));
+  expect(arena).toMatchObject({
+    kind: "gb-boss-arena",
+    screen: { width: 20, height: 18, tileSize: 8, camera: "fixed" },
+    markers: { playerSpawn: { x: 5, y: 15 }, bossAnchor: { x: 18, y: 14 } },
+  });
+  expect(arena.terrain[16 * 20]).toBe("solid");
+  expect(arena.terrain[16 * 20 + 10]).toBe("water");
+  expect(arena.terrain[12 * 20 + 3]).toBe("platform");
+  expect(arena.terrain[8 * 20 + 6]).toBe("platform");
+});

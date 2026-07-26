@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 const pages = [
   "index.html",
   "gb-world-editor.html",
+  "gb-arena-editor.html",
   "gb-sprite-editor.html",
   "gb-music-generator.html",
   "gb-sfx-generator.html",
