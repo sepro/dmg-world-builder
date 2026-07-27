@@ -1,5 +1,6 @@
 // @ts-nocheck
 import { el, label, spacer, selectFrom, numberInput, clampInt, toggle, sendImageHandoff, downloadBlob } from "../lib/common.js";
+import { scaleArray } from "../lib/pixelizer-downscale.js";
 
 "use strict";
 
@@ -51,9 +52,11 @@ const state = {
 
   // Pipeline.
   order: "quantize-first",  // quantize-first | scale-first
-  scaleAlgo: "k-centroid",  // k-centroid | dominant | box | nearest
+  scaleAlgo: "edge-preserving", // edge-preserving | luminance-aware | k-centroid | dominant | box | nearest
   targetW: 160,
   kClusters: 3,             // k for k-centroid
+  edgeStrength: 50,         // 0..100 maps to DPID lambda 0..1
+  luminanceSensitivity: 28, // 5..100; lower isolates the dominant luminance more strongly
 
   // Tone controls (applied before anything else).
   autoLevels: true,         // percentile stretch 1..99 before the manual knobs
@@ -206,106 +209,18 @@ function quantizeArr(gray, w, h) {
    ============================================================
 
    Every algorithm maps one output pixel to a floating source block
-   [x0..x1) x [y0..y1) and reduces that block to one value. The reducers work
-   on any numeric array, so the same code scales raw luminance (scale-first)
-   or already-quantized shades (quantize-first, the default). */
+   [x0..x1) x [y0..y1) and reduces that block to one value. Reducers use exact
+   fractional source-pixel coverage and work on either raw luminance
+   (scale-first) or already-quantized shades (quantize-first). */
 
-// Collect a block's non-transparent values. If every source pixel in the block
-// is transparent, the returned array is empty and the output pixel is alpha.
-function blockValues(src, srcAlpha, sw, dx, dy, xRatio, yRatio) {
-  const x0 = Math.floor(dx * xRatio), x1 = Math.max(x0 + 1, Math.ceil((dx + 1) * xRatio));
-  const y0 = Math.floor(dy * yRatio), y1 = Math.max(y0 + 1, Math.ceil((dy + 1) * yRatio));
-  const values = [];
-  for (let y = y0; y < y1; y++)
-    for (let x = x0; x < x1; x++) {
-      const idx = y * sw + x;
-      if (srcAlpha && srcAlpha[idx]) continue;
-      values.push(src[idx]);
-    }
-  return values;
-}
-
-function reduceBox(values) {
-  let sum = 0;
-  for (const v of values) sum += v;
-  return sum / values.length;
-}
-
-function reduceDominant(values) {
-  // Most frequent value. Shade space has 4 values; luminance is bucketed to
-  // integers so "same color" still means something.
-  const counts = new Map();
-  let best = values[0], bestN = 0;
-  for (const v of values) {
-    const key = Math.round(v);
-    const n = (counts.get(key) || 0) + 1;
-    counts.set(key, n);
-    if (n > bestN) { bestN = n; best = key; }
-  }
-  return best;
-}
-
-// 1D k-means over the block's values; return the centroid of the biggest
-// cluster. This is the k-centroid approach: the output pixel takes the
-// block's dominant feature instead of an average across an edge.
-function reduceKCentroid(values, k) {
-  let min = Infinity, max = -Infinity;
-  for (const v of values) { if (v < min) min = v; if (v > max) max = v; }
-  if (max - min < 1e-6 || values.length <= k) return reduceDominant(values);
-
-  // Spread the initial centroids across the block's range.
-  const kk = Math.min(k, 4);
-  const centroids = [];
-  for (let c = 0; c < kk; c++) centroids.push(min + (max - min) * (c + 0.5) / kk);
-
-  const assign = new Array(values.length).fill(0);
-  for (let iter = 0; iter < 8; iter++) {
-    let moved = false;
-    for (let i = 0; i < values.length; i++) {
-      let best = 0, bestD = Infinity;
-      for (let c = 0; c < kk; c++) {
-        const d = Math.abs(values[i] - centroids[c]);
-        if (d < bestD) { bestD = d; best = c; }
-      }
-      if (assign[i] !== best) { assign[i] = best; moved = true; }
-    }
-    const sums = new Array(kk).fill(0), ns = new Array(kk).fill(0);
-    for (let i = 0; i < values.length; i++) { sums[assign[i]] += values[i]; ns[assign[i]]++; }
-    for (let c = 0; c < kk; c++) if (ns[c]) centroids[c] = sums[c] / ns[c];
-    if (!moved) break;
-  }
-
-  let bigC = 0, bigN = -1;
-  const ns = new Array(kk).fill(0);
-  for (const a of assign) ns[a]++;
-  for (let c = 0; c < kk; c++) if (ns[c] > bigN) { bigN = ns[c]; bigC = c; }
-  return centroids[bigC];
-}
-
-function reduceNearest(values) {
-  return values[Math.floor(values.length / 2)];   // center-ish sample
-}
-
-// Returns { out, alpha }: the reduced values and a matching transparency mask
-// (1 where the whole source block was transparent).
-function scaleArray(src, srcAlpha, sw, sh, dw, dh) {
-  const out = new Float32Array(dw * dh);
-  const alpha = new Uint8Array(dw * dh);
-  const xRatio = sw / dw, yRatio = sh / dh;
-  for (let dy = 0; dy < dh; dy++) {
-    for (let dx = 0; dx < dw; dx++) {
-      const i = dy * dw + dx;
-      const values = blockValues(src, srcAlpha, sw, dx, dy, xRatio, yRatio);
-      if (values.length === 0) { alpha[i] = 1; out[i] = 0; continue; }
-      let v;
-      if (state.scaleAlgo === "k-centroid") v = reduceKCentroid(values, state.kClusters);
-      else if (state.scaleAlgo === "dominant") v = reduceDominant(values);
-      else if (state.scaleAlgo === "nearest") v = reduceNearest(values);
-      else v = reduceBox(values);
-      out[i] = v;
-    }
-  }
-  return { out, alpha };
+function downscale(src, srcAlpha, sw, sh, dw, dh, valueRange) {
+  return scaleArray(src, srcAlpha, sw, sh, dw, dh, {
+    algorithm: state.scaleAlgo,
+    kClusters: state.kClusters,
+    edgeStrength: state.edgeStrength,
+    luminanceSensitivity: state.luminanceSensitivity,
+    valueRange,
+  });
 }
 
 /* ============================================================
@@ -329,7 +244,7 @@ function recompute() {
     // Quantize at source resolution, then scale in shade space. The reducers
     // see values 0..3, and the result is rounded back to a valid shade.
     const srcShades = quantizeArr(tone, state.srcW, state.srcH);
-    const scaled = scaleArray(srcShades, alphaMask, state.srcW, state.srcH, dw, dh);
+    const scaled = downscale(srcShades, alphaMask, state.srcW, state.srcH, dw, dh, 3);
     alpha = scaled.alpha;
     shades = new Uint8Array(dw * dh);
     for (let i = 0; i < shades.length; i++) {
@@ -338,7 +253,7 @@ function recompute() {
   } else {
     // Scale the tone-mapped luminance, then quantize (dithering happens at
     // output resolution, which is what dithering usually wants).
-    const scaled = scaleArray(tone, alphaMask, state.srcW, state.srcH, dw, dh);
+    const scaled = downscale(tone, alphaMask, state.srcW, state.srcH, dw, dh, 255);
     alpha = scaled.alpha;
     shades = quantizeArr(scaled.out, dw, dh);
   }
@@ -443,14 +358,25 @@ function paintShades(canvas, shades, alpha, w, h, zoom, colors) {
 }
 
 // A labeled slider row with a live value readout.
+let sliderSerial = 0;
 function sliderRow(text, min, max, step, value, format, onChange) {
   const field = el("div", "field");
-  field.appendChild(label(text));
+  const sliderId = "pixelizer-slider-" + sliderSerial++;
+  const sliderLabel = label(text);
+  sliderLabel.htmlFor = sliderId;
+  field.appendChild(sliderLabel);
   const row = el("div", "slider-row");
   const slider = document.createElement("input");
+  slider.id = sliderId;
   slider.type = "range"; slider.min = min; slider.max = max; slider.step = step; slider.value = value;
-  const val = el("span", "slider-val", format(value));
-  slider.addEventListener("input", () => { val.textContent = format(Number(slider.value)); });
+  slider.setAttribute("aria-valuetext", format(value));
+  const val = el("output", "slider-val", format(value));
+  val.htmlFor = sliderId;
+  slider.addEventListener("input", () => {
+    const formatted = format(Number(slider.value));
+    val.textContent = formatted;
+    slider.setAttribute("aria-valuetext", formatted);
+  });
   slider.addEventListener("change", () => onChange(Number(slider.value)));
   row.append(slider, val);
   field.appendChild(row);
@@ -514,14 +440,44 @@ function render() {
     : "Keeps gradients for the quantizer; dithering happens at output resolution."));
 
   const algoField = el("div", "field");
-  algoField.appendChild(label("Scale algorithm"));
-  algoField.appendChild(selectFrom(
-    [{ value: "k-centroid", label: "K-centroid (recommended)" },
+  const algoLabel = label("Scale algorithm");
+  algoLabel.htmlFor = "scale-algorithm";
+  const algoSelect = selectFrom(
+    [{ value: "edge-preserving", label: "Edge-preserving (recommended)" },
+     { value: "luminance-aware", label: "Luminance-aware" },
+     { value: "k-centroid", label: "K-centroid" },
      { value: "dominant", label: "Dominant value" },
      { value: "box", label: "Box average" },
      { value: "nearest", label: "Nearest sample" }],
-    state.scaleAlgo, v => { state.scaleAlgo = v; recompute(); render(); }));
+    state.scaleAlgo, v => { state.scaleAlgo = v; recompute(); render(); });
+  algoSelect.id = "scale-algorithm";
+  algoField.append(algoLabel, algoSelect);
   ctl.appendChild(algoField);
+
+  if (state.scaleAlgo === "edge-preserving") {
+    const note = el("div", "algorithm-note");
+    note.appendChild(el("span", "algorithm-tag", "Best for fine details"));
+    note.appendChild(el("strong", null, "Edge-preserving"));
+    note.appendChild(el("p", null,
+      "Keeps locally distinctive lines, highlights, and facial details. The balanced default is tuned to preserve thin features without making them look heavy."));
+    ctl.appendChild(note);
+    ctl.appendChild(sliderRow("Detail strength", 0, 100, 5, state.edgeStrength, v => v + "%",
+      v => { state.edgeStrength = v; recompute(); render(); }));
+    ctl.appendChild(el("p", "hint",
+      "Raise it when fine details disappear; lower it if lines thicken or image noise becomes prominent."));
+  } else if (state.scaleAlgo === "luminance-aware") {
+    const note = el("div", "algorithm-note");
+    note.appendChild(el("span", "algorithm-tag", "Best for bold shapes"));
+    note.appendChild(el("strong", null, "Luminance-aware"));
+    note.appendChild(el("p", null,
+      "Favors each block’s dominant light or dark band, keeping silhouettes and region boundaries cleaner than an ordinary average."));
+    ctl.appendChild(note);
+    ctl.appendChild(sliderRow("Edge softness", 5, 100, 1, state.luminanceSensitivity, v => String(v),
+      v => { state.luminanceSensitivity = v; recompute(); render(); }));
+    ctl.appendChild(el("p", "hint",
+      "Lower values make boundaries crisper. Raise it for gentler transitions and less aggressive luminance selection."));
+  }
+
   if (state.scaleAlgo === "k-centroid") {
     const kField = el("div", "field");
     kField.appendChild(label("K (clusters per block, 2-4)"));

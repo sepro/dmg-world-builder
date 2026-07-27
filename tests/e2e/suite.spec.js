@@ -111,6 +111,48 @@ test("SFX generator visualizes, regenerates, and opens export", async ({ page })
   await expect(page.locator("#modal-backdrop")).toBeVisible();
 });
 
+test("pixelizer exposes working edge-preserving and luminance-aware modes", async ({ page }) => {
+  await page.goto("/gb-pixelizer.html");
+  await page.locator("#file-input").setInputFiles("docs/screenshots/landscape-sample.png");
+  await expect(page.locator("#btn-download")).toBeEnabled({ timeout: 30_000 });
+
+  const fieldSelect = (label) => page.locator(".field").filter({ hasText: label }).locator("select");
+  const algorithm = () => fieldSelect("Scale algorithm");
+  await expect(algorithm()).toHaveValue("edge-preserving");
+  await expect(algorithm().locator("option")).toHaveCount(6);
+  await expect(page.getByText("Best for fine details", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Detail strength", { exact: true })).toHaveValue("50");
+
+  await fieldSelect("Order").selectOption("scale-first");
+  const widthInput = page.locator(".field").filter({ hasText: "Output width" }).locator("input[type=number]");
+  await widthInput.evaluate((input) => {
+    input.value = "32";
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+
+  const checksum = () => page.locator("#panel canvas").last().evaluate((canvas) => {
+    const data = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
+    let hash = 2166136261;
+    for (let i = 0; i < data.length; i += 4) {
+      hash ^= data[i] + data[i + 1] * 3 + data[i + 2] * 7 + data[i + 3] * 11;
+      hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+  });
+  const edgeChecksum = await checksum();
+
+  await algorithm().selectOption("luminance-aware");
+  await expect(page.getByText("Best for bold shapes", { exact: true })).toBeVisible();
+  const softness = page.getByLabel("Edge softness", { exact: true });
+  await expect(softness).toHaveValue("28");
+  const luminanceChecksum = await checksum();
+  expect(luminanceChecksum).not.toBe(edgeChecksum);
+
+  await softness.fill("5");
+  const crispChecksum = await checksum();
+  expect(crispChecksum).not.toBe(luminanceChecksum);
+});
+
 for (const [path] of [["gb-pixelizer.html", "Process"], ["gb-tile-reducer.html", "Reduce"]]) {
   test(`${path} loads and processes an image`, async ({ page }) => {
     await page.goto(`/${path}`);
