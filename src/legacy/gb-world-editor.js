@@ -135,12 +135,20 @@ const FACINGS = ["down", "up", "left", "right"];
 const WARP_TYPES = ["transport", "door", "stairs", "fall"];
 // Facing after the warp; "same" keeps the direction the player walked in with.
 const WARP_FACINGS = ["same", "up", "down", "left", "right"];
+// A warp may ask before it travels: with a question authored ("prompt"), the
+// engine types it in a textbox and only warps if the player answers YES, and
+// promptDefault says which option the cursor starts on. An empty question is
+// the plain warp that fires the moment it is stepped on. The question is
+// built through the same runtime buffer as sign text, so it shares its limits.
+const WARP_PROMPT_DEFAULTS = [{ value: "no", label: "NO" }, { value: "yes", label: "YES" }];
+const SIGN_MAX_LINES = 6;
+const SIGN_MAX_CHARS = 18;
 
 // Build a fresh event with sensible per-type defaults.
 function makeEvent(type, x, y) {
   const e = { id: 0, type, x, y };   // id is filled in by the caller via genId()
   if (type === "spawn") { e.facing = "down"; e.isDefault = false; }
-  else if (type === "warp") { e.toMap = null; e.toX = 0; e.toY = 0; e.warpType = "transport"; e.facing = "same"; }
+  else if (type === "warp") { e.toMap = null; e.toX = 0; e.toY = 0; e.warpType = "transport"; e.facing = "same"; e.prompt = ""; e.promptDefault = "no"; }
   else if (type === "sign") { e.text = ""; }
   else if (type === "item") { e.item = ""; e.qty = 1; e.flag = ""; }
   else if (type === "npc") { e.sprite = ""; e.movement = "static"; e.facing = "player"; e.offsetX = 0; e.offsetY = 0; e.path = []; e.script = ""; }
@@ -2777,6 +2785,63 @@ function renderEventInspector(map) {
     ff.appendChild(selectFrom(WARP_FACINGS, ev.facing || "same", v => { snapshot(); ev.facing = v; render(); }));
     card.appendChild(ff);
     card.appendChild(spacer(8));
+
+    // Ask before warping: with a question authored, stepping on the tile
+    // types it in a textbox and offers NO/YES instead of warping straight
+    // away. Unticking clears the question, which is what turns the confirm
+    // back off -- an empty question is the plain step-on warp.
+    const askWrap = el("div", "field");
+    const askLabel = document.createElement("label");
+    askLabel.className = "checkbox";
+    const askCb = document.createElement("input");
+    askCb.type = "checkbox";
+    askCb.checked = !!(ev.prompt || "").trim();
+    askCb.addEventListener("change", () => {
+      snapshot();
+      ev.prompt = askCb.checked ? (ev.prompt || "WOULD YOU LIKE TO\nTRAVEL?") : "";
+      if (!ev.promptDefault) ev.promptDefault = "no";
+      render();
+    });
+    askLabel.append(askCb, document.createTextNode(" Ask before warping (YES/NO)"));
+    askWrap.appendChild(askLabel);
+    card.appendChild(askWrap);
+    card.appendChild(spacer(8));
+
+    if (askCb.checked) {
+      const qf = el("div", "field");
+      qf.appendChild(label("Question (one line per textbox row)"));
+      const ta = document.createElement("textarea");
+      ta.value = ev.prompt || "";
+      ta.rows = 3;
+      ta.style.width = "220px";
+      ta.addEventListener("input", () => { ev.prompt = ta.value; renderPromptWarning(); });
+      qf.appendChild(ta);
+      card.appendChild(qf);
+      const warn = el("p", "hint", "");
+      card.appendChild(warn);
+      const renderPromptWarning = () => {
+        // Mirrors what the converter warns about: the engine drops what does
+        // not fit instead of wrapping, so over-long text is silently cut.
+        const lines = (ev.prompt || "").split("\n");
+        const long = lines.filter(l => l.length > SIGN_MAX_CHARS).length;
+        warn.textContent =
+          lines.length > SIGN_MAX_LINES
+            ? "Only the first " + SIGN_MAX_LINES + " lines are shown in game."
+            : long
+              ? long + " line(s) over " + SIGN_MAX_CHARS + " chars — the rest runs off the box."
+              : "Up to " + SIGN_MAX_LINES + " lines of " + SIGN_MAX_CHARS +
+                " chars, shown 2 rows at a time.";
+      };
+      renderPromptWarning();
+      card.appendChild(spacer(8));
+
+      const df = el("div", "field");
+      df.appendChild(label("Cursor starts on"));
+      df.appendChild(selectFrom(WARP_PROMPT_DEFAULTS, ev.promptDefault || "no",
+                                v => { snapshot(); ev.promptDefault = v; render(); }));
+      card.appendChild(df);
+      card.appendChild(spacer(8));
+    }
   } else if (ev.type === "sign") {
     addText("Sign text", "text");
   } else if (ev.type === "item") {
@@ -2894,7 +2959,7 @@ function renderEventList(map) {
     return card;
   }
   const summarize = (e) => {
-    if (e.type === "warp") { const d = mapById(e.toMap); return (e.warpType || "transport") + " to " + (d ? d.name : "(unset)") + " (" + e.toX + "," + e.toY + ")"; }
+    if (e.type === "warp") { const d = mapById(e.toMap); return (e.warpType || "transport") + " to " + (d ? d.name : "(unset)") + " (" + e.toX + "," + e.toY + ")" + ((e.prompt || "").trim() ? " — asks first" : ""); }
     if (e.type === "sign") return e.text ? '"' + e.text.slice(0, 24) + '"' : "(no text)";
     if (e.type === "item") return (e.item || "(unset)") + (e.qty > 1 ? " x" + e.qty : "");
     if (e.type === "npc") return e.sprite || "(no sprite)";
@@ -3635,6 +3700,11 @@ function loadProjectFrom(text) {
       if (e.type === "warp") {
         if (!e.warpType) e.warpType = "transport";
         if (!e.facing) e.facing = "same";
+        // Older files predate the confirm question; no question means the
+        // warp keeps firing on contact, which is what they authored.
+        if (typeof e.prompt !== "string") e.prompt = "";
+        if (!WARP_PROMPT_DEFAULTS.some(d => d.value === e.promptDefault))
+          e.promptDefault = "no";
       } else if (e.type === "npc") {
         // Normalize older/hand-authored NPCs so the value shown in each select
         // is also the value a no-op re-export writes. Sentinel p1 must be a
