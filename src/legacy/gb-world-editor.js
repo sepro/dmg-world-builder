@@ -167,7 +167,7 @@ function makeEvent(type, x, y) {
   if (type === "spawn") { e.facing = "down"; e.isDefault = false; }
   else if (type === "warp") { e.toMap = null; e.toX = 0; e.toY = 0; e.warpType = "transport"; e.facing = "same"; e.prompt = ""; e.promptDefault = "no"; }
   else if (type === "sign") { e.text = ""; }
-  else if (type === "item") { e.item = ""; e.qty = 1; e.pickup = "visible"; e.flag = ""; }
+  else if (type === "item") { e.item = ""; e.qty = 1; e.pickup = "visible"; }
   else if (type === "npc") { e.sprite = ""; e.movement = "static"; e.facing = "player"; e.offsetX = 0; e.offsetY = 0; e.path = []; e.script = ""; }
   else if (type === "trigger") { e.script = ""; }
   else if (type === "dialog") { e.w = 1; e.h = 1; e.text = ""; }
@@ -2874,8 +2874,9 @@ function renderEventInspector(map) {
     card.appendChild(pf);
     card.appendChild(el("p", "hint", ITEM_PICKUP_HINTS[pickup] || ""));
     card.appendChild(spacer(8));
-
-    addText("Flag id (so it can't be taken twice)", "flag");
+    // No flag to author: an item cannot be taken twice in a run because the
+    // engine keys its collected-pickups mask off a global ordinal the
+    // converter derives from event order, so the id is automatic.
   } else if (ev.type === "npc") {
     addText("Sprite id", "sprite");
     const f = el("div", "field");
