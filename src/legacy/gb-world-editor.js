@@ -143,6 +143,23 @@ const WARP_FACINGS = ["same", "up", "down", "left", "right"];
 const WARP_PROMPT_DEFAULTS = [{ value: "no", label: "NO" }, { value: "yes", label: "YES" }];
 const SIGN_MAX_LINES = 6;
 const SIGN_MAX_CHARS = 18;
+// How an item pickup is presented and taken. A visible item draws its sprite
+// and is a solid object: the player walks up to it and takes it with A from
+// the tile in front. The two hidden modes draw no sprite at all -- the item
+// is meant to be part of the background art, a crate or a snowdrift, and adds
+// no collision of its own -- and differ only in where the player stands:
+// "hidden" is faced from the neighbouring tile exactly like a visible one,
+// "search" is found by standing on the item's own cell and pressing A.
+const ITEM_PICKUPS = [
+  { value: "visible", label: "Visible (sprite, blocks the tile)" },
+  { value: "hidden", label: "Hidden — face it from the next tile" },
+  { value: "search", label: "Hidden — search from on top of it" },
+];
+const ITEM_PICKUP_HINTS = {
+  visible: "Draws the item sprite and blocks its cell. Taken with A from the tile in front of it.",
+  hidden: "No sprite and no collision — put it in background art. Taken with A from the neighbouring tile, facing it.",
+  search: "No sprite and no collision. Taken with A while standing on this cell, so make sure the cell is walkable.",
+};
 
 // Build a fresh event with sensible per-type defaults.
 function makeEvent(type, x, y) {
@@ -150,7 +167,7 @@ function makeEvent(type, x, y) {
   if (type === "spawn") { e.facing = "down"; e.isDefault = false; }
   else if (type === "warp") { e.toMap = null; e.toX = 0; e.toY = 0; e.warpType = "transport"; e.facing = "same"; e.prompt = ""; e.promptDefault = "no"; }
   else if (type === "sign") { e.text = ""; }
-  else if (type === "item") { e.item = ""; e.qty = 1; e.flag = ""; }
+  else if (type === "item") { e.item = ""; e.qty = 1; e.pickup = "visible"; e.flag = ""; }
   else if (type === "npc") { e.sprite = ""; e.movement = "static"; e.facing = "player"; e.offsetX = 0; e.offsetY = 0; e.path = []; e.script = ""; }
   else if (type === "trigger") { e.script = ""; }
   else if (type === "dialog") { e.w = 1; e.h = 1; e.text = ""; }
@@ -2847,6 +2864,17 @@ function renderEventInspector(map) {
   } else if (ev.type === "item") {
     addText("Item id", "item");
     addNumber("Quantity", "qty", 1, 99);
+
+    const pf = el("div", "field");
+    pf.appendChild(label("Pickup"));
+    // Older worlds have no pickup field; they are all visible items.
+    const pickup = ev.pickup || "visible";
+    pf.appendChild(selectFrom(ITEM_PICKUPS, pickup,
+                              v => { snapshot(); ev.pickup = v; render(); }));
+    card.appendChild(pf);
+    card.appendChild(el("p", "hint", ITEM_PICKUP_HINTS[pickup] || ""));
+    card.appendChild(spacer(8));
+
     addText("Flag id (so it can't be taken twice)", "flag");
   } else if (ev.type === "npc") {
     addText("Sprite id", "sprite");
@@ -2961,7 +2989,13 @@ function renderEventList(map) {
   const summarize = (e) => {
     if (e.type === "warp") { const d = mapById(e.toMap); return (e.warpType || "transport") + " to " + (d ? d.name : "(unset)") + " (" + e.toX + "," + e.toY + ")" + ((e.prompt || "").trim() ? " — asks first" : ""); }
     if (e.type === "sign") return e.text ? '"' + e.text.slice(0, 24) + '"' : "(no text)";
-    if (e.type === "item") return (e.item || "(unset)") + (e.qty > 1 ? " x" + e.qty : "");
+    if (e.type === "item") {
+      // Hidden items draw nothing in game, so the list is the only place the
+      // author sees which ones they are.
+      const hidden = e.pickup === "hidden" ? " (hidden)"
+                   : e.pickup === "search" ? " (search)" : "";
+      return (e.item || "(unset)") + (e.qty > 1 ? " x" + e.qty : "") + hidden;
+    }
     if (e.type === "npc") return e.sprite || "(no sprite)";
     if (e.type === "trigger") return e.script || "(no script)";
     if (e.type === "dialog") return (e.w || 1) + "x" + (e.h || 1) +

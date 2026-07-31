@@ -50,6 +50,31 @@ test("world editor switches every panel and exports a valid project", async ({ p
   expect(file.suggestedFilename()).toMatch(/Snapjaw_Marsh\.gbarena\.json$/);
 });
 
+test("world editor authors an item's pickup mode", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto("/gb-world-editor.html");
+  await page.locator('.tab[data-panel="maps"]').click();
+  await page.getByRole("button", { name: "Events", exact: true }).click();
+  await page.getByRole("button", { name: "Item", exact: true }).click();
+  await page.locator("canvas.map-canvas").click({ position: { x: 100, y: 100 } });
+
+  const inspector = page.locator(".card").filter({
+    has: page.getByRole("heading", { name: "Item event" }),
+  });
+  const pickup = inspector.locator(".field", { hasText: "Pickup" }).locator("select");
+  await expect(pickup).toHaveValue("visible");
+  await expect(inspector.getByText(/blocks its cell/)).toBeVisible();
+
+  await pickup.selectOption("search");
+  await expect(inspector.getByText(/standing on this cell/)).toBeVisible();
+  await expect(page.getByText(/\(search\)/)).toBeVisible();
+
+  await pickup.selectOption("hidden");
+  await expect(inspector.getByText(/neighbouring tile/)).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
 test("world editor authors and exports sentinel NPC mode", async ({ page }) => {
   await page.goto("/gb-world-editor.html");
   await page.locator('.tab[data-panel="maps"]').click();
