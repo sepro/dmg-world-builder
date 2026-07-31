@@ -42,6 +42,7 @@ export const KNOWN_NPC_SPRITES = [
   { value: "ice_block", label: "ice_block — object, shattered with the icebreaker pick" },
   { value: "snapjaw", label: "snapjaw — boss encounter" },
   { value: "viking_warrior", label: "viking_warrior — talkable, sail offer" },
+  { value: "viking_warrior_boss", label: "viking_warrior_boss — boss encounter" },
   { value: "viking_sentinel", label: "viking_sentinel — blocks its tile, cannot be talked to" },
   { value: "mock_walker", label: "mock_walker — talkable" },
 ];
