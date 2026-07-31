@@ -90,6 +90,25 @@ The editor's left rail switches between panels; the typical bottom-up workflow i
 Painting tools, zoom, selection, and undo/redo (a single pointer stroke collapses
 to one undo step) operate on the active panel.
 
+## Item and NPC ids
+
+An **Item** event and an **NPC** event each name a row in one of the engine's
+registries — the item roster and the NPC sprite/dialog table — so both are
+picked from a dropdown of what the engine implements today rather than typed.
+The list is a convenience, not a limit: the JSON stores whatever string is
+chosen and the engine resolves it by name when the map loads, so a world can be
+authored ahead of the code. Pick **Other (type a name)…** for a name no
+registry row carries yet and type it into the box that appears; an imported
+world whose id is not on the list opens in that same free-text state, so
+nothing is silently rewritten. A name that never gains a registry row simply
+finds nothing in game.
+
+Both lists live in `src/lib/wispbound-catalog.js`, which is **generated** — the
+game repo writes it from its two registries (`tools/registry_to_editor_catalog.py`,
+run by `tools/generate_assets.sh`) and commits the result here, so the dropdown
+cannot drift from the names the engine matches. Regenerate it there rather than
+editing the file.
+
 ## NPC movement modes
 
 NPC events have a **Movement** selector whose value is stored in the exported

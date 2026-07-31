@@ -46,6 +46,8 @@ The mature imperative rendering engine is bundled as a module behind the shared 
 
 Event/warp coordinates are in **metatile cells** (2× the block resolution per axis). Map size and `blockGrid` are in **blocks**.
 
+**Generated catalog**: `src/lib/wispbound-catalog.js` holds the item ids and NPC sprite ids the Item/NPC event dropdowns offer. It is written by the *game* repo (`tools/registry_to_editor_catalog.py`, run from `tools/generate_assets.sh`) out of `item_registry.c`/`npc_registry.c` and committed here, so the editor stays standalone while the names cannot drift from what the engine matches with `strcmp`. Don't hand-edit it, and keep the "Other (type a name)…" escape hatch: the JSON stores whatever string is authored, so a world may be written ahead of the code.
+
 **World PNG export** (Maps panel): `layoutWorldMaps` + `renderWorldCanvas` stitch all maps into one canvas by walking edge connections; the layout must keep following the same offset convention as the engine's converter (positive = right for N/S links, down for E/W links; disconnected components stack vertically with a one-block gap).
 
 ### Sprite editor engine (`src/legacy/gb-sprite-editor.js`)

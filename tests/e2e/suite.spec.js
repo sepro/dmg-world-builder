@@ -77,6 +77,44 @@ test("world editor authors an item's pickup mode", async ({ page }) => {
   expect(errors).toEqual([]);
 });
 
+test("world editor picks item and NPC ids from the implemented catalogs", async ({ page }) => {
+  await page.goto("/gb-world-editor.html");
+  await page.locator('.tab[data-panel="maps"]').click();
+  await page.getByRole("button", { name: "Events", exact: true }).click();
+
+  await page.getByRole("button", { name: "Item", exact: true }).click();
+  await page.locator("canvas.map-canvas").click({ position: { x: 100, y: 100 } });
+  const itemCard = page.locator(".card").filter({
+    has: page.getByRole("heading", { name: "Item event" }),
+  });
+  const item = itemCard.locator(".field").filter({ hasText: "Item" }).first().locator("select");
+  await expect(item).toHaveValue("");
+  await item.selectOption("meteorite_ore");
+
+  await page.getByRole("button", { name: "NPC", exact: true }).click();
+  await page.locator("canvas.map-canvas").click({ position: { x: 160, y: 100 } });
+  const npcCard = page.locator(".card").filter({
+    has: page.getByRole("heading", { name: "NPC event" }),
+  });
+  const sprite = npcCard.locator(".field").filter({ hasText: "Sprite" }).first().locator("select");
+  await sprite.selectOption("Blacksmith");
+
+  // The escape hatch: a name the running build has no registry row for yet
+  // still exports, typed into the free-text box "Other…" reveals.
+  await sprite.selectOption("__other__");
+  const custom = npcCard.locator(".field").filter({ hasText: "Name" }).locator("input");
+  await custom.fill("not_yet_implemented");
+
+  await page.locator("#btn-export").click();
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download .json" }).click();
+  const download = await downloadPromise;
+  const json = JSON.parse(await (await import("node:fs/promises")).readFile(await download.path(), "utf8"));
+  const events = json.maps.flatMap((map) => map.events);
+  expect(events.find((e) => e.type === "item").item).toBe("meteorite_ore");
+  expect(events.find((e) => e.type === "npc").sprite).toBe("not_yet_implemented");
+});
+
 test("world editor authors and exports sentinel NPC mode", async ({ page }) => {
   await page.goto("/gb-world-editor.html");
   await page.locator('.tab[data-panel="maps"]').click();

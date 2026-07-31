@@ -1,5 +1,6 @@
 // @ts-nocheck
 import { el, label, spacer, inputText, selectFrom, numberInput, clampInt, toggle, openModal, closeModal, downloadBlob, downloadText, copyText } from "../lib/common.js";
+import { KNOWN_ITEMS, KNOWN_NPC_SPRITES } from "../lib/wispbound-catalog.js";
 
 "use strict";
 
@@ -160,6 +161,14 @@ const ITEM_PICKUP_HINTS = {
   hidden: "No sprite and no collision — put it in background art. Taken with A from the neighbouring tile, facing it.",
   search: "No sprite and no collision. Taken with A while standing on this cell, so make sure the cell is walkable.",
 };
+
+// The item ids and NPC sprite ids the engine implements are generated from
+// the game's registries -- see the header of wispbound-catalog.js. They are a
+// convenience list, not a contract: the JSON stores whatever string is
+// authored and the engine resolves it by name at load, so a world may be
+// authored ahead of the code through the "Other..." escape hatch below.
+// Sentinel value for the "type your own" option in a catalog dropdown.
+const CATALOG_OTHER = "__other__";
 
 // Build a fresh event with sensible per-type defaults.
 function makeEvent(type, x, y) {
@@ -353,6 +362,10 @@ const state = {
   selectedEventId: null,
   pathEdit: null,         // id of the NPC event whose waypoint path is being
                           // placed by clicking the map (events mode); null off
+  catalogOther: {},       // "<eventId>:<field>" -> true while that catalog
+                          // dropdown is showing its free-text box, so picking
+                          // "Other…" survives the re-render before anything is
+                          // typed (editor-only, never serialized)
   ink: 3,                 // current pixel value to paint (0..3)
   tool: "pencil",         // pencil | fill | eyedropper
   selectedFrame: 0,       // which animation frame the tile editor edits (0 = base)
@@ -374,6 +387,8 @@ function syncSelectionsToProject() {
   state.selectedCell = 0;
   state.selectedMapId = p.maps[0] ? p.maps[0].id : null;
   state.paintBlockId = ts && ts.blocks[0] ? ts.blocks[0].id : null;
+  // Keyed by event id, which the imported project reassigns.
+  state.catalogOther = {};
 }
 
 /* ============================================================
@@ -2699,6 +2714,40 @@ function renderEventInspector(map) {
     card.appendChild(f);
     card.appendChild(spacer(8));
   };
+  // A registry id picked from a catalog of what the engine implements today.
+  // The stored value is still a plain string, so "Other…" keeps a free-text
+  // box for a name the running build does not carry yet.
+  const addCatalog = (lbl, key, catalog, emptyLabel) => {
+    const value = ev[key] || "";
+    const otherKey = ev.id + ":" + key;
+    // An authored name the catalog does not list falls into "Other…" on its
+    // own (an older world, or one written ahead of the code); the flag covers
+    // the other direction, where "Other…" was picked but nothing typed yet.
+    const other = !!state.catalogOther[otherKey] ||
+                  (!!value && !catalog.some(o => o.value === value));
+    const f = el("div", "field");
+    f.appendChild(label(lbl));
+    const options = [{ value: "", label: emptyLabel }, ...catalog,
+                     { value: CATALOG_OTHER, label: "Other (type a name)…" }];
+    f.appendChild(selectFrom(options, other ? CATALOG_OTHER : value, v => {
+      snapshot();
+      if (v === CATALOG_OTHER) { state.catalogOther[otherKey] = true; }
+      else { delete state.catalogOther[otherKey]; ev[key] = v; }
+      render();
+    }));
+    card.appendChild(f);
+    if (other) {
+      const tf = el("div", "field");
+      tf.appendChild(label("Name"));
+      const i = inputText(value, 220);
+      i.addEventListener("input", () => { ev[key] = i.value; });
+      tf.appendChild(i);
+      card.appendChild(tf);
+      card.appendChild(el("p", "hint",
+        "Exported as typed. The engine looks this name up in its registry at load, so it must match a row there by the time the world ships."));
+    }
+    card.appendChild(spacer(8));
+  };
   const addNumber = (lbl, key, min, max) => {
     const f = el("div", "field");
     f.appendChild(label(lbl));
@@ -2862,7 +2911,7 @@ function renderEventInspector(map) {
   } else if (ev.type === "sign") {
     addText("Sign text", "text");
   } else if (ev.type === "item") {
-    addText("Item id", "item");
+    addCatalog("Item", "item", KNOWN_ITEMS, "— pick an item —");
     addNumber("Quantity", "qty", 1, 99);
 
     const pf = el("div", "field");
@@ -2878,7 +2927,7 @@ function renderEventInspector(map) {
     // engine keys its collected-pickups mask off a global ordinal the
     // converter derives from event order, so the id is automatic.
   } else if (ev.type === "npc") {
-    addText("Sprite id", "sprite");
+    addCatalog("Sprite", "sprite", KNOWN_NPC_SPRITES, "— pick an NPC —");
     const f = el("div", "field");
     f.appendChild(label("Movement"));
     f.appendChild(selectFrom(NPC_MOVEMENTS, ev.movement, v => {
