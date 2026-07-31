@@ -47,7 +47,9 @@ test("world editor switches every panel and exports a valid project", async ({ p
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "Download .json" }).click();
   const file = await download;
-  expect(file.suggestedFilename()).toMatch(/Snapjaw_Marsh\.gbarena\.json$/);
+  // The world editor exports the world format, named after project.meta.name
+  // ("Untitled World" by default) -- not the arena editor's .gbarena.json.
+  expect(file.suggestedFilename()).toMatch(/^Untitled_World\.gbworld\.json$/);
 });
 
 test("world editor authors an item's pickup mode", async ({ page }) => {
@@ -93,7 +95,8 @@ test("world editor authors and exports sentinel NPC mode", async ({ page }) => {
   await expect(facing).toHaveValue("up");
   await expect(facing.locator('option[value="player"]')).toHaveCount(0);
   await facing.selectOption("left");
-  await expect(inspector.getByText(/turns clockwise every second/)).toBeVisible();
+  // Two seconds, matching ow_npc_tick_sentinels in the engine.
+  await expect(inspector.getByText(/turns clockwise every two seconds/)).toBeVisible();
 
   await page.locator("#btn-export").click();
   const downloadPromise = page.waitForEvent("download");
