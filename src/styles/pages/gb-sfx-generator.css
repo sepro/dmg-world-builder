@@ -45,6 +45,21 @@
   .viz-legend { display: flex; gap: 14px; font-size: 10px; color: var(--muted); margin: 4px 0 10px; text-transform: uppercase; letter-spacing: 0.06em; }
   .viz-legend .sw { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: -1px; border: 1px solid var(--gb-3); }
 
+  /* sequence editor: roll on the left, exact values on the right */
+  .seq-wrap { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+  .seq-wrap > div { flex: 1 1 220px; min-width: 200px; }
+  .seq-roll { border: 1px solid var(--border); background: var(--gb-3); }
+  .seq-roll canvas { display: block; width: 100%; height: 200px; touch-action: none; }
+  .seq-table-wrap { max-height: 260px; overflow: auto; }
+  .seq-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  .seq-table th, .seq-table td { border: 1px solid var(--line); padding: 2px 4px; text-align: center; }
+  .seq-table th { color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; font-size: 9px; }
+  .seq-table tr.sel td { background: var(--panel-2); border-color: var(--accent); }
+  .seq-table .seq-in { padding: 1px 3px; font-size: 11px; }
+  .seq-table .seq-act { white-space: nowrap; }
+  .seq-table .seq-act button { padding: 1px 5px; margin: 0 1px; }
+  .seq-table .seq-act button.active { border-color: var(--accent); color: var(--accent); }
+
   /* advanced drawer */
   .adv { border-top: 1px dashed var(--line); margin-top: 10px; padding-top: 10px; }
   .adv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }

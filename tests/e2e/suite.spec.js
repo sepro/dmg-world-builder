@@ -177,6 +177,36 @@ test("SFX generator visualizes, regenerates, and opens export", async ({ page })
   await expect(page.locator("#modal-backdrop")).toBeVisible();
 });
 
+test("SFX generator authors a note sequence and exports it compressed", async ({ page }) => {
+  await page.goto("/gb-sfx-generator.html");
+  await page.getByRole("button", { name: "Win fanfare" }).click();
+
+  // The chime preset lands in a sequence layer: piano roll on the left, one
+  // table row per note on the right.
+  await expect(page.locator(".seq-roll canvas")).toBeVisible();
+  await expect(page.locator(".seq-table tr[data-note-row]")).toHaveCount(4);
+
+  // Editing a note by name round-trips through the model into the roll.
+  const firstPitch = page.locator('.seq-table input[data-note-field="pitch"]').first();
+  await expect(firstPitch).toHaveValue("C5");
+  await firstPitch.fill("G4");
+  await firstPitch.dispatchEvent("change");
+  await expect(firstPitch).toHaveValue("G4");
+
+  // The C export must use the hold opcode (0x03) rather than a frame's worth
+  // of register writes per tick -- that is what keeps a 1-2 s chime small.
+  await page.locator("#btn-export").click();
+  await page.getByRole("button", { name: "Show gbsfx.c / .h (selected)" }).click();
+  const cText = await page.locator("#modal-backdrop textarea").nth(1).inputValue();
+  expect(cText).toContain("sfx_hold");
+  const data = /sfx_data_0\[\] = \{([\s\S]*?)\};/.exec(cText);
+  expect(data).not.toBeNull();
+  expect(data[1]).toContain("0x03");
+  // Uncompressed, the preset's ~48 frames would be seven bytes each.
+  const bytes = (data[1].match(/0x[0-9A-F]{2}/g) || []).length;
+  expect(bytes).toBeLessThan(80);
+});
+
 test("pixelizer exposes working edge-preserving and luminance-aware modes", async ({ page }) => {
   await page.goto("/gb-pixelizer.html");
   await page.locator("#file-input").setInputFiles("docs/screenshots/landscape-sample.png");

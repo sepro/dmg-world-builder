@@ -9,7 +9,9 @@ import { el, label, spacer, inputText, selectFrom, numberInput, clampInt, toggle
 
 const FORMAT_VERSION = 1;
 const DEFAULT_TICK_HZ = 60;      // effects step once per frame by default
-const MAX_FRAMES = 300;          // safety ceiling (~5 s at 60 Hz)
+const MAX_FRAMES = 300;          // safety ceiling for one macro layer (~5 s at 60 Hz)
+const MAX_SEQ_FRAMES = 900;      // ceiling for a whole note sequence (~15 s at 60 Hz)
+const MAX_NOTE_FRAMES = 240;     // ceiling for a single note in a sequence
 
 // The four channels. `base` is the address of the first of the five audio
 // registers the C player writes for that channel (0xFF15 / 0xFF1F land on the
@@ -84,6 +86,42 @@ const CATEGORY_CHANNEL = {
 };
 
 /* ============================================================
+   Sequence presets (multi-note chimes)
+   ============================================================
+   A single macro layer is one tone: it can bend or jump, but it cannot say
+   "C5, E5, G5, C6". These presets seed a `sequence` layer -- a list of notes
+   played back through the layer's macro timbre -- for the sounds that are
+   inherently a little tune: victory, death, item get. `notes` are authored as
+   [semitones-above-the-root, length-in-frames] pairs plus an optional tie, and
+   `root` is the MIDI note the offsets are measured from, so a preset can be
+   transposed by moving one number.
+*/
+
+const SEQUENCE_PRESETS = [
+  {
+    key: "win", label: "Win", hint: "fanfare",
+    channel: "pulse1", root: 72,
+    macro: { punch: 0.75, decay: 0.16, sustain: 0.35, duty: 2 },
+    // Rising major arpeggio, the last note held long and let ring.
+    notes: [[0, 6], [4, 6], [7, 6], [12, 30]],
+  },
+  {
+    key: "death", label: "Death", hint: "fail",
+    channel: "pulse2", root: 69,
+    macro: { punch: 0.6, decay: 0.22, sustain: 0.2, duty: 1 },
+    // Descending minor figure, slowing, ending on a long low note.
+    notes: [[0, 10], [-3, 10], [-5, 14], [-12, 40]],
+  },
+  {
+    key: "itemget", label: "Item get", hint: "flourish",
+    channel: "pulse1", root: 79,
+    macro: { punch: 0.85, decay: 0.45, sustain: 0, duty: 2 },
+    // Two quick notes into a held third -- the classic pickup jingle.
+    notes: [[0, 5], [5, 5], [12, 18]],
+  },
+];
+
+/* ============================================================
    Macro model
    ============================================================
    A macro is the guided, semantic description of a sound. Fields are shared
@@ -153,12 +191,56 @@ function makeLayer(proj, category) {
     id: proj.nextId++,
     channel,
     category: cat,
-    mode: "macro",          // "macro" (generated) or "manual" (hand-edited frames)
+    // "macro" (generated from sliders), "manual" (hand-edited frames), or
+    // "sequence" (a list of notes played through the macro's timbre).
+    mode: "macro",
     macro: categoryMacro(cat),
     wavePreset: "triangle", // used only when channel === "wave"
     gain: 1,                // playback mix level, not exported to hardware
     steps: null,            // populated when mode === "manual"
+    notes: null,            // populated when mode === "sequence"
   };
+}
+
+/* A note in a sequence layer. Pitched channels use `note` (MIDI); the noise
+   channel uses `noiseTone` (0..15). `len` is the note's length in frames.
+   `tie` means "don't re-trigger the note after me": the hardware envelope
+   carries on and only the pitch changes, which is how a held or gliding
+   phrase is written. `vol` scales the attack volume of this note's trigger
+   (0..15), so a phrase can be shaped without touching the layer's macro. */
+function makeNote(overrides) {
+  return Object.assign({
+    note: 72,
+    noiseTone: 8,
+    len: 6,
+    tie: false,
+    vol: 15,
+    rest: false,
+  }, overrides || {});
+}
+
+// Build a sequence layer from one of the SEQUENCE_PRESETS rows.
+function makeSequenceLayer(proj, preset) {
+  const layer = makeLayer(proj, "custom");
+  layer.channel = preset.channel;
+  layer.category = "custom";
+  layer.mode = "sequence";
+  layer.macro = makeMacro(Object.assign({ lengthMs: 240 }, preset.macro));
+  layer.notes = preset.notes.map(([semi, len, tie]) => makeNote({
+    note: preset.root + semi,
+    noiseTone: 8,
+    len,
+    tie: !!tie,
+  }));
+  return layer;
+}
+
+// Total length of a sequence in frames (what the roll and the C export span).
+function sequenceFrames(layer) {
+  const notes = layer.notes || [];
+  let total = 0;
+  for (let i = 0; i < notes.length; i++) total += clampInt(notes[i].len, 1, MAX_NOTE_FRAMES);
+  return Math.min(total, MAX_SEQ_FRAMES);
 }
 
 function defaultEffectName(category, id) {
@@ -175,6 +257,7 @@ const state = {
   selectedEffectId: null,
   advanced: false,
   paintLane: null,          // active drag lane in manual mode: "pitch" | "vol"
+  selNote: null,            // { layerId, index } selected note in a sequence layer
 };
 state.selectedEffectId = state.project.effects[0].id;
 
@@ -249,6 +332,9 @@ function compileLayer(effect, layer) {
   if (layer.mode === "manual" && Array.isArray(layer.steps)) {
     return compileManual(layer, tickHz);
   }
+  if (layer.mode === "sequence" && Array.isArray(layer.notes)) {
+    return compileSequence(layer, tickHz);
+  }
 
   const m = layer.macro;
   const nFrames = clampInt(Math.round((m.lengthMs / 1000) * tickHz), 1, MAX_FRAMES);
@@ -272,7 +358,11 @@ function compileLayer(effect, layer) {
     if (attackFrames > 0 && i < attackFrames) v *= (i + 1) / (attackFrames + 1);
     const vol = clampInt(Math.round(v), 0, 15);
 
-    const frame = { vol, duty: m.duty, width: m.width };
+    // trigger/remain/env are what the export needs: where the channel is
+    // keyed, how much of the sound is still to come (the length counter is
+    // loaded with the remainder on every write), and the envelope's starting
+    // volume. A macro layer is one note, so it keys once on frame 0.
+    const frame = { vol, duty: m.duty, width: m.width, trigger: i === 0, remain: nFrames - i, env: peakVol };
 
     if (ch === "noise") {
       // Glide the noise tone, plus any mid-sound jump.
@@ -301,8 +391,9 @@ function compileLayer(effect, layer) {
 function compileManual(layer, tickHz) {
   const m = layer.macro;
   const ch = layer.channel;
-  const frames = layer.steps.map(s => {
-    const frame = { vol: clampInt(s.vol, 0, 15), duty: m.duty, width: m.width };
+  const n = layer.steps.length;
+  const frames = layer.steps.map((s, i) => {
+    const frame = { vol: clampInt(s.vol, 0, 15), duty: m.duty, width: m.width, trigger: i === 0, remain: n - i };
     if (ch === "noise") {
       frame.noiseTone = clampf(s.noiseTone != null ? s.noiseTone : m.noiseTone, 0, 15);
     } else {
@@ -314,6 +405,74 @@ function compileManual(layer, tickHz) {
   });
   const peakVol = frames.reduce((a, f) => Math.max(a, f.vol), 1);
   return { channel: ch, tickHz, frames, peakVol, decayPace: 0, wavePreset: layer.wavePreset };
+}
+
+/* Sequence mode: a list of notes, each played with the layer's macro timbre
+   and envelope. Every note re-triggers the channel -- crisp arpeggios -- with
+   two exceptions authored per note: `tie` carries the previous envelope
+   through, so a run of tied notes is one swell whose pitch steps, and `rest`
+   emits silence (no writes at all; the previous note's length counter has
+   already been loaded to expire exactly where the rest begins).
+
+   Notes hold a steady pitch: bend, jump and vibrato belong to the single-tone
+   macro and are ignored here, which is what keeps a chime's intervals clean. */
+function compileSequence(layer, tickHz) {
+  const m = layer.macro;
+  const ch = layer.channel;
+  const notes = layer.notes || [];
+
+  const peakVol = clampInt(Math.round(15 * (0.45 + 0.55 * m.punch)), 1, 15);
+  const decayPace = m.decay <= 0.02 ? 0 : clampInt(Math.round(7 - m.decay * 6), 1, 7);
+  const decayRate = m.decay <= 0.02 ? 0 : (0.03 + m.decay * 0.5);
+
+  // Group notes into tied runs first: a run shares one trigger, so it also
+  // shares one length-counter deadline (the end of the whole run).
+  const groups = [];
+  notes.forEach((noteDef, i) => {
+    const prev = notes[i - 1];
+    const tied = i > 0 && !!prev.tie && !prev.rest && !noteDef.rest;
+    if (tied) groups[groups.length - 1].push(noteDef);
+    else groups.push([noteDef]);
+  });
+
+  const frames = [];
+  for (const group of groups) {
+    const lens = group.map(nd => clampInt(nd.len, 1, MAX_NOTE_FRAMES));
+    const groupLen = lens.reduce((a, b) => a + b, 0);
+    const head = group[0];
+    const env = clampInt(Math.round(peakVol * (clampInt(head.vol, 0, 15) / 15)), head.rest ? 0 : 1, 15);
+    const floorVol = m.sustain * env;
+    let g = 0;                                  // frames since this group's trigger
+
+    group.forEach((noteDef, gi) => {
+      for (let k = 0; k < lens[gi]; k++, g++) {
+        if (frames.length >= MAX_SEQ_FRAMES) return;
+        let v = head.rest ? 0 : Math.max(env * Math.exp(-decayRate * g), floorVol);
+        const frame = {
+          vol: clampInt(Math.round(v), 0, 15),
+          duty: m.duty,
+          width: m.width,
+          // A trigger on the group's first frame; a tied note still writes on
+          // its first frame (the pitch changes) but does not key the channel.
+          trigger: g === 0 && !head.rest,
+          write: (k === 0 && !noteDef.rest) || (g === 0 && !head.rest),
+          silent: !!noteDef.rest || !!head.rest,
+          remain: groupLen - g,
+          env,
+        };
+        if (ch === "noise") {
+          frame.noiseTone = clampf(noteDef.noiseTone != null ? noteDef.noiseTone : m.noiseTone, 0, 15);
+        } else {
+          const note = noteDef.note != null ? noteDef.note : m.baseNote;
+          frame.note = note;
+          frame.freqHz = freqFromNote(note);
+        }
+        frames.push(frame);
+      }
+    });
+  }
+
+  return { channel: ch, tickHz, frames, peakVol, decayPace, wavePreset: layer.wavePreset };
 }
 
 // Freeze the current macro program into editable manual steps.
@@ -339,6 +498,10 @@ function regenerateEffect(effect) {
     } else {
       layer.macro = jitterMacro(base, rng);
     }
+    // A sequence is authored, not generated: randomizing re-rolls its timbre
+    // and leaves the notes alone. Dropping back to macro mode here would
+    // silently delete a chime the moment someone pressed Randomize.
+    if (layer.mode === "sequence") return;
     layer.mode = "macro";
     layer.steps = null;
   });
@@ -544,14 +707,31 @@ function encodeWav(samples, sampleRate) {
 
      0x01 ch r0 r1 r2 r3 r4   write channel ch's five registers (NRx0..NRx4)
      0x02 <16 bytes>          load wave RAM (emitted once if a wave layer exists)
+     0x03 n                   end of frame, then idle n further frames
      0xFF                     end of frame  (advance one tick)
      0x00                     end of effect
 
-   Frame 0 triggers each channel with the hardware volume envelope + length
-   counter set from the macro, so decays run on real hardware. Later frames
-   rewrite only pitch (no re-trigger), which avoids the 60 Hz buzz that
+   A channel is keyed with the hardware volume envelope + length counter set
+   from the macro, so decays run on real hardware; frames in the middle of a
+   note rewrite only pitch (no re-trigger), which avoids the 60 Hz buzz that
    per-frame volume writes would cause on a DMG.
+
+   Two things keep a multi-second sequence small. Register writes are emitted
+   only when something audible changed -- the length-counter bits are masked
+   out of that comparison, since they count down on their own and a note that
+   is not written again still expires exactly where its last write said it
+   would -- and the resulting runs of empty frames collapse into `0x03 n`. A
+   held note therefore costs seven bytes and a hold, not seven bytes a frame.
 */
+
+// Bits of each register row that are the length counter, and so must not
+// count as "something changed" (see the note above).
+function significantRow(channel, row) {
+  const r = row.slice();
+  if (channel === 2) r[1] = 0;              // wave: NR31 is length only
+  else r[1] &= 0xC0;                        // pulse/noise: low 6 bits are length
+  return r.join(",");
+}
 
 function buildEffectProgram(effect) {
   // Resolve every layer to its register bytes per frame, then interleave.
@@ -567,13 +747,29 @@ function buildEffectProgram(effect) {
     for (let i = 0; i < 16; i++) bytes.push((table[i * 2] << 4) | (table[i * 2 + 1] & 0x0f));
   }
 
+  // Pass 1: what each frame has to write, after change detection.
+  const perFrame = [];
+  const last = {};
   for (let i = 0; i < nFrames; i++) {
+    const writes = [];
     layerRegs.forEach(lr => {
-      if (i >= lr.frames.length) return;
-      const r = lr.frames[i];
-      bytes.push(0x01, lr.channelIndex, r[0], r[1], r[2], r[3], r[4]);
+      const r = i < lr.frames.length ? lr.frames[i] : null;
+      if (!r) return;
+      const sig = significantRow(lr.channelIndex, r);
+      if (!lr.forced[i] && last[lr.channelIndex] === sig) return;
+      last[lr.channelIndex] = sig;
+      writes.push(0x01, lr.channelIndex, r[0], r[1], r[2], r[3], r[4]);
     });
-    bytes.push(0xFF);
+    perFrame.push(writes);
+  }
+
+  // Pass 2: emit, collapsing runs of silent frames into a hold.
+  for (let i = 0; i < nFrames; ) {
+    for (const b of perFrame[i]) bytes.push(b);
+    let hold = 0;
+    while (hold < 255 && i + 1 + hold < nFrames && perFrame[i + 1 + hold].length === 0) hold++;
+    if (hold > 0) { bytes.push(0x03, hold); i += hold + 1; }
+    else { bytes.push(0xFF); i += 1; }
   }
   bytes.push(0x00);
   return bytes;
@@ -586,23 +782,30 @@ function layerToRegisters(effect, layer) {
   const n = prog.frames.length;
   const tickHz = prog.tickHz;
 
-  // Length counter so the channel auto-silences after the effect. Pulse/noise
-  // use a 64-step counter (t = (64-load)/256 s); wave uses a 256-step counter.
-  const durSec = n / tickHz;
-  const lenPulse = clampInt(64 - Math.round(durSec * 256), 0, 63);
-  const lenWave = clampInt(256 - Math.round(durSec * 256), 0, 255);
-
   const rows = [];
   for (let i = 0; i < n; i++) {
     const f = prog.frames[i];
-    const trigger = i === 0 ? 0x80 : 0x00;
+    if (f.silent) { rows.push(null); continue; }   // a rest writes nothing at all
+    const trigger = f.trigger ? 0x80 : 0x00;
     const lenEnable = 0x40;                 // stop at the length counter
+    const env = ((f.env != null ? f.env : prog.peakVol) << 4) | prog.decayPace;
+
+    // Length counter, so the channel silences itself when the sound ends
+    // rather than ringing on. Pulse/noise count 64 steps at 256 Hz, wave
+    // counts 256. Every write loads the time *remaining* (a write to NRx1
+    // loads the counter directly, no trigger needed), so all the writes in
+    // one note agree on the same end point -- and a note that isn't written
+    // again keeps counting down to exactly that point on its own.
+    const remainSec = (f.remain != null ? f.remain : n - i) / tickHz;
+    const remainSteps = Math.round(remainSec * 256);
+    const lenPulse = clampInt(64 - remainSteps, 0, 63);
+    const lenWave = clampInt(256 - remainSteps, 0, 255);
 
     if (ch === "pulse1" || ch === "pulse2") {
       const period = pulsePeriod(f.freqHz);
       const r0 = 0x00;                                            // NR10 sweep off (software-driven pitch)
-      const r1 = (f.duty << 6) | (i === 0 ? lenPulse : 0);       // NRx1 duty + length load
-      const r2 = i === 0 ? ((prog.peakVol << 4) | prog.decayPace) : ((prog.peakVol << 4) | prog.decayPace); // NRx2 envelope
+      const r1 = (f.duty << 6) | lenPulse;                       // NRx1 duty + length load
+      const r2 = env;                                            // NRx2 envelope
       const r3 = period & 0xFF;                                  // NRx3 period low
       const r4 = trigger | lenEnable | ((period >> 8) & 0x07);   // NRx4 trigger + period high
       rows.push([r0, r1, r2, r3, r4]);
@@ -610,7 +813,7 @@ function layerToRegisters(effect, layer) {
       const period = wavePeriod(f.freqHz);
       const loud = clampInt(Math.round(f.vol / 15 * 3), 0, 3);   // 0..3 loudness -> NR32 code
       const r0 = 0x80;                                           // NR30 DAC on
-      const r1 = i === 0 ? lenWave : 0;                          // NR31 length load
+      const r1 = lenWave;                                        // NR31 length load
       const r2 = WAVE_VOLUME_CODE[loud] << 5;                    // NR32 volume code
       const r3 = period & 0xFF;                                  // NR33 period low
       const r4 = trigger | lenEnable | ((period >> 8) & 0x07);   // NR34 trigger + period high
@@ -618,14 +821,14 @@ function layerToRegisters(effect, layer) {
     } else { // noise
       const np = noiseParams(f.noiseTone);
       const r0 = 0x00;                                           // unused slot (base 0xFF1F)
-      const r1 = i === 0 ? lenPulse : 0;                         // NR41 length load
-      const r2 = (prog.peakVol << 4) | prog.decayPace;          // NR42 envelope
+      const r1 = lenPulse;                                       // NR41 length load
+      const r2 = env;                                            // NR42 envelope
       const r3 = (np.shift << 4) | (f.width << 3) | np.divisor;  // NR43 poly counter
-      const r4 = trigger | lenEnable;                           // NR44 trigger
+      const r4 = trigger | lenEnable;                            // NR44 trigger
       rows.push([r0, r1, r2, r3, r4]);
     }
   }
-  return { channelIndex: chIndex, frames: rows };
+  return { channelIndex: chIndex, frames: rows, forced: prog.frames.map(f => !!(f.trigger || f.write)) };
 }
 
 function exportC(project) {
@@ -671,6 +874,7 @@ function exportC(project) {
   C.push("");
   C.push("static const uint8_t *sfx_ptr;");
   C.push("static uint8_t sfx_active = 0;");
+  C.push("static uint8_t sfx_hold = 0;   /* frames still to idle (opcode 0x03) */");
   C.push("");
   C.push("void gbsfx_init(void) {");
   C.push("  *(uint8_t *)0xFF26 = 0x80; /* NR52: sound on            */");
@@ -682,16 +886,19 @@ function exportC(project) {
   C.push("  if (id >= SFX_COUNT) return;");
   C.push("  sfx_ptr = sfx_table[id];");
   C.push("  sfx_active = 1;");
+  C.push("  sfx_hold = 0;");
   C.push("}");
   C.push("");
   C.push("void gbsfx_update(void) {");
   C.push("  uint8_t cmd, ch, k;");
   C.push("  uint8_t *addr;");
   C.push("  if (!sfx_active) return;");
+  C.push("  if (sfx_hold) { sfx_hold--; return; }         /* idling */");
   C.push("  for (;;) {");
   C.push("    cmd = *sfx_ptr++;");
   C.push("    if (cmd == 0x00) { sfx_active = 0; return; } /* end of effect */");
   C.push("    if (cmd == 0xFF) { return; }                 /* end of frame  */");
+  C.push("    if (cmd == 0x03) { sfx_hold = *sfx_ptr++; return; } /* frame + idle n */");
   C.push("    if (cmd == 0x01) {");
   C.push("      ch = *sfx_ptr++;");
   C.push("      addr = sfx_base[ch];");
@@ -754,7 +961,17 @@ function importJson(text) {
   data.nextId = data.nextId || 1;
   data.effects.forEach(e => {
     e.tickHz = e.tickHz || DEFAULT_TICK_HZ;
-    (e.layers || []).forEach(l => { l.macro = makeMacro(l.macro); if (l.mode == null) l.mode = "macro"; if (l.gain == null) l.gain = 1; });
+    (e.layers || []).forEach(l => {
+      l.macro = makeMacro(l.macro);
+      if (l.mode == null) l.mode = "macro";
+      if (l.gain == null) l.gain = 1;
+      // A sequence layer without notes would compile to nothing; fall back to
+      // the sliders rather than showing an empty roll.
+      if (l.mode === "sequence") {
+        if (Array.isArray(l.notes) && l.notes.length) l.notes = l.notes.map(n => makeNote(n));
+        else { l.mode = "macro"; l.notes = null; }
+      }
+    });
   });
   return data;
 }
@@ -883,6 +1100,27 @@ function presetsCard() {
     grid.appendChild(b);
   });
   card.appendChild(grid);
+
+  card.appendChild(spacer(12));
+  card.appendChild(el("h2", null, "New chime"));
+  card.appendChild(el("p", "hint", "A short sequence of notes rather than one tone — win, death, item get."));
+  const seqGrid = el("div", "preset-grid");
+  SEQUENCE_PRESETS.forEach(p => {
+    const b = el("button", "preset-btn");
+    b.appendChild(document.createTextNode(p.label));
+    b.appendChild(el("small", null, p.hint));
+    b.addEventListener("click", () => {
+      const e = makeEffect(state.project, "custom");
+      e.name = p.key + "_" + e.id;
+      e.layers = [makeSequenceLayer(state.project, p)];
+      state.project.effects.push(e);
+      state.selectedEffectId = e.id;
+      render();
+      audio.play(e);
+    });
+    seqGrid.appendChild(b);
+  });
+  card.appendChild(seqGrid);
   return card;
 }
 
@@ -1002,7 +1240,18 @@ function renderRight() {
     l.macro = categoryMacro(l.channel === "noise" ? "hit" : "blip");
     e.layers.push(l); renderRight();
   });
-  addRow.append(el("span", "hint", "Layer a channel:"), addSel, addBtn);
+  const seqBtn = el("button", "tiny", "Add sequence layer");
+  seqBtn.title = "A layer of notes rather than one tone";
+  seqBtn.addEventListener("click", () => {
+    const l = makeLayer(state.project, "custom");
+    l.channel = addSel.value;
+    l.mode = "sequence";
+    l.macro = makeMacro({ punch: 0.75, decay: 0.3, duty: 2 });
+    // Start on a note the roll can draw rather than an empty grid.
+    l.notes = [makeNote({ note: 72, noiseTone: 8, len: 8 })];
+    e.layers.push(l); renderRight();
+  });
+  addRow.append(el("span", "hint", "Layer a channel:"), addSel, addBtn, seqBtn);
   card.appendChild(addRow);
 
   rightCol.appendChild(card);
@@ -1044,10 +1293,32 @@ function layerCard(effect, layer) {
                      (layer.mode === "manual" ? '<span style="color:var(--accent)">drag to edit frames</span>' : '');
   card.appendChild(legend);
 
+  // Sequence mode: the roll and the note table, above the timbre sliders.
+  if (layer.mode === "sequence") card.appendChild(sequencePanel(effect, layer));
+
   // Core macro sliders (guided view).
   const m = layer.macro;
   const disabled = layer.mode === "manual";
   const box = el("div");
+  if (layer.mode === "sequence") {
+    // Pitch and length come from the notes; bend/jump/vibrato are single-tone
+    // shaping and are ignored by compileSequence. What is left is timbre and
+    // the envelope every note is struck with.
+    box.appendChild(el("p", "hint", "Timbre and envelope for every note in the sequence. Pitch and length are the notes' own."));
+    box.appendChild(sliderRow("Punch", m.punch, 0, 1, 0.02, v => m.punch = v, effect, v => v.toFixed(2)));
+    box.appendChild(sliderRow("Decay", m.decay, 0, 1, 0.02, v => m.decay = v, effect, v => v.toFixed(2)));
+    box.appendChild(sliderRow("Sustain", m.sustain, 0, 1, 0.02, v => m.sustain = v, effect, v => v.toFixed(2)));
+    if (layer.channel === "wave") {
+      box.appendChild(fieldRow("Tone", selectFrom(WAVE_PRESET_NAMES, layer.wavePreset, v => { layer.wavePreset = v; renderRight(); })));
+    } else if (layer.channel === "noise") {
+      box.appendChild(fieldRow("Tone", selectFrom([{ value: 1, label: "15-bit hiss" }, { value: 0, label: "7-bit metallic" }], m.width, v => { m.width = Number(v); renderRight(); })));
+    } else {
+      box.appendChild(sliderRow("Tone", m.duty, 0, 3, 1, v => m.duty = Math.round(v), effect, v => DUTY_LABELS[Math.round(v)]));
+    }
+    card.appendChild(box);
+    if (state.advanced) card.appendChild(advancedPanel(effect, layer, prog));
+    return card;
+  }
   if (disabled) {
     const note = el("p", "hint", "This layer is in manual (hand-edited) mode. Sliders are paused.");
     box.appendChild(note);
@@ -1126,7 +1397,17 @@ function advancedPanel(effect, layer, prog) {
   const adv = el("div", "adv");
   adv.appendChild(el("h2", null, "Advanced"));
 
-  if (layer.mode !== "manual") {
+  if (layer.mode === "sequence") {
+    // Bend, jump and vibrato shape a single tone; compileSequence ignores
+    // them, so offering the sliders here would only mislead.
+    adv.appendChild(el("p", "hint", "Bend, jump and vibrato apply to single-tone layers only — a sequence's pitch comes from its notes."));
+    const tickRow = el("div", "row");
+    tickRow.appendChild(el("span", "hint", "Tick rate (Hz)"));
+    const tickIn = numberInput(effect.tickHz, 15, 120);
+    tickIn.addEventListener("change", () => { effect.tickHz = clampInt(tickIn.value, 15, 120); renderRight(); });
+    tickRow.append(tickIn, el("span", "hint", "frames per second the effect steps at"));
+    adv.appendChild(tickRow);
+  } else if (layer.mode !== "manual") {
     const grid = el("div", "adv-grid");
     grid.appendChild(sliderRow("Sustain", m.sustain, 0, 1, 0.02, v => m.sustain = v, effect, v => v.toFixed(2)));
     grid.appendChild(sliderRow("Bend amt", m.bendAmount, 0, 1, 0.02, v => m.bendAmount = v, effect, v => v.toFixed(2)));
@@ -1168,7 +1449,10 @@ function advancedPanel(effect, layer, prog) {
   show.forEach(i => {
     const tr = el("tr");
     tr.appendChild(el("td", null, String(i)));
-    regs.frames[i].forEach(b => tr.appendChild(el("td", null, "$" + b.toString(16).padStart(2, "0").toUpperCase())));
+    const row = regs.frames[i];
+    // A rest writes nothing at all, so there is no register row to show.
+    if (!row) for (let k = 0; k < 5; k++) tr.appendChild(el("td", null, "—"));
+    else row.forEach(b => tr.appendChild(el("td", null, "$" + b.toString(16).padStart(2, "0").toUpperCase())));
     table.appendChild(tr);
   });
   scroll.appendChild(table);
@@ -1226,6 +1510,290 @@ function drawViz(canvas, prog, layer) {
   });
 }
 
+/* ---- sequence editing: piano roll + note table, kept in sync ---- */
+
+// Pitch window the roll draws: the notes' own range, padded, and never
+// narrower than an octave so a one-note sequence still looks like music.
+function rollRange(layer) {
+  if (layer.channel === "noise") return { lo: 0, hi: 15 };
+  const pitched = (layer.notes || []).filter(n => !n.rest).map(n => n.note);
+  let lo = Math.min.apply(null, pitched.length ? pitched : [72]);
+  let hi = Math.max.apply(null, pitched.length ? pitched : [72]);
+  lo -= 2; hi += 2;
+  while (hi - lo < 12) { hi += 1; lo -= 1; }
+  return { lo: Math.max(24, lo), hi: Math.min(108, hi) };
+}
+
+function drawRoll(canvas, layer) {
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = "#081820"; ctx.fillRect(0, 0, W, H);
+
+  const notes = layer.notes || [];
+  const total = Math.max(1, sequenceFrames(layer));
+  const { lo, hi } = rollRange(layer);
+  const rows = hi - lo + 1;
+  const rh = H / rows;
+  const noise = layer.channel === "noise";
+
+  // Lane stripes: the black keys on a pitched channel, every fourth step on
+  // noise -- enough to read intervals off without a full grid.
+  for (let p = lo; p <= hi; p++) {
+    const black = noise ? (p % 4 === 0) : [1, 3, 6, 8, 10].includes(((p % 12) + 12) % 12);
+    if (!black) continue;
+    ctx.fillStyle = "#0d2028";
+    ctx.fillRect(0, (hi - p) * rh, W, rh);
+  }
+
+  let x = 0;
+  notes.forEach((n, i) => {
+    const len = clampInt(n.len, 1, MAX_NOTE_FRAMES);
+    const w = Math.max(2, (len / total) * W);
+    if (!n.rest) {
+      const p = noise ? Math.round(n.noiseTone) : n.note;
+      const y = (hi - clampf(p, lo, hi)) * rh;
+      const sel = state.selNote && state.selNote.layerId === layer.id && state.selNote.index === i;
+      ctx.fillStyle = sel ? "#b8f25a" : "#88c070";
+      ctx.fillRect(x + 0.5, y + 1, w - 1, Math.max(3, rh - 2));
+      if (n.tie) {
+        // A tie is drawn as a bridge into the next note: no re-attack there.
+        ctx.fillStyle = "#e08a5a";
+        ctx.fillRect(x + w - 3, y + 1, 3, Math.max(3, rh - 2));
+      }
+    }
+    ctx.strokeStyle = "#18301f";
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    x += w;
+  });
+}
+
+// Hit-test: which note is under a fraction-of-width x, and is the pointer on
+// its trailing edge (where a drag stretches it rather than transposing it)?
+function rollHit(layer, fx) {
+  const notes = layer.notes || [];
+  const total = Math.max(1, sequenceFrames(layer));
+  let acc = 0;
+  for (let i = 0; i < notes.length; i++) {
+    const len = clampInt(notes[i].len, 1, MAX_NOTE_FRAMES);
+    const start = acc / total, end = (acc + len) / total;
+    if (fx >= start && fx < end) return { index: i, edge: (end - fx) < Math.min(0.02, (end - start) * 0.35) };
+    acc += len;
+  }
+  return null;
+}
+
+function attachRoll(canvas, effect, layer, sync) {
+  let drag = null;
+  const redraw = () => { drawRoll(canvas, layer); sync(); };
+
+  const pos = (ev) => {
+    const rect = canvas.getBoundingClientRect();
+    return { fx: clamp01((ev.clientX - rect.left) / rect.width), fy: clamp01((ev.clientY - rect.top) / rect.height) };
+  };
+
+  canvas.addEventListener("pointerdown", (ev) => {
+    const { fx, fy } = pos(ev);
+    const hit = rollHit(layer, fx);
+    if (!hit) return;
+    canvas.setPointerCapture(ev.pointerId);
+    state.selNote = { layerId: layer.id, index: hit.index };
+    drag = { index: hit.index, mode: hit.edge ? "len" : "pitch", startFx: fx, startLen: layer.notes[hit.index].len };
+    if (drag.mode === "pitch") applyRollPitch(layer, hit.index, fy);
+    redraw();
+  });
+  canvas.addEventListener("pointermove", (ev) => {
+    if (!drag) return;
+    const { fx, fy } = pos(ev);
+    if (drag.mode === "pitch") applyRollPitch(layer, drag.index, fy);
+    else {
+      // Stretch: the drag distance is read against the sequence's own length,
+      // so dragging feels the same in a short chime and a long one.
+      const total = Math.max(1, sequenceFrames(layer));
+      const delta = Math.round((fx - drag.startFx) * total);
+      layer.notes[drag.index].len = clampInt(drag.startLen + delta, 1, MAX_NOTE_FRAMES);
+    }
+    redraw();
+  });
+  const end = () => { if (!drag) return; drag = null; audio.play(effect); };
+  canvas.addEventListener("pointerup", end);
+  canvas.addEventListener("pointercancel", end);
+  canvas.style.cursor = "pointer";
+}
+
+function applyRollPitch(layer, index, fy) {
+  const { lo, hi } = rollRange(layer);
+  const p = Math.round(hi - fy * (hi - lo + 1) + 0.5);
+  const note = layer.notes[index];
+  if (layer.channel === "noise") note.noiseTone = clampf(p, 0, 15);
+  else note.note = clampInt(p, 24, 108);
+  note.rest = false;
+}
+
+// Roll on the left, exact values on the right. Both edit the same notes: the
+// table writes straight into the model and redraws the roll, and a roll drag
+// pushes its new values back into the inputs (rather than rebuilding the
+// table, which would drop focus mid-typing).
+function sequencePanel(effect, layer) {
+  const wrap = el("div", "seq-wrap");
+
+  const rollWrap = el("div", "seq-roll");
+  const canvas = document.createElement("canvas");
+  canvas.width = 420; canvas.height = 200;
+  rollWrap.appendChild(canvas);
+  const rollHint = el("p", "hint", "Drag a note up/down to transpose, drag its right edge to stretch.");
+
+  const tableWrap = el("div", "seq-table-wrap");
+  // A structural edit (add/delete/move/rest) rebuilds the table; a value edit
+  // only redraws the roll. Push model values back into the table's inputs
+  // after a roll drag rather than rebuilding, which would drop focus.
+  const structural = () => { rebuild(); drawRoll(canvas, layer); };
+  const rebuild = () => {
+    tableWrap.innerHTML = "";
+    tableWrap.appendChild(seqTable(effect, layer, canvas, sync, structural));
+  };
+  const sync = () => {
+    const inputs = tableWrap.querySelectorAll("[data-note-field]");
+    inputs.forEach(inp => {
+      const i = Number(inp.dataset.noteIndex);
+      const n = layer.notes[i];
+      if (!n) return;
+      const f = inp.dataset.noteField;
+      if (f === "pitch") inp.value = layer.channel === "noise" ? String(Math.round(n.noiseTone)) : noteName(n.note);
+      else if (f === "len") inp.value = String(n.len);
+    });
+    tableWrap.querySelectorAll("tr[data-note-row]").forEach(tr => {
+      const sel = state.selNote && state.selNote.layerId === layer.id && Number(tr.dataset.noteRow) === state.selNote.index;
+      tr.classList.toggle("sel", !!sel);
+    });
+  };
+
+  rebuild();
+  drawRoll(canvas, layer);
+  attachRoll(canvas, effect, layer, sync);
+
+  const left = el("div");
+  left.append(rollWrap, rollHint);
+  wrap.append(left, tableWrap);
+  return wrap;
+}
+
+function seqTable(effect, layer, canvas, sync, structural) {
+  const box = el("div");
+  const noise = layer.channel === "noise";
+  const table = el("table", "seq-table");
+  const head = el("tr");
+  ["#", noise ? "tone" : "note", "len", "tie", "vol", ""].forEach(h => head.appendChild(el("th", null, h)));
+  table.appendChild(head);
+
+  const redraw = () => drawRoll(canvas, layer);
+
+  layer.notes.forEach((n, i) => {
+    const tr = el("tr");
+    tr.dataset.noteRow = String(i);
+    tr.addEventListener("click", () => { state.selNote = { layerId: layer.id, index: i }; redraw(); sync(); });
+    tr.appendChild(el("td", null, String(i + 1)));
+
+    // Pitch: note names for the pitched channels ("C5", "f#4"), a 0..15
+    // number for noise. Anything unparseable leaves the note as it was.
+    const pitchTd = el("td");
+    const pitchIn = inputText(noise ? String(Math.round(n.noiseTone)) : noteName(n.note));
+    pitchIn.className = "seq-in";
+    pitchIn.style.width = "54px";
+    pitchIn.dataset.noteField = "pitch";
+    pitchIn.dataset.noteIndex = String(i);
+    pitchIn.disabled = !!n.rest;
+    pitchIn.addEventListener("change", () => {
+      if (noise) n.noiseTone = clampf(Number(pitchIn.value) || 0, 0, 15);
+      else {
+        const midi = parseNoteName(pitchIn.value);
+        if (midi != null) n.note = midi;
+        pitchIn.value = noteName(n.note);
+      }
+      redraw(); audio.play(effect);
+    });
+    pitchTd.appendChild(pitchIn);
+    tr.appendChild(pitchTd);
+
+    const lenTd = el("td");
+    const lenIn = numberInput(n.len, 1, MAX_NOTE_FRAMES);
+    lenIn.className = "seq-in";
+    lenIn.style.width = "54px";
+    lenIn.dataset.noteField = "len";
+    lenIn.dataset.noteIndex = String(i);
+    lenIn.addEventListener("change", () => {
+      n.len = clampInt(lenIn.value, 1, MAX_NOTE_FRAMES);
+      lenIn.value = String(n.len);
+      redraw(); audio.play(effect);
+    });
+    lenTd.appendChild(lenIn);
+    tr.appendChild(lenTd);
+
+    const tieTd = el("td");
+    const tie = document.createElement("input");
+    tie.type = "checkbox"; tie.checked = !!n.tie;
+    tie.title = "Hold into the next note: no re-attack, the envelope carries on";
+    tie.addEventListener("change", () => { n.tie = tie.checked; redraw(); audio.play(effect); });
+    tieTd.appendChild(tie);
+    tr.appendChild(tieTd);
+
+    const volTd = el("td");
+    const vol = numberInput(n.vol, 0, 15);
+    vol.className = "seq-in";
+    vol.style.width = "48px";
+    vol.addEventListener("change", () => { n.vol = clampInt(vol.value, 0, 15); redraw(); audio.play(effect); });
+    volTd.appendChild(vol);
+    tr.appendChild(volTd);
+
+    const actTd = el("td", "seq-act");
+    const rest = el("button", "tiny" + (n.rest ? " active" : ""), "R");
+    rest.title = "Rest: silence for this note's length";
+    rest.addEventListener("click", () => { n.rest = !n.rest; structural(); audio.play(effect); });
+    const dup = el("button", "tiny", "+");
+    dup.title = "Duplicate this note below";
+    dup.addEventListener("click", () => { layer.notes.splice(i + 1, 0, makeNote(JSON.parse(JSON.stringify(n)))); structural(); });
+    const del = el("button", "tiny danger", "×");
+    del.title = "Delete this note";
+    del.disabled = layer.notes.length <= 1;
+    del.addEventListener("click", () => { layer.notes.splice(i, 1); state.selNote = null; structural(); });
+    actTd.append(rest, dup, del);
+    tr.appendChild(actTd);
+
+    table.appendChild(tr);
+  });
+  box.appendChild(table);
+
+  const row = el("div", "row");
+  row.style.marginTop = "8px";
+  const add = el("button", "tiny", "Add note");
+  add.addEventListener("click", () => {
+    const last = layer.notes[layer.notes.length - 1] || makeNote();
+    layer.notes.push(makeNote({ note: last.note, noiseTone: last.noiseTone, len: last.len, vol: last.vol }));
+    structural();
+  });
+  const up = el("button", "tiny", "↑");
+  up.title = "Move the selected note earlier";
+  up.addEventListener("click", () => moveSelected(layer, -1, structural));
+  const down = el("button", "tiny", "↓");
+  down.title = "Move the selected note later";
+  down.addEventListener("click", () => moveSelected(layer, 1, structural));
+  row.append(add, up, down);
+  box.appendChild(row);
+  box.appendChild(el("p", "hint", "Length is in frames — 60 to the second at the default tick rate."));
+  return box;
+}
+
+function moveSelected(layer, dir, structural) {
+  const sel = state.selNote;
+  if (!sel || sel.layerId !== layer.id) return;
+  const j = sel.index + dir;
+  if (j < 0 || j >= layer.notes.length) return;
+  const [n] = layer.notes.splice(sel.index, 1);
+  layer.notes.splice(j, 0, n);
+  state.selNote = { layerId: layer.id, index: j };
+  structural();
+}
+
 /* ---- manual frame painting (Option C / draw-the-shape) ---- */
 
 function attachPaint(canvas, effect, layer) {
@@ -1262,6 +1830,18 @@ function noteName(midi) {
   return NOTE_NAMES[((n % 12) + 12) % 12] + (Math.floor(n / 12) - 1);
 }
 function noteFromFreq(hz) { return 69 + 12 * Math.log2(hz / 440); }
+
+// "C5", "f#4", "Bb3" or a bare MIDI number -> MIDI note. Returns null when the
+// text is not a note, so the table can leave the value it had alone.
+function parseNoteName(text) {
+  const s = String(text).trim();
+  if (/^\d+$/.test(s)) return clampInt(s, 24, 108);
+  const m = /^([A-Ga-g])([#b]?)(-?\d+)$/.exec(s);
+  if (!m) return null;
+  const base = { c: 0, d: 2, e: 4, f: 5, g: 7, a: 9, b: 11 }[m[1].toLowerCase()];
+  const accidental = m[2] === "#" ? 1 : m[2] === "b" ? -1 : 0;
+  return clampInt((Number(m[3]) + 1) * 12 + base + accidental, 24, 108);
+}
 
 /* ============================================================
    Wire up top bar + boot
