@@ -728,6 +728,24 @@ function exportJson(project) {
   return JSON.stringify(project, null, 2);
 }
 
+/* Wrap one effect as a whole project, so exports carry a single sound
+   rather than the entire working set. Keeping one sound per file is what
+   lets a game's build glob the directory and name each effect after its
+   file; a bank file bundling everything you happened to have open makes
+   both of those ambiguous. Ids are renumbered from 1 so the file is
+   identical no matter which slot the effect occupied while editing. */
+function singleEffectProject(effect) {
+  const copy = JSON.parse(JSON.stringify(effect));
+  copy.id = 1;
+  copy.layers.forEach((l, i) => { l.id = 2 + i; });
+  return {
+    formatVersion: FORMAT_VERSION,
+    name: copy.name,
+    nextId: 2 + copy.layers.length,
+    effects: [copy],
+  };
+}
+
 function importJson(text) {
   const data = JSON.parse(text);
   if (!data || !Array.isArray(data.effects)) throw new Error("Not a .gbsfx.json file (no effects array).");
@@ -748,12 +766,16 @@ function currentBaseName() {
 
 function doExport() {
   openModal("Export", (modal) => {
-    const info = el("p", "hint", "The .gbsfx.json is the editable source of truth. WAV renders the preview. C emits gbsfx.h / gbsfx.c for GBDK-2020.");
+    const info = el("p", "hint", "Every export covers the selected effect only, one sound per file. The .gbsfx.json is the editable source of truth. WAV renders the preview. C emits gbsfx.h / gbsfx.c for GBDK-2020.");
     modal.appendChild(info);
 
     const row = el("div", "row");
-    const jsonBtn = el("button", "primary", "Download .gbsfx.json");
-    jsonBtn.addEventListener("click", () => downloadText(cId(state.project.name) + ".gbsfx.json", exportJson(state.project), "application/json"));
+    const jsonBtn = el("button", "primary", "Download .gbsfx.json (selected)");
+    jsonBtn.addEventListener("click", () => {
+      const e = selectedEffect(); if (!e) return;
+      downloadText(currentBaseName() + ".gbsfx.json",
+                   exportJson(singleEffectProject(e)), "application/json");
+    });
 
     const wavBtn = el("button", null, "Download .wav (selected)");
     wavBtn.addEventListener("click", async () => {
@@ -766,7 +788,7 @@ function doExport() {
       wavBtn.textContent = "Download .wav (selected)";
     });
 
-    const cBtn = el("button", null, "Show gbsfx.c / .h");
+    const cBtn = el("button", null, "Show gbsfx.c / .h (selected)");
     cBtn.addEventListener("click", () => showCExport());
     row.append(jsonBtn, wavBtn, cBtn);
     modal.appendChild(row);
@@ -774,9 +796,11 @@ function doExport() {
 }
 
 function showCExport() {
-  const { h, c } = exportC(state.project);
+  const e = selectedEffect();
+  if (!e) return;
+  const { h, c } = exportC(singleEffectProject(e));
   openModal("GBDK C export", (modal) => {
-    modal.appendChild(el("p", "hint", "Two files for your GBDK-2020 project. Bytes are one frame program per effect, stepped by the included player."));
+    modal.appendChild(el("p", "hint", "Two files for your GBDK-2020 project, covering the selected effect only. Bytes are one frame program, stepped by the included player."));
     [["gbsfx.h", h], ["gbsfx.c", c]].forEach(([fname, text]) => {
       modal.appendChild(el("h2", null, fname));
       const ta = document.createElement("textarea");
