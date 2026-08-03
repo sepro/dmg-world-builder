@@ -80,3 +80,49 @@
 
   .note-empty { color: var(--muted); padding: 40px; text-align: center; border: 1px dashed var(--line); }
   .warn { color: var(--danger); font-size: 11px; }
+
+  /* ---- glossary: a term, its hover blurb, and the full entry ---- */
+
+  /* The dashed underline is the whole affordance, so it has to survive on a
+     slider label (10px uppercase) and in body prose alike. */
+  .term {
+    border-bottom: 1px dashed currentColor;
+    cursor: help;
+    color: inherit;
+  }
+  .term:hover, .term:focus-visible { color: var(--accent); border-bottom-color: var(--accent); }
+  .slider-row label .term { display: inline-block; }
+
+  .term-pop {
+    position: fixed; z-index: 60; max-width: 260px;
+    background: var(--panel); border: 1px solid var(--accent);
+    padding: 8px 10px; font-size: 11px; line-height: 1.5;
+    pointer-events: none;                 /* never eats the click it invites */
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  }
+  .term-pop[hidden] { display: none; }
+  .term-pop strong { display: block; color: var(--accent); text-transform: uppercase; letter-spacing: 0.08em; font-size: 10px; margin-bottom: 4px; }
+  .term-pop em { display: block; margin-top: 6px; color: var(--muted); font-style: normal; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+
+  .term-entry p { font-size: 12px; line-height: 1.6; margin: 0 0 8px; }
+  .term-entry .term-short { color: var(--accent); }
+  .term-tag {
+    display: block; font-size: 9px; text-transform: uppercase; letter-spacing: 0.12em;
+    color: var(--muted); margin-bottom: 4px;
+  }
+  .term-example, .term-hardware, .term-demo {
+    border-left: 2px solid var(--line); padding: 6px 0 6px 10px; margin: 0 0 10px;
+  }
+  .term-hardware { color: var(--muted); }
+  .term-hardware p { font-size: 11px; }
+  .term-demo .row { gap: 6px; flex-wrap: wrap; }
+
+  /* browse-all: one collapsed row per term, expanding into the same entry */
+  .term-list { border: 1px solid var(--line); margin-bottom: 12px; }
+  .term-item + .term-item { border-top: 1px solid var(--line); }
+  .term-item > summary { cursor: pointer; padding: 6px 10px; font-size: 11px; }
+  .term-item > summary::marker { color: var(--muted); }
+  .term-item[open] > summary { background: var(--panel-2); }
+  .term-item .term-name { color: var(--accent); text-transform: uppercase; letter-spacing: 0.08em; margin-right: 8px; }
+  .term-item .term-blurb { color: var(--muted); }
+  .term-item .term-entry { padding: 4px 10px 10px; }

@@ -28,6 +28,7 @@ import {
   crossToolNotice, doExport, doImport, drawViz, fieldRow, layerHead, makeHistory,
   registerTable, sliderRow, tickRateRow, transportButtons, vizBlock, wireUndoUi,
 } from "./gbsfx-ui.js";
+import { term, wireGlossaryButton } from "./gbsfx-glossary-ui.js";
 
 const SEQ_TOOL_HREF = "gb-sfx-sequencer.html";
 const SEQ_TOOL_NAME = "SFX - Seq";
@@ -120,7 +121,7 @@ function transportCard() {
   if (e) {
     const seedRow = el("div", "seed-row");
     seedRow.style.marginTop = "10px";
-    seedRow.appendChild(el("span", "hint", "Seed"));
+    seedRow.appendChild(el("span", "hint")).appendChild(term("seed"));
     const seedIn = document.createElement("input");
     seedIn.type = "number"; seedIn.min = "0"; seedIn.max = String(0xffffffff);
     seedIn.value = String(e.seed);
@@ -141,7 +142,13 @@ function transportCard() {
 function chimeCard() {
   const card = el("div", "card");
   card.appendChild(el("h2", null, "Chimes and jingles"));
-  card.appendChild(el("p", "hint", "A victory fanfare or a fail sting is a run of notes rather than one tone — those are authored in the sequencer."));
+  const chimeHint = el("p", "hint");
+  chimeHint.append(
+    document.createTextNode("A victory fanfare or a fail sting is a "),
+    term("sequence", "run of notes"),
+    document.createTextNode(" rather than one tone — those are authored in the sequencer."),
+  );
+  card.appendChild(chimeHint);
   const link = document.createElement("a");
   link.href = SEQ_TOOL_HREF;
   link.className = "btn-link";
@@ -191,7 +198,9 @@ function renderRight() {
     l.macro = categoryMacro(l.channel === "noise" ? "hit" : "blip");
     e.layers.push(l); renderRight(); refreshUndo();
   });
-  addRow.append(el("span", "hint", "Layer a channel:"), addSel, addBtn);
+  const addLabel = el("span", "hint");
+  addLabel.append(term("layer"), document.createTextNode(" a channel:"));
+  addRow.append(addLabel, addSel, addBtn);
   card.appendChild(addRow);
 
   rightCol.appendChild(card);
@@ -220,7 +229,13 @@ function layerCard(effect_, layer) {
   const box = el("div");
 
   if (layer.mode === "manual") {
-    box.appendChild(el("p", "hint", "This layer is in manual (hand-edited) mode. Sliders are paused."));
+    const manualHint = el("p", "hint");
+    manualHint.append(
+      document.createTextNode("This layer is in "),
+      term("macro-manual", "manual (hand-edited) mode"),
+      document.createTextNode(". Sliders are paused."),
+    );
+    box.appendChild(manualHint);
     const back = el("button", "tiny", "Back to macro");
     back.addEventListener("click", () => {
       if (!confirm("Discard hand-edited frames and return to sliders?")) return;
@@ -383,6 +398,7 @@ document.getElementById("btn-new").addEventListener("click", () => {
 });
 document.getElementById("btn-import").addEventListener("click", () => doImport(exportCtx));
 document.getElementById("btn-export").addEventListener("click", () => doExport(exportCtx));
+wireGlossaryButton();
 
 refreshUndo = wireUndoUi(history, () => render());
 render();

@@ -14,7 +14,40 @@ import {
   CHANNELS, compileLayer, cId, exportC, exportJson, importJson, layerToRegisters,
   noteFromFreq, singleEffectProject,
 } from "../lib/gbsfx-core.js";
+import { channelTermKey } from "../lib/gbsfx-glossary.js";
+import { term, termLabel } from "./gbsfx-glossary-ui.js";
 import { audio, renderWav } from "../lib/gbsfx-audio.js";
+
+/* ============================================================
+   Control labels -> glossary terms
+   ============================================================
+   Both tools build their sliders through `sliderRow`/`fieldRow` with a
+   display name, so the name is the natural key: one table here underlines
+   every control in both tools without a call site having to know the glossary
+   exists. `gbsfx-glossary.test.js` fails if a name here has no entry, or if a
+   tool grows a control this table has never heard of. */
+
+export const CONTROL_TERMS = {
+  "Length":    "length",
+  "Pitch":     "pitch",
+  "Bend":      "bend",
+  "Bend amt":  "bend-amount",
+  "Punch":     "punch",
+  "Decay":     "decay",
+  "Sustain":   "sustain",
+  "Tone":      "tone",
+  "Jump":      "jump",
+  "Jump at":   "jump-at",
+  "Vib rate":  "vibrato-rate",
+  "Vib depth": "vibrato-depth",
+  "Volume":    "volume",
+};
+
+// The label for a control row: an underlined term when we can explain it.
+function controlLabel(name) {
+  const key = CONTROL_TERMS[name];
+  return key ? termLabel(key, name) : label(name);
+}
 
 /* ============================================================
    Undo / redo
@@ -99,7 +132,7 @@ export function wireUndoUi(history, after) {
 export function sliderRow(opts) {
   const { name, value, min, max, step, setter, fmt, onEdit, onCommit, history } = opts;
   const row = el("div", "slider-row");
-  row.appendChild(label(name));
+  row.appendChild(controlLabel(name));
   const input = document.createElement("input");
   input.type = "range"; input.min = min; input.max = max; input.step = step; input.value = value;
   const val = el("span", "val", fmt ? fmt(value) : String(value));
@@ -120,7 +153,7 @@ export function sliderRow(opts) {
 
 export function fieldRow(name, control) {
   const row = el("div", "slider-row");
-  row.appendChild(label(name));
+  row.appendChild(controlLabel(name));
   const wrap = el("div"); wrap.style.gridColumn = "2 / 4";
   control.style.width = "100%";
   wrap.appendChild(control);
@@ -209,7 +242,11 @@ export function layerHead(effect, layer, onRemove) {
   const head = el("div", "layer-head");
   const dot = el("span", "dot"); dot.style.background = ch.dot;
   head.appendChild(dot);
-  head.appendChild(el("span", "layer-title", ch.label + "  (" + ch.role + ")"));
+  // The channel's name is the term: what a Wave or a Noise channel actually
+  // is belongs next to the card it heads, not in a manual.
+  const title = el("span", "layer-title");
+  title.append(term(channelTermKey(layer.channel), ch.label), document.createTextNode("  (" + ch.role + ")"));
+  head.appendChild(title);
   if (effect.layers.length > 1 && onRemove) {
     const rm = el("button", "tiny danger", "remove");
     rm.addEventListener("click", onRemove);
@@ -224,7 +261,11 @@ export function layerHead(effect, layer, onRemove) {
 
 export function registerTable(effect, layer) {
   const box = el("div");
-  box.appendChild(el("h2", null, "Registers (NRx0-NRx4)"));
+  // The five register names are folded into the one term rather than each
+  // column heading carrying its own hook.
+  const heading = el("h2");
+  heading.append(term("registers"), document.createTextNode(" (NRx0-NRx4)"));
+  box.appendChild(heading);
   const regs = layerToRegisters(effect, layer);
   const scroll = el("div", "reg-scroll");
   const table = el("table", "reg-table");
@@ -254,7 +295,9 @@ function pickFrameIndices(n) {
 // The tick-rate control, which both tools tuck into their advanced drawer.
 export function tickRateRow(effect, onChange, history) {
   const row = el("div", "row");
-  row.appendChild(el("span", "hint", "Tick rate (Hz)"));
+  const tickLabel = el("span", "hint");
+  tickLabel.append(term("tick-rate"), document.createTextNode(" (Hz)"));
+  row.appendChild(tickLabel);
   const tickIn = numberInput(effect.tickHz, 15, 120);
   tickIn.addEventListener("focus", () => history && history.arm());
   tickIn.addEventListener("change", () => {
@@ -262,7 +305,9 @@ export function tickRateRow(effect, onChange, history) {
     effect.tickHz = Math.max(15, Math.min(120, Math.round(Number(tickIn.value) || 60)));
     onChange();
   });
-  row.append(tickIn, el("span", "hint", "frames per second the effect steps at"));
+  const tickHint = el("span", "hint");
+  tickHint.append(term("frame", "frames"), document.createTextNode(" per second the effect steps at"));
+  row.append(tickIn, tickHint);
   return row;
 }
 

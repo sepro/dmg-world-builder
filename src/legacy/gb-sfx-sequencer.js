@@ -34,6 +34,7 @@ import {
   crossToolNotice, doExport, doImport, drawViz, fieldRow, layerHead, makeHistory,
   registerTable, sliderRow, tickRateRow, transportButtons, vizBlock, wireUndoUi,
 } from "./gbsfx-ui.js";
+import { term, wireGlossaryButton } from "./gbsfx-glossary-ui.js";
 
 const SFX_TOOL_HREF = "gb-sfx-generator.html";
 const SFX_TOOL_NAME = "SFX";
@@ -156,7 +157,7 @@ function transportCard() {
 
   const seedRow = el("div", "seed-row");
   seedRow.style.marginTop = "10px";
-  seedRow.appendChild(el("span", "hint", "Seed"));
+  seedRow.appendChild(el("span", "hint")).appendChild(term("seed"));
   const seedIn = document.createElement("input");
   seedIn.type = "number"; seedIn.min = "0"; seedIn.max = String(0xffffffff);
   seedIn.value = String(e.seed);
@@ -229,7 +230,9 @@ function renderRight() {
     l.notes = [makeNote({ note: 72, noiseTone: 8, len: 8 })];
     e.layers.push(l); renderRight(); refreshUndo();
   });
-  addRow.append(el("span", "hint", "Layer a channel:"), addSel, addBtn);
+  const addLabel = el("span", "hint");
+  addLabel.append(term("layer"), document.createTextNode(" a channel:"));
+  addRow.append(addLabel, addSel, addBtn);
   card.appendChild(addRow);
 
   rightCol.appendChild(card);
@@ -267,7 +270,13 @@ function sequenceLayerCard(e, layer) {
   // Pitch and length come from the notes; bend/jump/vibrato are single-tone
   // shaping and are ignored by the sequence compiler. What is left is the
   // timbre and the envelope every note is struck with.
-  box.appendChild(el("p", "hint", "Timbre and envelope for every note in the sequence. Pitch and length are the notes' own."));
+  const timbreHint = el("p", "hint");
+  timbreHint.append(
+    document.createTextNode("Timbre and "),
+    term("envelope"),
+    document.createTextNode(" for every note in the sequence. Pitch and length are the notes' own."),
+  );
+  box.appendChild(timbreHint);
   box.appendChild(slider("Punch", m.punch, 0, 1, 0.02, v => m.punch = v, v => v.toFixed(2)));
   box.appendChild(slider("Decay", m.decay, 0, 1, 0.02, v => m.decay = v, v => v.toFixed(2)));
   box.appendChild(slider("Sustain", m.sustain, 0, 1, 0.02, v => m.sustain = v, v => v.toFixed(2)));
@@ -298,7 +307,7 @@ function sequenceLayerCard(e, layer) {
 // Which archetype this layer was drawn from, and a way to draw again.
 function chimeRow(e, layer) {
   const row = el("div", "chime-row");
-  row.appendChild(el("span", "hint", "Archetype"));
+  row.appendChild(el("span", "hint")).appendChild(term("archetype"));
   row.appendChild(selectFrom(
     CHIME_ARCHETYPES.map(a => ({ value: a.key, label: a.label })),
     layer.chime.archetype,
@@ -547,7 +556,17 @@ function seqTable(e, layer, redrawAll, sync, structural) {
   const noise = layer.channel === "noise";
   const table = el("table", "seq-table");
   const head = el("tr");
-  ["#", noise ? "tone" : "note", "len", "tie", "vol", ""].forEach(h => head.appendChild(el("th", null, h)));
+  // Column headings double as the glossary hooks for the note model: what a
+  // tie or a len of 8 means is answered where it is being typed.
+  const heads = [
+    document.createTextNode("#"),
+    noise ? term("tone", "tone") : term("note", "note"),
+    term("frame", "len"),
+    term("tie", "tie"),
+    term("volume", "vol"),
+    document.createTextNode(""),
+  ];
+  heads.forEach(h => head.appendChild(el("th")).appendChild(h));
   table.appendChild(head);
 
   // Every value edit takes one undo step: arm on focus, commit on change.
@@ -668,7 +687,15 @@ function seqTable(e, layer, redrawAll, sync, structural) {
   down.addEventListener("click", () => moveSelected(layer, 1, structural));
   row.append(add, up, down);
   box.appendChild(row);
-  box.appendChild(el("p", "hint", "Length is in frames — 60 to the second at the default tick rate."));
+  const lenHint = el("p", "hint");
+  lenHint.append(
+    document.createTextNode("Length is in "),
+    term("frame", "frames"),
+    document.createTextNode(" — 60 to the second at the default tick rate. R turns a note into a "),
+    term("rest"),
+    document.createTextNode("."),
+  );
+  box.appendChild(lenHint);
   return box;
 }
 
@@ -704,6 +731,7 @@ document.getElementById("btn-new").addEventListener("click", () => {
 });
 document.getElementById("btn-import").addEventListener("click", () => doImport(exportCtx));
 document.getElementById("btn-export").addEventListener("click", () => doExport(exportCtx));
+wireGlossaryButton();
 
 refreshUndo = wireUndoUi(history, () => render());
 render();
