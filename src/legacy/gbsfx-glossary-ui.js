@@ -71,10 +71,34 @@ function place(anchor) {
   pop.style.top = top + "px";
 }
 
+/* Whether the term is still somewhere a reader can see it: inside the viewport
+   and inside every ancestor that clips its overflow. Both tools scroll inside
+   <main>, and the sequencer's note table scrolls inside its own box, so a term
+   can leave the screen without the window scrolling at all. */
+function anchorVisible(anchor) {
+  const r = anchor.getBoundingClientRect();
+  if (!r.width && !r.height) return false;
+  let top = 0, left = 0, bottom = window.innerHeight, right = window.innerWidth;
+  for (let p = anchor.parentElement; p; p = p.parentElement) {
+    const s = getComputedStyle(p);
+    if (!/(auto|scroll|hidden|clip)/.test(s.overflow + s.overflowX + s.overflowY)) continue;
+    const pr = p.getBoundingClientRect();
+    top = Math.max(top, pr.top); left = Math.max(left, pr.left);
+    bottom = Math.min(bottom, pr.bottom); right = Math.min(right, pr.right);
+  }
+  // Any overlap will do: a term half under an edge still deserves its blurb.
+  return r.bottom > top && r.top < bottom && r.right > left && r.left < right;
+}
+
 function followOwner() {
   if (!popEl || popEl.hidden) return;
-  // A re-render can take the term away underneath an open blurb.
-  if (popOwner && document.contains(popOwner)) place(popOwner);
+  // Three ways an open blurb loses the term it belongs to: a re-render takes
+  // the node away, a scroll carries it out of view, or a scroll clips it
+  // inside a container. Under the mouse the pointer leaving the term hides it
+  // for us -- but a term reached by keyboard keeps focus while the page moves
+  // underneath it, and a blurb pinned to something invisible (over the tool
+  // bar, or off-screen entirely) is worse than no blurb.
+  if (popOwner && document.contains(popOwner) && anchorVisible(popOwner)) place(popOwner);
   else hidePopover();
 }
 

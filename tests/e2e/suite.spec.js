@@ -228,6 +228,75 @@ test("SFX sequencer draws a chime, edits it, and exports it compressed", async (
   expect(errors).toEqual([]);
 });
 
+/* The glossary's hover blurb is pinned to a term by absolute position, and
+   both tools scroll inside <main> rather than the window -- so a term can
+   leave the screen without the window moving at all. Under the mouse that
+   corrects itself (the pointer leaves the term), but a term reached by
+   keyboard keeps focus while the page scrolls underneath it. Both halves are
+   easy to break by accident and neither is visible to a unit test. */
+test("glossary blurb follows its term, and dies with it", async ({ page }) => {
+  const popRect = () => page.evaluate(() => {
+    const p = document.getElementById("term-pop");
+    const r = p.getBoundingClientRect();
+    return { hidden: p.hidden, top: Math.round(r.top), bottom: Math.round(r.bottom) };
+  });
+  const termRect = (loc) => loc.evaluate(el => {
+    const r = el.getBoundingClientRect();
+    return { top: Math.round(r.top), bottom: Math.round(r.bottom) };
+  });
+  // It sits under the term, or flips above it when there is no room below.
+  const gap = (pop, term) => Math.min(Math.abs(pop.top - term.bottom), Math.abs(term.top - pop.bottom));
+  const scrollPanel = (to) => page.evaluate((y) => {
+    const p = document.getElementById("panel");
+    p.scrollTop = y === "end" ? p.scrollHeight : y;
+  }, to);
+  // Relative: focusing a term scrolls the panel to reach it, so a nudge that
+  // is meant to keep the term on screen has to start from wherever that left.
+  const nudgePanel = (dy) => page.evaluate((d) => {
+    document.getElementById("panel").scrollTop += d;
+  }, dy);
+
+  await page.setViewportSize({ width: 900, height: 460 });
+  await page.goto("/gb-sfx-generator.html");
+  await expect(page.locator("#panel canvas").first()).toBeVisible();
+  await page.getByText("Advanced", { exact: true }).click();
+
+  // Reaching a term below the fold by keyboard scrolls it into view; the
+  // blurb has to survive the very scroll that brought the term on screen.
+  const layer = page.locator(".term", { hasText: /^Layer$/ }).first();
+  await layer.focus();
+  await expect(page.locator("#term-pop")).toBeVisible();
+  // Polled: the reposition rides the scroll event, a frame behind the assert.
+  await expect.poll(async () => gap(await popRect(), await termRect(layer))).toBeLessThan(20);
+
+  // Scroll that still-focused term back off the screen: the blurb must go
+  // with it rather than hang in empty space.
+  await scrollPanel(0);
+  await expect(page.locator("#term-pop")).toBeHidden();
+
+  // Same when the term is clipped by the top edge of the scrolling panel,
+  // where a surviving blurb would float over the tool bar.
+  const pulse = page.locator(".term", { hasText: /^Pulse 1$/ }).first();
+  await pulse.focus();
+  await expect(page.locator("#term-pop")).toBeVisible();
+  await scrollPanel("end");
+  await expect(page.locator("#term-pop")).toBeHidden();
+
+  // A scroll that keeps the term on screen keeps the blurb, glued to it.
+  await scrollPanel(0);
+  const decay = page.locator(".term", { hasText: /^Decay$/ }).first();
+  await decay.focus();
+  await nudgePanel(40);
+  await expect(page.locator("#term-pop")).toBeVisible();
+  await expect.poll(async () => gap(await popRect(), await termRect(decay))).toBeLessThan(20);
+
+  // And the mouse path: pointer off the term, blurb gone.
+  await decay.hover();
+  await expect(page.locator("#term-pop")).toBeVisible();
+  await page.mouse.move(5, 5);
+  await expect(page.locator("#term-pop")).toBeHidden();
+});
+
 test("SFX sequencer redraws both views when a note's volume changes", async ({ page }) => {
   await page.goto("/gb-sfx-sequencer.html");
   await page.getByRole("button", { name: "Victory fanfare" }).click();
