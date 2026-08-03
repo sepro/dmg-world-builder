@@ -10,6 +10,7 @@ const pages = [
   "gb-sprite-editor.html",
   "gb-music-generator.html",
   "gb-sfx-generator.html",
+  "gb-sfx-sequencer.html",
   "gb-pixelizer.html",
   "gb-tile-reducer.html",
 ];

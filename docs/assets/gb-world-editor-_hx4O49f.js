@@ -1,5 +1,5 @@
 const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./gb-world-editor-jDQLTb37.js","./common-68Tf6uEl.js"])))=>i.map(i=>d[i]);
-import{m as t,L as n,_ as a}from"./theme-DCgAGtXn.js";t(n,{target:document.body,props:{beforeMenu:`<span class="brand">GB&nbsp;World&nbsp;Editor <span class="sub">v1</span></span>
+import{m as t,L as n,_ as a}from"./theme-CNUsdib9.js";t(n,{target:document.body,props:{beforeMenu:`<span class="brand">GB&nbsp;World&nbsp;Editor <span class="sub">v1</span></span>
     <div class="field" style="flex-direction:row;align-items:center;gap:6px;">
       <label style="margin:0;">Project</label>
       <input type="text" id="project-name" style="width:180px;">

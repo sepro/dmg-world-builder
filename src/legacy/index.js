@@ -100,6 +100,29 @@ const SHADES = ["#e0f8d0", "#88c070", "#346856", "#081820"];
   }
 })();
 
+/* SFX sequencer preview: a rising chime on a piano roll, with the volume
+   strip the roll draws under it. */
+(() => {
+  const ctx = document.getElementById("preview-sfxseq").getContext("2d");
+  ctx.fillStyle = SHADES[3];
+  ctx.fillRect(0, 0, 160, 48);
+  // Lane stripes (the "black keys").
+  ctx.fillStyle = "#0d2028";
+  for (let r = 1; r < 6; r += 2) ctx.fillRect(0, r * 6, 160, 6);
+  // Four notes climbing, the last one held.
+  const notes = [[4, 5, 22], [28, 4, 22], [52, 3, 22], [76, 1, 76]];
+  notes.forEach(([x, row, w], i) => {
+    ctx.fillStyle = SHADES[i === 3 ? 0 : 1];
+    ctx.fillRect(x, row * 6 + 1, w, 5);
+    // Volume bar for the same note along the bottom strip.
+    const h = i === 3 ? 9 : 5 + i;
+    ctx.fillStyle = SHADES[2];
+    ctx.fillRect(x, 45 - h, w, h);
+  });
+  ctx.strokeStyle = "#18301f";
+  ctx.beginPath(); ctx.moveTo(0, 35.5); ctx.lineTo(160, 35.5); ctx.stroke();
+})();
+
 /* Music preview: a piano-roll-ish scatter of note bars. */
 (() => {
   const ctx = document.getElementById("preview-music").getContext("2d");

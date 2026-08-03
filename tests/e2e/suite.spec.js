@@ -7,6 +7,7 @@ const pages = [
   "gb-sprite-editor.html",
   "gb-music-generator.html",
   "gb-sfx-generator.html",
+  "gb-sfx-sequencer.html",
   "gb-pixelizer.html",
   "gb-tile-reducer.html",
 ];
@@ -20,7 +21,7 @@ for (const path of pages) {
     });
     await page.goto(`/${path}`);
     await expect(page.locator("#app")).toBeVisible();
-    await expect(page.locator("nav.tool-menu a")).toHaveCount(7);
+    await expect(page.locator("nav.tool-menu a")).toHaveCount(8);
     await page.waitForTimeout(150);
     expect(errors).toEqual([]);
   });
@@ -28,8 +29,8 @@ for (const path of pages) {
 
 test("landing page links to every tool and draws all previews", async ({ page }) => {
   await page.goto("/index.html");
-  await expect(page.locator(".tool-card")).toHaveCount(7);
-  await expect(page.locator(".tool-card canvas")).toHaveCount(7);
+  await expect(page.locator(".tool-card")).toHaveCount(8);
+  await expect(page.locator(".tool-card canvas")).toHaveCount(8);
   const painted = await page.locator(".tool-card canvas").evaluateAll((canvases) =>
     canvases.every((canvas) => canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data.some(Boolean)),
   );
@@ -169,26 +170,45 @@ test("music generator deterministically regenerates and exposes both score views
   expect((await download).suggestedFilename()).toMatch(/\.gbmusic\.json$/);
 });
 
-test("SFX generator visualizes, regenerates, and opens export", async ({ page }) => {
+test("SFX generator visualizes, regenerates, and undoes a preset", async ({ page }) => {
   await page.goto("/gb-sfx-generator.html");
   await expect(page.locator("#panel canvas").first()).toBeVisible();
   await page.getByRole("button", { name: "Randomize" }).click();
+
+  // The session library is gone: one sound at a time, and undo is what makes
+  // overwriting it with a preset safe.
+  const name = page.locator(".col-right input[type=text]").first();
+  await expect(name).toHaveValue("coin_1");
+  await page.getByRole("button", { name: "Laser shoot" }).click();
+  await expect(name).toHaveValue("laser_1");
+  await page.locator("#btn-undo").click();
+  await expect(page.locator(".col-right input[type=text]").first()).toHaveValue("coin_1");
+  await page.locator("#btn-redo").click();
+  await expect(page.locator(".col-right input[type=text]").first()).toHaveValue("laser_1");
+  // Two edits happened (Randomize, then the preset), so undoing both empties
+  // the stack and greys the button.
+  await page.locator("#btn-undo").click();
+  await page.locator("#btn-undo").click();
+  await expect(page.locator("#btn-undo")).toBeDisabled();
+
   await page.locator("#btn-export").click();
   await expect(page.locator("#modal-backdrop")).toBeVisible();
 });
 
-test("SFX generator authors a note sequence and exports it compressed", async ({ page }) => {
-  await page.goto("/gb-sfx-generator.html");
-  await page.getByRole("button", { name: "Win fanfare" }).click();
+test("SFX sequencer draws a chime, edits it, and exports it compressed", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto("/gb-sfx-sequencer.html");
+  await page.getByRole("button", { name: "Victory fanfare" }).click();
 
-  // The chime preset lands in a sequence layer: piano roll on the left, one
-  // table row per note on the right.
+  // A chime lands in a sequence layer: piano roll on the left, one table row
+  // per note on the right.
   await expect(page.locator(".seq-roll canvas")).toBeVisible();
-  await expect(page.locator(".seq-table tr[data-note-row]")).toHaveCount(4);
+  const rows = page.locator(".seq-table tr[data-note-row]");
+  expect(await rows.count()).toBeGreaterThanOrEqual(4);
 
   // Editing a note by name round-trips through the model into the roll.
   const firstPitch = page.locator('.seq-table input[data-note-field="pitch"]').first();
-  await expect(firstPitch).toHaveValue("C5");
   await firstPitch.fill("G4");
   await firstPitch.dispatchEvent("change");
   await expect(firstPitch).toHaveValue("G4");
@@ -196,15 +216,92 @@ test("SFX generator authors a note sequence and exports it compressed", async ({
   // The C export must use the hold opcode (0x03) rather than a frame's worth
   // of register writes per tick -- that is what keeps a 1-2 s chime small.
   await page.locator("#btn-export").click();
-  await page.getByRole("button", { name: "Show gbsfx.c / .h (selected)" }).click();
+  await page.getByRole("button", { name: "Show gbsfx.c / .h" }).click();
   const cText = await page.locator("#modal-backdrop textarea").nth(1).inputValue();
   expect(cText).toContain("sfx_hold");
   const data = /sfx_data_0\[\] = \{([\s\S]*?)\};/.exec(cText);
   expect(data).not.toBeNull();
   expect(data[1]).toContain("0x03");
-  // Uncompressed, the preset's ~48 frames would be seven bytes each.
+  // Uncompressed, a chime's ~60 frames would be seven bytes each.
   const bytes = (data[1].match(/0x[0-9A-F]{2}/g) || []).length;
-  expect(bytes).toBeLessThan(80);
+  expect(bytes).toBeLessThan(120);
+  expect(errors).toEqual([]);
+});
+
+test("SFX sequencer redraws both views when a note's volume changes", async ({ page }) => {
+  await page.goto("/gb-sfx-sequencer.html");
+  await page.getByRole("button", { name: "Victory fanfare" }).click();
+
+  const shot = () => page.locator(".layer-card canvas").evaluateAll(
+    (canvases) => canvases.map((c) => c.toDataURL()),
+  );
+  const before = await shot();
+
+  // The compiled visualization used to ignore a vol edit entirely -- only the
+  // roll redrew, and the roll did not draw volume at all.
+  const vol = page.locator('.seq-table input[data-note-field="vol"]').first();
+  await vol.fill("2");
+  await vol.dispatchEvent("change");
+
+  const after = await shot();
+  expect(after[0]).not.toBe(before[0]);   // pitch/volume visualization
+  expect(after[1]).not.toBe(before[1]);   // piano roll (volume strip)
+});
+
+test("SFX sequencer re-rolls a chime from its archetype and undoes it", async ({ page }) => {
+  await page.goto("/gb-sfx-sequencer.html");
+  await page.getByRole("button", { name: "Sad fail" }).click();
+  const name = page.locator(".col-right input[type=text]").first();
+  await expect(name).toHaveValue("sad_1");
+
+  const pitches = () => page.locator('.seq-table input[data-note-field="pitch"]').evaluateAll(
+    (inputs) => inputs.map((i) => i.value).join(","),
+  );
+  const first = await pitches();
+  const seed = page.locator(".seed-row input");
+  const firstSeed = await seed.inputValue();
+
+  // Re-roll draws a new phrase from the same archetype; the seed follows it.
+  await page.getByRole("button", { name: "Re-roll", exact: true }).click();
+  expect(await seed.inputValue()).not.toBe(firstSeed);
+  expect(await pitches()).not.toBe(first);
+
+  // Typing the old seed back reproduces the old chime exactly.
+  await seed.fill(firstSeed);
+  await seed.dispatchEvent("change");
+  expect(await pitches()).toBe(first);
+
+  await page.locator("#btn-undo").click();
+  await expect(page.locator(".col-right input[type=text]").first()).toHaveValue("sad_1");
+});
+
+test("the two sound tools read each other's files and point across", async ({ page }) => {
+  // A sequence authored in the sequencer opens in the SFX generator: it plays
+  // and exports from there, but is edited next door.
+  await page.goto("/gb-sfx-sequencer.html");
+  await page.getByRole("button", { name: "Item get flourish" }).click();
+  await page.locator("#btn-export").click();
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download .gbsfx.json" }).click();
+  const file = await download;
+  expect(file.suggestedFilename()).toMatch(/^itemget_1\.gbsfx\.json$/);
+  const stream = await file.createReadStream();
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  const json = Buffer.concat(chunks).toString("utf8");
+  expect(JSON.parse(json).effects[0].layers[0].mode).toBe("sequence");
+
+  await page.goto("/gb-sfx-generator.html");
+  await page.locator("#btn-import").click();
+  await page.locator("#modal-backdrop textarea").fill(json);
+  await page.locator("#modal-backdrop").getByRole("button", { name: "Import", exact: true }).click();
+  await expect(page.locator(".cross-note")).toContainText("sequence");
+  await expect(page.locator(".cross-note a")).toHaveAttribute("href", "gb-sfx-sequencer.html");
+  // Nothing was dropped on the way in: the notes still export as a sequence.
+  await expect(page.locator(".seq-table")).toHaveCount(0);
+  await page.locator("#btn-export").click();
+  await page.getByRole("button", { name: "Show gbsfx.c / .h" }).click();
+  expect(await page.locator("#modal-backdrop textarea").nth(1).inputValue()).toContain("0x03");
 });
 
 test("pixelizer exposes working edge-preserving and luminance-aware modes", async ({ page }) => {

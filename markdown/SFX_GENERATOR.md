@@ -2,7 +2,13 @@
 
 A sound-effect designer for the four Game Boy channels, sfxr-style: pick a
 category, refine with a handful of semantic sliders, and export the result as
-a `.gbsfx.json` bank, a WAV, or GBDK-2020 C with a tiny frame-stepped player.
+a `.gbsfx.json` file, a WAV, or GBDK-2020 C with a tiny frame-stepped player.
+
+This tool makes **single-tone** effects — a hit, a laser, a coin, an explosion.
+A sound that plays *several notes* (a victory fanfare, a fail sting, a UI
+confirm) is a chime, and chimes are authored next door in the
+[SFX Sequencer](SFX_SEQUENCER.md). Both tools read and write the same
+`.gbsfx.json`.
 
 Open it by serving the repo root over HTTP and visiting
 <http://localhost:8000/docs/gb-sfx-generator.html> (see the main
@@ -10,8 +16,12 @@ Open it by serving the repo root over HTTP and visiting
 
 ## Model
 
-The file is a **bank of effects**. Each effect has a tick rate (default 60 Hz
-— one step per frame) and one or more **layers**. A layer targets one channel:
+You work on **one sound at a time** — exports are one sound per file, so there
+is no session library to keep track of. **New** and the preset buttons replace
+what you have, and **Undo** (or `Ctrl`/`Cmd`+`Z`) brings it back.
+
+A sound has a tick rate (default 60 Hz — one step per frame) and one or more
+**layers**. A layer targets one channel:
 
 | Channel | Hardware | Typical use |
 |---------|----------|-------------|
@@ -21,10 +31,10 @@ The file is a **bank of effects**. Each effect has a tick rate (default 60 Hz
 | Noise | LFSR | hits, explosions, percussion |
 
 A layer is in one of three modes: **macro** (generated from sliders), **manual**
-(hand-edited per-frame steps), or **sequence** (a list of notes — see
-[Sequences](#sequences-chimes-and-jingles) below). Everything — the pitch/volume
-visualization, audio preview, WAV render, and C export — is driven by the same
-compiled per-frame program, so what you hear is what you export.
+(hand-edited per-frame steps), or **sequence** (a list of notes, edited in the
+sequencer). Everything — the pitch/volume visualization, audio preview, WAV
+render, and C export — is driven by the same compiled per-frame program, so what
+you hear is what you export.
 
 ## Workflow
 
@@ -38,88 +48,57 @@ compiled per-frame program, so what you hear is what you export.
    - **Decay** — how fast the volume falls off.
    - **Tone** — timbre: pulse duty cycle, wave preset, or noise width
      (15-bit hiss vs 7-bit metallic).
-3. **Play** to preview (sliders re-trigger on release), **Add layer** to stack
-   channels, **Duplicate**/**Delete** to manage the library list.
+3. **Play** to preview (sliders re-trigger on release) and **Add layer** to
+   stack channels — a noise thud under a pulse blip, say.
 
-## Sequences (chimes and jingles)
+## Undo
 
-A macro layer is **one tone**. It can bend, jump and warble, but it cannot play
-"C5, E5, G5, C6" — and a victory fanfare, a death sting or an item-get flourish
-is exactly that. A **sequence layer** is a list of notes played one after
-another through the layer's macro timbre and envelope.
+Every edit is undoable: **Undo** / **Redo** in the top bar, or `Ctrl`/`Cmd`+`Z`
+and `Ctrl`/`Cmd`+`Shift`+`Z`. A whole slider drag is one step, so undo walks
+back through decisions rather than pixels, and pressing a preset by mistake
+costs nothing.
 
-Start one either way:
+## Randomize, Mutate, Seed
 
-- **New chime** (left column) — Win, Death or Item get. Each drops in a
-  ready-made phrase you can then edit.
-- **Add sequence layer** (under the layer cards) — pick a channel, start from a
-  single note. Sequence layers stack with ordinary layers, so a noise thud can
-  run under a pulse melody.
+Sounds are reproducible: **Randomize** re-derives the macro deterministically
+from the **Seed** (same seed = same sound), while **Mutate** nudges the current
+values without touching the seed. Set the seed by hand to revisit a variant.
 
-### Editing notes
-
-The **piano roll** and the **note table** show the same notes and edit the same
-model, side by side:
-
-- Drag a note **up/down** to transpose it, drag its **right edge** to stretch it.
-- In the table, type a note name (`C5`, `f#4`, `Bb3`, or a bare MIDI number) or
-  a length in frames. `Add note` appends; `↑`/`↓` move the selected note; the
-  per-row buttons are **R** (turn the note into a rest), **+** (duplicate) and
-  **×** (delete).
-
-Per note:
-
-| Field | Meaning |
-|-------|---------|
-| note / tone | pitch (MIDI note), or 0–15 tone on the noise channel |
-| len | length in frames — 60 to the second at the default tick rate |
-| tie | don't re-attack the next note: the envelope carries on and only the pitch changes |
-| vol | 0–15 attack volume for this note, so a phrase can be shaped without touching the macro |
-
-Every note re-triggers the channel by default — that is what makes an arpeggio
-read as separate notes rather than one sliding tone. `tie` is the exception,
-and a **rest** is silence: it writes nothing at all, because the note before it
-already told the hardware length counter to expire exactly there.
-
-The layer's sliders shrink to what a sequence actually uses: **Punch**,
-**Decay**, **Sustain** and **Tone** shape every note. Pitch and length come from
-the notes themselves, and bend/jump/vibrato are single-tone controls that a
-sequence ignores.
-
-### Randomize, Mutate, Seed
-
-Effects are reproducible: **Randomize** re-derives the macro deterministically
-from the effect's **Seed** (same seed = same sound), while **Mutate** nudges
-the current values without touching the seed. Set the seed by hand to revisit
-a variant. Both leave a sequence's notes alone — an authored phrase is not
-something to re-roll — and only change its timbre.
-
-### Advanced drawer
+## Advanced drawer
 
 Extra macros: **Sustain** (hold level before decay), **Bend amt**, **Jump** /
 **Jump at** (a discrete pitch jump of ±24 semitones at a point in the effect —
 the classic coin "bling"), **Vib rate** / **Vib depth** (vibrato), and the
-effect's **Tick rate** (15–120 Hz). It also shows the per-frame **register
-inspector** (NRx0–NRx4 values) and **Edit frames by hand**, which converts the
-layer to manual mode for direct per-frame editing (**Back to macro** discards
-the hand edits).
+**Tick rate** (15–120 Hz). It also shows the per-frame **register inspector**
+(NRx0–NRx4 values) and **Edit frames by hand**, which converts the layer to
+manual mode: drag on the top half of the visualization to draw pitch, the
+bottom half to draw volume (**Back to macro** discards the hand edits).
+
+## Opening a chime here
+
+A file with a sequence layer loads, plays and exports normally; its layer is
+shown read-only with a link to the sequencer, because notes are edited there.
+Any single-tone layers in the same file stay fully editable here — so a chime's
+noise underlay can be tuned in this tool without the melody going anywhere.
 
 ## Export / Import
 
-- **Download .gbsfx.json** — the whole bank (`formatVersion 1`).
-- **Download .wav (selected)** — an offline render of the selected effect
-  using the same scheduler as the preview.
-- **Show gbsfx.c / .h** — GBDK-2020 C export. Each effect compiles to a
-  compact byte program for a tiny VM: a note is triggered with the hardware
-  volume envelope and length counter set from the macro (so decays run on real
+- **Download .gbsfx.json** — the sound you are working on, one sound per file
+  (`formatVersion 1`). This is the editable source of truth.
+- **Download .wav** — an offline render using the same scheduler as the
+  preview.
+- **Show gbsfx.c / .h** — GBDK-2020 C export. The sound compiles to a compact
+  byte program for a tiny VM: a note is triggered with the hardware volume
+  envelope and length counter set from the macro (so decays run on real
   hardware), and frames inside it rewrite only pitch — no re-trigger, so no
   60 Hz buzz. Frames where nothing audible changed are not written at all and
   collapse into a hold opcode, which is what keeps a one- or two-second chime
   to tens of bytes rather than seven a frame. Runtime API: `gbsfx_init()` once,
   `gbsfx_play(id)` to fire an effect, `gbsfx_update()` once per frame — and
-  from inside any loop that blocks for a while (a screen fade), or a sequence
+  from inside any loop that blocks for a while (a screen fade), or a sound
   freezes mid-note until the loop returns.
-- **Import .gbsfx.json** — load a file or pasted JSON.
+- **Import .gbsfx.json** — load a file or pasted JSON. An older bank file
+  holding several sounds loads its first one and says so.
 
 ## Hardware notes
 

@@ -1,5 +1,5 @@
 const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./gb-tile-reducer-wE8D0yFZ.js","./common-68Tf6uEl.js"])))=>i.map(i=>d[i]);
-import{m as a,L as e,_ as n}from"./theme-DCgAGtXn.js";a(e,{target:document.body,props:{beforeMenu:`<span class="brand">GB&nbsp;Tile&nbsp;Reducer <span class="sub">v1</span></span>
+import{m as a,L as e,_ as n}from"./theme-CNUsdib9.js";a(e,{target:document.body,props:{beforeMenu:`<span class="brand">GB&nbsp;Tile&nbsp;Reducer <span class="sub">v1</span></span>
     <span class="target-tag">DMG-safe &middot; no flips</span>
     <div class="spacer"></div>`,afterMenu:`<button id="btn-load">Load PNG</button>
     <button class="primary" id="btn-download" disabled>Download reduced PNG</button>

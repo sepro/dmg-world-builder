@@ -1,6 +1,6 @@
 # GB Tools
 
-Six browser-based Game Boy authoring tools built as a multi-page Svelte 5
+Eight browser-based Game Boy authoring tools built as a multi-page Svelte 5
 application with Vite. The source project lives in this repository; `docs/` is
 the checked-in static production build used by GitHub Pages. Nothing is uploaded
 anywhere and project data is saved and loaded through explicit Export/Import. A
@@ -76,16 +76,29 @@ and Standard MIDI. See the [Music Generator guide](markdown/MUSIC_GENERATOR.md).
 
 ### SFX Generator
 
-A sfxr-style sound-effect designer for the four GB channels. Start from a preset
-(coin, laser, jump, explosion, hit, power-up, blip), refine with a handful of
-semantic sliders (length, pitch, bend, punch, decay, tone), and stack layers
-across channels. Effects are reproducible from a seed, and one compiled per-frame
-program drives the preview, the WAV render, and the export alike. Exports a
-`.gbsfx.json` bank, a WAV, or GBDK-2020 C with a tiny frame-stepped player
-(`gbsfx_init` / `gbsfx_play` / `gbsfx_update`). See the
+A sfxr-style designer for **single-tone** effects on the four GB channels. Start
+from a preset (coin, laser, jump, explosion, hit, power-up, blip), refine with a
+handful of semantic sliders (length, pitch, bend, punch, decay, tone), and stack
+layers across channels. Sounds are reproducible from a seed, every edit is
+undoable, and one compiled per-frame program drives the preview, the WAV render,
+and the export alike. Exports `.gbsfx.json`, a WAV, or GBDK-2020 C with a tiny
+frame-stepped player (`gbsfx_init` / `gbsfx_play` / `gbsfx_update`). See the
 [SFX Generator guide](markdown/SFX_GENERATOR.md).
 
 ![SFX Generator](docs/screenshots/sfx-generator.png)
+
+### SFX Sequencer
+
+The chime tool: a victory fanfare, a fail sting or a UI confirm is a run of
+notes rather than one tone. Six **archetypes** (Victory, Sad, UI, Item get,
+Level up, Alert) each describe a shape — chord, contour, pacing, timbre — and
+generate a chime from a seed, so you can re-roll until one lands and reproduce
+it later from that number. The draw is then an ordinary sequence, edited on a
+piano roll and note table that share one model, with a volume strip you can drag.
+Same file format and same export path as the generator. See the
+[SFX Sequencer guide](markdown/SFX_SEQUENCER.md).
+
+![SFX Sequencer](docs/screenshots/sfx-sequencer.png)
 
 ### Pixelizer
 
@@ -121,9 +134,11 @@ because they all speak the same 4-shade, 8×8-tile language:
   four values, so each hop is lossless.
 - **World → ROM.** The **World Editor** exports a `.gbworld.json`, and the
   `tools/` scripts turn it into GBDK-2020 C or a stitched preview PNG.
-- **Audio.** The **Music** and **SFX** generators export MIDI / WAV for previewing
-  and GBDK-2020 C (SFX) for the ROM. Music files store only settings + seed, so a
-  tune regenerates identically on import.
+- **Audio.** The **Music** generator exports MIDI / WAV for previewing; the two
+  **SFX** tools export WAV and GBDK-2020 C for the ROM. Music files store only
+  settings + seed, so a tune regenerates identically on import. The SFX
+  generator and sequencer share one `.gbsfx.json` format and one compiler: a
+  sound moves between them, each editing the kind of layer it owns.
 
 ## Shared design constraints
 
@@ -145,7 +160,7 @@ lossless:
 Each tool has an end-user guide in [`markdown/`](markdown/):
 
 - [World Editor](markdown/WORLD_EDITOR.md) · [Sprite Editor](markdown/SPRITE_EDITOR.md)
-- [Music Generator](markdown/MUSIC_GENERATOR.md) · [SFX Generator](markdown/SFX_GENERATOR.md)
+- [Music Generator](markdown/MUSIC_GENERATOR.md) · [SFX Generator](markdown/SFX_GENERATOR.md) · [SFX Sequencer](markdown/SFX_SEQUENCER.md)
 - [Pixelizer](markdown/PIXELIZER.md) · [Tile Reducer](markdown/TILE_REDUCER.md) · [Boss Arena Editor](markdown/ARENA_EDITOR.md)
 - [Developer handoff](markdown/DEVELOPER_HANDOFF.md) — `.gbworld.json` schema, the
   generated C structures, and GBDK-2020 runtime integration.

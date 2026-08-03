@@ -1,5 +1,5 @@
 const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./gb-music-generator-Bc1XJvST.js","./common-68Tf6uEl.js"])))=>i.map(i=>d[i]);
-import{m as t,L as n,_ as e}from"./theme-DCgAGtXn.js";t(n,{target:document.body,props:{beforeMenu:`<span class="brand">GB&nbsp;Music&nbsp;Generator <span class="sub">v1</span></span>
+import{m as t,L as n,_ as e}from"./theme-CNUsdib9.js";t(n,{target:document.body,props:{beforeMenu:`<span class="brand">GB&nbsp;Music&nbsp;Generator <span class="sub">v1</span></span>
     <div class="field" style="flex-direction:row;align-items:center;gap:6px;">
       <label style="margin:0;">Tune</label>
       <input type="text" id="tune-name" style="width:180px;">

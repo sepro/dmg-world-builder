@@ -19,6 +19,7 @@ export const toolGroups = [
     tools: [
       { name: "Music \u266a", href: "gb-music-generator.html" },
       { name: "SFX \u266a", href: "gb-sfx-generator.html" },
+      { name: "SFX-Seq \u266a", href: "gb-sfx-sequencer.html" },
     ],
   },
 ];

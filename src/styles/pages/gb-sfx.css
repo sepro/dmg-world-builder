@@ -1,4 +1,5 @@
-/* SFX-generator-specific styling. Shared tokens/components live in gb-theme.css. */
+/* Styling for both sound tools (SFX generator and SFX sequencer).
+   Shared tokens/components live in the theme stylesheet. */
 
   .layout { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
   .col-left  { flex: 0 0 300px; min-width: 280px; }
@@ -10,16 +11,25 @@
   .preset-btn small { display: block; color: var(--muted); font-size: 9px; margin-top: 2px; text-transform: uppercase; }
   .preset-btn:hover small { color: var(--accent); }
 
-  /* library list */
-  .lib-list { display: flex; flex-direction: column; gap: 4px; }
-  .lib-item {
-    display: flex; align-items: center; gap: 8px;
+  /* a card whose whole point is the link across to the other sound tool */
+  .btn-link {
+    display: inline-block; margin-top: 4px; padding: 6px 10px;
     border: 1px solid var(--border); background: var(--panel-2);
-    padding: 6px 8px; cursor: pointer;
+    color: var(--accent); text-decoration: none; font-size: 11px;
+    letter-spacing: 0.06em; text-transform: uppercase;
   }
-  .lib-item.active { border-color: var(--accent); }
-  .lib-item .lib-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .lib-item .lib-chan { color: var(--muted); font-size: 10px; text-transform: uppercase; }
+  .btn-link:hover { border-color: var(--accent); }
+
+  /* "this layer belongs to the other tool" notice on a read-only layer card */
+  .cross-note {
+    border: 1px dashed var(--line); background: var(--panel-2);
+    padding: 8px 10px; font-size: 11px; color: var(--muted); line-height: 1.5;
+  }
+  .cross-note a { color: var(--accent); white-space: nowrap; }
+
+  /* which archetype a generated chime came from, and the re-roll beside it */
+  .chime-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+  .chime-row select { flex: 1 1 120px; }
 
   /* transport */
   .transport { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -49,8 +59,8 @@
   .seq-wrap { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
   .seq-wrap > div { flex: 1 1 220px; min-width: 200px; }
   .seq-roll { border: 1px solid var(--border); background: var(--gb-3); }
-  .seq-roll canvas { display: block; width: 100%; height: 200px; touch-action: none; }
-  .seq-table-wrap { max-height: 260px; overflow: auto; }
+  .seq-roll canvas { display: block; width: 100%; height: 234px; touch-action: none; }
+  .seq-table-wrap { max-height: 294px; overflow: auto; }
   .seq-table { width: 100%; border-collapse: collapse; font-size: 11px; }
   .seq-table th, .seq-table td { border: 1px solid var(--line); padding: 2px 4px; text-align: center; }
   .seq-table th { color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; font-size: 9px; }

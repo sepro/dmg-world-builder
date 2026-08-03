@@ -29,7 +29,7 @@ the parent with `npm --prefix editor <command>`.
 
 ## Architecture
 
-Vite has seven HTML inputs at the repository root, one for the landing page and
+Vite has nine HTML inputs at the repository root, one for the landing page and
 one for each historical tool URL. Each input mounts `LegacyToolPage.svelte`,
 which owns the common page shell and initializes its tool engine after the DOM is
 ready. `ToolHeader.svelte` and `ToolMenu.svelte` are shared by every page, and
