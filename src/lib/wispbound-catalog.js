@@ -31,6 +31,8 @@ export const KNOWN_ITEMS = [
   { value: "red_ore", label: "red_ore — RED ORE (ore)" },
   { value: "sturdy_shield", label: "sturdy_shield — STURDY SHIELD (combat)" },
   { value: "magic_sword", label: "magic_sword — MAGIC SWORD (combat)" },
+  { value: "healing_herb", label: "healing_herb — HEALING HERB (consumable)" },
+  { value: "healing_tonic", label: "healing_tonic — HEALING TONIC (consumable)" },
 ];
 
 export const KNOWN_NPC_SPRITES = [
