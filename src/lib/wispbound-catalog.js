@@ -39,6 +39,7 @@ export const KNOWN_NPC_SPRITES = [
   { value: "Innkeeper", label: "Innkeeper — talkable, offers a scene" },
   { value: "Blacksmith", label: "Blacksmith — talkable, imbue service" },
   { value: "Mystic", label: "Mystic — talkable" },
+  { value: "Cook", label: "Cook — talkable" },
   { value: "torch", label: "torch — scenery" },
   { value: "box", label: "box — object, pushed by walking into it" },
   { value: "ice_block", label: "ice_block — object, shattered with the icebreaker pick" },
