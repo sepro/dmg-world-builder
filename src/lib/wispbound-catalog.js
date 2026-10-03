@@ -55,5 +55,8 @@ export const KNOWN_NPC_SPRITES = [
   { value: "viking_sentinel", label: "viking_sentinel — blocks its tile, cannot be talked to" },
   { value: "Captain_Return", label: "Captain_Return — talkable, sail offer" },
   { value: "Mystic_Tomb", label: "Mystic_Tomb — talkable" },
+  { value: "Tomb_Door_L", label: "Tomb_Door_L — blocks its tile, cannot be talked to" },
+  { value: "Tomb_Door_R", label: "Tomb_Door_R — blocks its tile, cannot be talked to" },
+  { value: "Tomb_Evil", label: "Tomb_Evil — boss encounter" },
   { value: "mock_walker", label: "mock_walker — talkable" },
 ];
