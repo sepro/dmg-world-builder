@@ -501,3 +501,48 @@ test("boss arena tile selection is immediate and PNG import reconstructs art til
   await expect(page.locator(".arena-tile")).not.toHaveCount(0);
   await expect(editor).toBeVisible();
 });
+
+test("world editor authors a map's ambient particles", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto("/gb-world-editor.html");
+  await page.locator('.tab[data-panel="maps"]').click();
+  const ambient = page.locator("select.map-ambient");
+  await expect(ambient).toHaveValue("none");
+  await ambient.selectOption("leaves");
+
+  await page.locator("#btn-export").click();
+  const json = JSON.parse(await page.locator(".modal textarea").inputValue());
+  expect(json.maps[0].ambient).toBe("leaves");
+  expect(errors).toEqual([]);
+});
+
+test("world editor keeps every line of a sign's text", async ({ page }) => {
+  await page.goto("/gb-world-editor.html");
+  await page.locator('.tab[data-panel="maps"]').click();
+  await page.getByRole("button", { name: "Events", exact: true }).click();
+  await page.getByRole("button", { name: "Sign", exact: true }).click();
+  await page.locator("canvas.map-canvas").click({ position: { x: 100, y: 100 } });
+  await page.locator("textarea.sign-text").fill("< Dark forest\n> Basalt plateau");
+
+  await page.locator("#btn-export").click();
+  const json = JSON.parse(await page.locator(".modal textarea").inputValue());
+  const sign = json.maps[0].events.find((e) => e.type === "sign");
+  expect(sign.text).toBe("< Dark forest\n> Basalt plateau");
+});
+
+test("world editor resizes a map from its properties", async ({ page }) => {
+  page.on("dialog", (d) => d.accept());
+  await page.goto("/gb-world-editor.html");
+  await page.locator('.tab[data-panel="maps"]').click();
+  const sizeField = (name) => page.locator(".field")
+    .filter({ has: page.locator(`label:text-is("${name}")`) }).locator("input");
+  await sizeField("Width (blocks)").fill("10");
+  await sizeField("Height (blocks)").fill("14");
+  await page.getByRole("button", { name: "Resize", exact: true }).click();
+
+  await page.locator("#btn-export").click();
+  const json = JSON.parse(await page.locator(".modal textarea").inputValue());
+  expect([json.maps[0].width, json.maps[0].height]).toEqual([10, 14]);
+  expect(json.maps[0].blockGrid).toHaveLength(140);
+});

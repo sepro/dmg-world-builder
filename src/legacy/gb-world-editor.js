@@ -142,6 +142,20 @@ const WARP_FACINGS = ["same", "up", "down", "left", "right"];
 // the plain warp that fires the moment it is stepped on. The question is
 // built through the same runtime buffer as sign text, so it shares its limits.
 const WARP_PROMPT_DEFAULTS = [{ value: "no", label: "NO" }, { value: "yes", label: "YES" }];
+// Ambient particles a map plays while the player is on it: drifting OBJ
+// sprites (and whatever animated tiles the tileset carries for the same
+// mood). "none" is the default and what a map without the field means. The
+// engine draws them in whatever sprite entries NPCs leave free; snow and hail
+// keep the footprint trail, the other kinds take its entries, so a map with
+// leaves, ash or mist lays no snow prints.
+const MAP_AMBIENTS = [
+  { value: "none", label: "None" },
+  { value: "leaves", label: "Falling leaves" },
+  { value: "ash", label: "Falling ash" },
+  { value: "snow", label: "Light snow" },
+  { value: "hail", label: "Heavy hail" },
+  { value: "mist", label: "Drifting mist" },
+];
 const SIGN_MAX_LINES = 6;
 const SIGN_MAX_CHARS = 18;
 // How an item pickup is presented and taken. A visible item draws its sprite
@@ -545,6 +559,7 @@ function createMap(name, tilesetId, width, height) {
     blockGrid: new Array(width * height).fill(null), // row-major, null = empty
     connections: { north: null, south: null, east: null, west: null }, // {mapId, offset}
     borderBlock: null,   // block id drawn past unconnected edges; null = repeat edge metatiles
+    ambient: "none",     // MAP_AMBIENTS: particles drifting over the map
     events: [],                                       // authored in a later pass
   };
 }
@@ -2909,7 +2924,30 @@ function renderEventInspector(map) {
       card.appendChild(spacer(8));
     }
   } else if (ev.type === "sign") {
-    addText("Sign text", "text");
+    // A textarea, not a one-line input: sign text is up to SIGN_MAX_LINES
+    // rows, separated by "\n", and an <input> silently drops newlines.
+    const f = el("div", "field");
+    f.appendChild(label("Sign text (one line per textbox row)"));
+    const ta = document.createElement("textarea");
+    ta.className = "sign-text";
+    ta.value = ev.text || "";
+    ta.rows = SIGN_MAX_LINES;
+    ta.style.width = "220px";
+    const warn = el("p", "hint", "");
+    const check = () => {
+      const lines = ta.value.split("\n");
+      const long = lines.some(l => l.length > SIGN_MAX_CHARS);
+      warn.textContent = lines.length > SIGN_MAX_LINES || long
+        ? "Signs show at most " + SIGN_MAX_LINES + " lines of " + SIGN_MAX_CHARS +
+          " characters; the engine cuts off the rest."
+        : "";
+    };
+    ta.addEventListener("input", () => { ev.text = ta.value; check(); });
+    check();
+    f.appendChild(ta);
+    card.appendChild(f);
+    card.appendChild(warn);
+    card.appendChild(spacer(8));
   } else if (ev.type === "item") {
     addCatalog("Item", "item", KNOWN_ITEMS, "— pick an item —");
     addNumber("Quantity", "qty", 1, 99);
@@ -3362,15 +3400,38 @@ function renderMapProperties(map) {
   bbField.appendChild(bbSelect);
   card.appendChild(bbField);
 
+  // Ambient particles (falling leaves, ash) drawn over the map.
+  card.appendChild(spacer(10));
+  const ambField = el("div", "field");
+  ambField.appendChild(label("Ambient"));
+  const ambSelect = document.createElement("select");
+  ambSelect.className = "map-ambient";
+  MAP_AMBIENTS.forEach(a => {
+    const opt = document.createElement("option");
+    opt.value = a.value; opt.textContent = a.label;
+    if (a.value === (map.ambient || "none")) opt.selected = true;
+    ambSelect.appendChild(opt);
+  });
+  ambSelect.addEventListener("change", () => {
+    snapshot();
+    map.ambient = ambSelect.value;
+  });
+  ambField.appendChild(ambSelect);
+  card.appendChild(ambField);
+  card.appendChild(el("p", "hint",
+    "Particles drift over the whole map, in the sprites NPCs leave free. Snow and hail keep the footprint trail; leaves, ash and mist use its sprites, so those maps leave no prints."));
+
   // Size in blocks.
   card.appendChild(spacer(10));
   const sizeRow = el("div", "row");
   const wField = el("div", "field");
   wField.appendChild(label("Width (blocks)"));
   const wInput = numberInput(map.width, 1, 256);
+  wField.appendChild(wInput);
   const hField = el("div", "field");
   hField.appendChild(label("Height (blocks)"));
   const hInput = numberInput(map.height, 1, 256);
+  hField.appendChild(hInput);
   const applyBtn = el("button", null, "Resize");
   applyBtn.addEventListener("click", () => {
     const w = clampInt(wInput.value, 1, 256), h = clampInt(hInput.value, 1, 256);
@@ -3779,6 +3840,8 @@ function loadProjectFrom(text) {
   });
   parsed.maps.forEach(m => {
     if (m.borderBlock === undefined) m.borderBlock = null;
+    // Older files predate ambient particles; keep any unknown value out.
+    if (m.ambient !== undefined && !MAP_AMBIENTS.some(a => a.value === m.ambient)) m.ambient = "none";
     // Older files predate warp types and post-warp facing.
     (m.events || []).forEach(e => {
       if (e.type === "warp") {
