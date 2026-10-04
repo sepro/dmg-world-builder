@@ -298,7 +298,7 @@ typedef struct {
 typedef struct {
     UINT8 width, height;       // in blocks
     UINT8 tileset;             // index into world_tilesets
-    const UINT8 *blocks;       // width*height block indices, 0xFF = empty
+    const UINT16 *blocks;      // width*height block indices, 0xFFFF = empty
     INT8  conn[4];             // neighbor map index per DIR_*, -1 if none
     INT16 conn_off[4];         // connection offset (blocks)
     UINT8 border_block;        // block drawn past unconnected edges, 0xFF = repeat edge
