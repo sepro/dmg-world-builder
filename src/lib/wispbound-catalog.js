@@ -71,4 +71,9 @@ export const KNOWN_NPC_SPRITES = [
   { value: "ashwing_guard", label: "ashwing_guard — boss encounter" },
   { value: "Mine_Gate", label: "Mine_Gate — talkable" },
   { value: "Rubble", label: "Rubble — object, shattered with the icebreaker pick" },
+  { value: "Hunter", label: "Hunter — talkable" },
+  { value: "carrion_chorus_guard", label: "carrion_chorus_guard — boss encounter" },
+  { value: "web_matron_guard", label: "web_matron_guard — boss encounter" },
+  { value: "Bramble", label: "Bramble — object, shattered with the icebreaker pick" },
+  { value: "fen_log", label: "fen_log — object, pushed by walking into it" },
 ];
