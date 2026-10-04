@@ -64,4 +64,11 @@ export const KNOWN_NPC_SPRITES = [
   { value: "Hall_Door_Boarded", label: "Hall_Door_Boarded — talkable" },
   { value: "Tomb_Evil", label: "Tomb_Evil — boss encounter" },
   { value: "mock_walker", label: "mock_walker — talkable" },
+  { value: "Prospector", label: "Prospector — talkable" },
+  { value: "cinder_hound", label: "cinder_hound — boss encounter" },
+  { value: "ashwing", label: "ashwing — boss encounter" },
+  { value: "cinder_hound_guard", label: "cinder_hound_guard — boss encounter" },
+  { value: "ashwing_guard", label: "ashwing_guard — boss encounter" },
+  { value: "Mine_Gate", label: "Mine_Gate — talkable" },
+  { value: "Rubble", label: "Rubble — object, shattered with the icebreaker pick" },
 ];
