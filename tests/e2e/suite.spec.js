@@ -531,6 +531,46 @@ test("world editor keeps every line of a sign's text", async ({ page }) => {
   expect(sign.text).toBe("< Dark forest\n> Basalt plateau");
 });
 
+test("world editor sweeps out an ambush zone and exports its fields", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto("/gb-world-editor.html");
+  await page.locator('.tab[data-panel="maps"]').click();
+  await page.getByRole("button", { name: "Events", exact: true }).click();
+  await page.getByRole("button", { name: "Ambush", exact: true }).click();
+  // A drag sweeps the zone, as for a dialog zone.
+  const canvas = page.locator("canvas.map-canvas");
+  const box = await canvas.boundingBox();
+  await page.mouse.move(box.x + 20, box.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 140, box.y + 20, { steps: 6 });
+  await page.mouse.up();
+
+  const inspector = page.locator(".card").filter({
+    has: page.getByRole("heading", { name: "Ambush event" }),
+  }).last();
+  await expect(inspector).toBeVisible();
+  await inspector.locator(".field", { hasText: "Creature" }).locator("select")
+    .selectOption("frostcrab");
+  const chance = inspector.locator(".field", { hasText: "Chance" }).locator("input");
+  await expect(chance).toHaveValue("50");
+  await chance.fill("75");
+  await chance.dispatchEvent("change");
+  await inspector.locator(".field", { hasText: "Comes from" }).locator("select")
+    .selectOption("left");
+  await expect(page.getByText(/frostcrab, 75%, from left/)).toBeVisible();
+
+  await page.locator("#btn-export").click();
+  const json = JSON.parse(await page.locator(".modal textarea").inputValue());
+  const ambush = json.maps[0].events.find((e) => e.type === "ambush");
+  expect(ambush.sprite).toBe("frostcrab");
+  expect(ambush.chance).toBe(75);
+  expect(ambush.from).toBe("left");
+  expect(ambush.w).toBeGreaterThan(1);
+  expect(ambush.h).toBe(1);
+  expect(errors).toEqual([]);
+});
+
 test("world editor resizes a map from its properties", async ({ page }) => {
   page.on("dialog", (d) => d.accept());
   await page.goto("/gb-world-editor.html");

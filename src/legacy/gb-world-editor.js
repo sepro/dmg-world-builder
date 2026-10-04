@@ -108,8 +108,20 @@ const EVENT_TYPES = {
   npc:     { label: "NPC",     letter: "N", color: "#e06ad6" },
   trigger: { label: "Trigger", letter: "T", color: "#e0563f" },
   dialog:  { label: "Dialog",  letter: "D", color: "#b9a0ff" },
+  ambush:  { label: "Ambush",  letter: "A", color: "#ff5c8a" },
 };
-const EVENT_ORDER = ["spawn", "warp", "sign", "item", "npc", "trigger", "dialog"];
+const EVENT_ORDER = ["spawn", "warp", "sign", "item", "npc", "trigger", "dialog", "ambush"];
+// An ambush is a rectangle of hidden trigger cells. Each run, the engine arms
+// it or not (a hash of the run's seed against `chance`, 0-100); an armed one
+// springs the first time the player steps into it -- a "!" over their head,
+// the creature (an npc_registry name: its overworld sprite and its fight)
+// appearing on the tile beside them on the `from` side -- and is then spent
+// until the run ends. Ambush fights can be fled. The JSON contract is
+// tools/world_builder/gbworld_to_c.py's: a zone side is 1..16 cells, and the
+// save's spent mask holds 16 ambushes in the whole world.
+const AMBUSH_SIDES = ["up", "down", "left", "right"];
+const AMBUSH_MAX_SIDE = 16;
+const AMBUSH_SLOTS = 16;
 // The in-game dialog box shows 2 rows of 18 characters.
 const DIALOG_MAX_CHARS = 18;
 // How an NPC moves. "static" holds its tile (facing is authored separately).
@@ -194,12 +206,18 @@ function makeEvent(type, x, y) {
   else if (type === "npc") { e.sprite = ""; e.movement = "static"; e.facing = "player"; e.offsetX = 0; e.offsetY = 0; e.path = []; e.script = ""; }
   else if (type === "trigger") { e.script = ""; }
   else if (type === "dialog") { e.w = 1; e.h = 1; e.text = ""; }
+  else if (type === "ambush") { e.w = 1; e.h = 1; e.sprite = ""; e.chance = 50; e.from = "up"; }
   return e;
 }
 
-// Dialog zones cover a w×h rectangle of cells; every other event is one cell.
+// Zone events -- dialog zones and ambushes -- cover a w×h rectangle of cells
+// (x,y is the top-left); every other event is one cell.
+function isZoneEvent(e) {
+  return e.type === "dialog" || e.type === "ambush";
+}
+
 function eventContains(e, x, y) {
-  if (e.type === "dialog")
+  if (isZoneEvent(e))
     return x >= e.x && x < e.x + (e.w || 1) && y >= e.y && y < e.y + (e.h || 1);
   return e.x === x && e.y === y;
 }
@@ -2073,7 +2091,7 @@ function renderMapsPanel(root) {
           // repaint every cell of any zone the animation touched.
           if (state.mapMode === "events" && repainted.size > 0) {
             map.events.forEach(e => {
-              if (e.type !== "dialog" || !eventTouchesBlockCells(e, map, repainted)) return;
+              if (!isZoneEvent(e) || !eventTouchesBlockCells(e, map, repainted)) return;
               eventBlockCells(e, map).forEach(i => {
                 if (repainted.has(i)) return;
                 paintCell(i % map.width, Math.floor(i / map.width));
@@ -2314,7 +2332,7 @@ function renderMapsPanel(root) {
       e.id = genId();
       map.events.push(e);
       state.selectedEventId = e.id;
-      if (state.eventTool === "dialog") {
+      if (isZoneEvent(e)) {
         // Defer the full render to pointerup so the drag can keep sizing the
         // zone against this canvas; repaint in place meanwhile.
         dragEvent = e;
@@ -2334,6 +2352,10 @@ function renderMapsPanel(root) {
       dragEvent.y = Math.min(dragAnchor.y, pos.y);
       dragEvent.w = Math.abs(pos.x - dragAnchor.x) + 1;
       dragEvent.h = Math.abs(pos.y - dragAnchor.y) + 1;
+      if (dragEvent.type === "ambush") {
+        dragEvent.w = Math.min(dragEvent.w, AMBUSH_MAX_SIDE);
+        dragEvent.h = Math.min(dragEvent.h, AMBUSH_MAX_SIDE);
+      }
       repaintAll();
       drawEventMarkers(ctx, map, z);
     });
@@ -2397,9 +2419,11 @@ function renderMapsPanel(root) {
       "the same effect."));
   } else {
     main.appendChild(spacer(12));
-    main.appendChild(el("p", "hint", state.eventTool === "dialog"
-      ? "Drag across the map to sweep out a dialog zone (click = one cell), or " +
-        "click a marker to select it. Set the zone's text in the inspector."
+    main.appendChild(el("p", "hint", state.eventTool === "dialog" || state.eventTool === "ambush"
+      ? "Drag across the map to sweep out " + (state.eventTool === "dialog"
+          ? "a dialog zone" : "an ambush zone (up to " + AMBUSH_MAX_SIDE + " cells a side)") +
+        " (click = one cell), or click a marker to select it. Set the zone's " +
+        (state.eventTool === "dialog" ? "text" : "creature and chance") + " in the inspector."
       : "Click an empty cell to drop a " + EVENT_TYPES[state.eventTool].label.toLowerCase() +
         ", or click a marker to select it."));
     if (state.showWarpTargets) {
@@ -2427,8 +2451,8 @@ function renderMapsPanel(root) {
 function eventBlockCells(e, map) {
   const cells = [];
   const x1 = Math.floor(e.x / 2), y1 = Math.floor(e.y / 2);
-  const x2 = e.type === "dialog" ? Math.floor((e.x + (e.w || 1) - 1) / 2) : x1;
-  const y2 = e.type === "dialog" ? Math.floor((e.y + (e.h || 1) - 1) / 2) : y1;
+  const x2 = isZoneEvent(e) ? Math.floor((e.x + (e.w || 1) - 1) / 2) : x1;
+  const y2 = isZoneEvent(e) ? Math.floor((e.y + (e.h || 1) - 1) / 2) : y1;
   for (let y = y1; y <= y2; y++)
     for (let x = x1; x <= x2; x++) cells.push(y * map.width + x);
   return cells;
@@ -2514,8 +2538,8 @@ function drawEventMarkers(ctx, map, z, onlyBlockCells) {
     const px = e.x * cell, py = e.y * cell;
     const selected = e.id === state.selectedEventId;
 
-    if (e.type === "dialog") {
-      // A dialog zone is a translucent rectangle over its whole w×h area,
+    if (isZoneEvent(e)) {
+      // A zone is a translucent rectangle over its whole w×h area,
       // with the type letter in its first cell.
       const w = (e.w || 1) * cell, h = (e.h || 1) * cell;
       ctx.globalAlpha = 0.30;
@@ -3053,6 +3077,47 @@ function renderEventInspector(map) {
     };
     addLine("Line 1 (max " + DIALOG_MAX_CHARS + " chars)", 0);
     addLine("Line 2 (max " + DIALOG_MAX_CHARS + " chars)", 1);
+  } else if (ev.type === "ambush") {
+    const sizeRow = el("div", "row");
+    const mkSize = (lbl, key) => {
+      const f = el("div", "field");
+      f.appendChild(label(lbl));
+      const max = Math.min(AMBUSH_MAX_SIDE, (key === "w" ? map.width : map.height) * 2);
+      const i = numberInput(ev[key] || 1, 1, max);
+      i.addEventListener("change", () => { snapshot(); ev[key] = clampInt(i.value, 1, max); render(); });
+      f.appendChild(i);
+      return f;
+    };
+    sizeRow.append(mkSize("Width (cells)", "w"), mkSize("Height (cells)", "h"));
+    card.appendChild(sizeRow);
+    card.appendChild(el("p", "hint",
+      "Every cell of the zone is a trigger. Lay it across the path (a strip one cell " +
+      "deep is usual) so walking through crosses it. Up to " + AMBUSH_MAX_SIDE + " cells a side."));
+    card.appendChild(spacer(8));
+    // Only rows that start a fight make sense here: the ambush fights the
+    // row's boss. "Other…" still accepts any name, as everywhere else.
+    addCatalog("Creature", "sprite",
+               KNOWN_NPC_SPRITES.filter(o => /boss encounter/.test(o.label)),
+               "— pick a creature —");
+    if (ev.chance === undefined) ev.chance = 50;
+    addNumber("Chance armed per run (%)", "chance", 0, 100);
+    const sf = el("div", "field");
+    sf.appendChild(label("Comes from"));
+    sf.appendChild(selectFrom(AMBUSH_SIDES, ev.from || "up",
+                              v => { snapshot(); ev.from = v; render(); }));
+    card.appendChild(sf);
+    card.appendChild(el("p", "hint",
+      "The creature appears on the tile beside the player on this side, " +
+      "and the player turns to face it."));
+    card.appendChild(spacer(8));
+    const total = state.project.maps.reduce(
+      (n, m) => n + (m.events || []).filter(e => e.type === "ambush").length, 0);
+    card.appendChild(el("p", "hint", total > AMBUSH_SLOTS
+      ? "The world has " + total + " ambushes; the save tracks " + AMBUSH_SLOTS +
+        ", so the converter will refuse to build it. Remove " + (total - AMBUSH_SLOTS) + "."
+      : "Armed per run from the run's seed, sprung at most once per run, and can be " +
+        "fled. " + total + " of " + AMBUSH_SLOTS + " ambushes used in this world."));
+    card.appendChild(spacer(8));
   }
 
   const delBtn = el("button", "danger", "Delete event");
@@ -3086,6 +3151,8 @@ function renderEventList(map) {
     }
     if (e.type === "npc") return e.sprite || "(no sprite)";
     if (e.type === "trigger") return e.script || "(no script)";
+    if (e.type === "ambush") return (e.w || 1) + "x" + (e.h || 1) + " " +
+      (e.sprite || "(no creature)") + ", " + (e.chance ?? 50) + "%, from " + (e.from || "up");
     if (e.type === "dialog") return (e.w || 1) + "x" + (e.h || 1) +
       (e.text ? ' "' + e.text.replace("\n", " / ").slice(0, 24) + '"' : " (no text)");
     return "";

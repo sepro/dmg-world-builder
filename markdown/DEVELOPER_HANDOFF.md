@@ -343,6 +343,7 @@ converter prints a warning counting them.
 | NPC | `MOVE_*` | `NPC_FACE_PLAYER` or `DIR_*` | sprite id | waypoint-path index or `NPC_PATH_NONE` |
 | TRIGGER | — | — | script id | — |
 | DIALOG | zone width | zone height | text (`\n` splits the lines) | — |
+| AMBUSH | `(w-1) \| (h-1)<<4` | chance (0–100) | creature (registry name) | global ordinal \| `DIR_*`<<8 |
 
 For NPCs, `movement: "sentinel"` emits `MOVE_SENTINEL`: the NPC remains on
 its cell and rotates clockwise once every two seconds. Its `facing` must be a compass

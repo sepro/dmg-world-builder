@@ -63,7 +63,7 @@ The editor's left rail switches between panels; the typical bottom-up workflow i
 4. **Blocks** — assemble 2×2 metatiles into 32×32 blocks.
 5. **Maps** — paint blocks onto maps, set edge connections between maps, pick a
    border block (drawn past unconnected edges), and place the events layer
-   (spawn points, warps, signs, items, NPCs, triggers, dialog zones). A warp
+   (spawn points, warps, signs, items, NPCs, triggers, dialog zones, ambushes). A warp
    has a type
    (`transport | door | stairs | fall` — how the engine presents the transition),
    a destination map/cell, and a facing after the warp
@@ -72,6 +72,15 @@ The editor's left rail switches between panels; the typical bottom-up workflow i
    sweep it out; click = one cell) and carries up to two 18-character lines of
    text — the engine slides the text up in a box while the player stands
    anywhere inside the zone and slides it away when they leave.
+   An **ambush** is a zone too (drag with the Ambush tool; at most 16 cells a
+   side) of hidden trigger cells. It names a **creature** (an NPC registry row
+   that starts a fight — the snapjaw, the frostcrab, …), a **chance** (0–100 %)
+   and the side it **comes from**. Each run the engine arms it or not from the
+   run's seed and the chance; an armed one springs the first time the player
+   steps into it — a "!" over their head, the creature appearing on the tile
+   beside them on that side — and is spent for the rest of the run. Ambush
+   fights can be fled. The whole world may hold at most 16 ambushes (the save
+   tracks one bit each); the inspector counts them.
    A third **Collision** mode paints movement rules directly on the map at
    metatile (16×16) resolution with the collision overlay always visible. Its
    toolbar holds four brush families: `walk`/`solid`, the four **Ledge**
