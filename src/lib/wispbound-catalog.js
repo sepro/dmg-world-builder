@@ -63,6 +63,7 @@ export const KNOWN_NPC_SPRITES = [
   { value: "Tomb_Door_R", label: "Tomb_Door_R — blocks its tile, cannot be talked to" },
   { value: "Hall_Door_Boarded", label: "Hall_Door_Boarded — talkable" },
   { value: "Tomb_Evil", label: "Tomb_Evil — boss encounter" },
+  { value: "Wisp", label: "Wisp — blocks its tile, cannot be talked to" },
   { value: "mock_walker", label: "mock_walker — talkable" },
   { value: "Prospector", label: "Prospector — talkable" },
   { value: "cinder_hound", label: "cinder_hound — boss encounter" },
